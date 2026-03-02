@@ -437,6 +437,26 @@ All defaults are used. Customers in `Customers/`, people in `People/`, meetings 
 
 Check `_agent-log/` in your vault root. Every write (auto-confirmed or gated) is logged with timestamp, tool name, path, and detail.
 
+### Why not use a generic Obsidian MCP server?
+
+There are solid general-purpose Obsidian MCP servers out there — they expose clean CRUD operations (read, write, search, list) and work well for basic vault interaction. OIL takes a different approach: it's a **domain-specific** server built for account-team workflows, and the trade-offs are measurable.
+
+We ran a benchmark suite (`npm run bench`) comparing OIL against a generic CRUD-style MCP interface operating on the same vault:
+
+| Dimension | Generic CRUD | OIL (Domain-Specific) | Why It Matters |
+|---|---|---|---|
+| **Schema overhead** | ~612 tokens/turn | ~1,036 tokens/turn (1.7×) | OIL's richer tool surface costs more context per turn |
+| **MCP round-trips** (4 workflows) | 20+ calls | 6 calls (3.3× fewer) | Composite tools collapse multi-step sequences into single calls |
+| **Search latency** (warm) | ~1.3 ms | ~0.01 ms (lexical), ~0.3 ms (fuzzy) | Pre-built graph index vs. per-call file walks |
+| **Cold start** | ~1.5 ms | ~14 ms | OIL builds its graph on startup — amortizes after 1 query |
+| **Search precision** | 0.60 | 1.00 (lexical) | Structured index avoids false positives |
+| **Search recall** | 0.77 | 0.43 (lexical) → 0.80 (graph-augmented) | Graph traversal recovers recall that pure search misses |
+| **Write safety** | Direct writes | Diff → confirm → execute → audit log | ~3 extra calls and ~100–200 tokens per gated write |
+
+The takeaway isn't that generic servers are bad — they're simpler, lighter on startup, and perfectly fine for personal vaults. The domain-specific approach pays off when workflows are repetitive and multi-step (customer context assembly, CRM prefetch, cross-entity resolution), because those extra schema tokens are recouped many times over in saved round-trips and more precise retrieval.
+
+The full benchmark suite lives in `bench/` — run `npm run bench` to reproduce.
+
 ### Can I undo agent writes?
 
 Gated writes require explicit confirmation before execution. For auto-confirmed writes (Agent Insights, Connect Hooks), check `_agent-log/` and use Obsidian's file recovery or git to roll back.
