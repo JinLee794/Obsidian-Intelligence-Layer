@@ -67,12 +67,21 @@ export interface TagCount {
 export interface OpportunityRef {
   name: string;
   guid?: string;
+  status?: string;
+  stage?: string;
+  owner?: string;
+  salesplay?: string;
+  last_validated?: string;
 }
 
 export interface MilestoneRef {
   name: string;
   id?: string;
   number?: string;
+  status?: string;
+  milestonedate?: string;
+  owner?: string;
+  opportunity?: string;
 }
 
 export interface TeamMember {
@@ -180,6 +189,8 @@ export interface SchemaConfig {
   templatesRoot: string;
   agentLog: string;
   connectHooksBackup: string;
+  opportunitiesSubdir: string;
+  milestonesSubdir: string;
 }
 
 export interface FrontmatterSchemaConfig {
@@ -264,12 +275,22 @@ export interface StaleEntry {
   ageDays: number;
 }
 
+/** A structural layout issue detected in the vault. */
+export interface StructuralIssue {
+  type: "flat-customer" | "misplaced-entity";
+  currentPath: string;
+  expectedPath: string;
+  customer: string;
+  detail: string;
+}
+
 /** Vault-level health summary. */
 export interface VaultHealthReport {
   totalCustomers: number;
   customers: CustomerFreshness[];
   orphanedMeetings: string[];
   rosterGaps: string[];
+  structuralIssues: StructuralIssue[];
 }
 
 /** Vault-side data for drift comparison against live CRM state. */

@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
-import { listFolder, noteExists } from "../vault.js";
+import { listFolder, noteExists, resolveCustomerPath } from "../vault.js";
 import { extractPrefetchIds, correlateEntities, buildDriftSnapshot } from "../correlate.js";
 import { checkVaultHealth, checkCustomerFreshness } from "../hygiene.js";
 import {
@@ -169,7 +169,7 @@ export function registerCompositeTools(
       const gatedItems: { customer: string; section: string; content: string; path: string }[] = [];
 
       for (const finding of findings) {
-        const path = `${config.schema.customersRoot}${finding.customer}.md`;
+        const path = await resolveCustomerPath(vaultPath, config, finding.customer);
 
         // Datestamp the content
         const stamped = `- ${dateStr} ${finding.content}`;

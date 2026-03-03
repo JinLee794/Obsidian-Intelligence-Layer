@@ -7,7 +7,7 @@ argument-hint: 'Provide the skill file path to audit, or describe the new skill 
 # Skill Authoring Best Practices
 
 ## Purpose
-Evaluate and improve agent skill files using principles from Anthropic's skill authoring guide. Use this skill to audit existing `.github/skills/*_SKILL.md` files, create new skills, or refine skill metadata for better discovery and token efficiency.
+Evaluate and improve agent skill files using principles from Anthropic's skill authoring guide. Use this skill to audit existing `.github/skills/*/SKILL.md` files, create new skills, or refine skill metadata for better discovery and token efficiency.
 
 ## When to Use
 - Creating a new SKILL.md from scratch.

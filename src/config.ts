@@ -18,6 +18,8 @@ const DEFAULTS: OilConfig = {
     templatesRoot: "Templates/",
     agentLog: "_agent-log/",
     connectHooksBackup: ".connect/hooks/hooks.md",
+    opportunitiesSubdir: "opportunities/",
+    milestonesSubdir: "milestones/",
   },
   frontmatterSchema: {
     customerField: "customer",
@@ -92,6 +94,8 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     templates_root: "templatesRoot",
     agent_log: "agentLog",
     connect_hooks_backup: "connectHooksBackup",
+    opportunities_subdir: "opportunitiesSubdir",
+    milestones_subdir: "milestonesSubdir",
     frontmatter_schema: "frontmatterSchema",
     customer_field: "customerField",
     tags_field: "tagsField",

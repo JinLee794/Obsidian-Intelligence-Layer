@@ -20,6 +20,11 @@ import {
   parseMilestones,
   parseTeam,
   listFolder,
+  resolveCustomerPath,
+  readOpportunityNotes,
+  readMilestoneNotes,
+  listCustomerNames,
+  customerNameFromPath,
 } from "./vault.js";
 
 // ─── VAULT-PREFETCH: ID Extraction ───────────────────────────────────────────
@@ -38,7 +43,7 @@ export async function extractPrefetchIds(
   const results: PrefetchIds[] = [];
 
   for (const customer of customerNames) {
-    const path = `${config.schema.customersRoot}${customer}.md`;
+    const path = await resolveCustomerPath(vaultPath, config, customer);
 
     let parsed = cache.getNote(path);
     if (!parsed) {
@@ -67,13 +72,9 @@ export async function extractPrefetchIds(
         ? parsed.frontmatter.accountid
         : undefined;
 
-    // Parse structured sections
-    const opps = parseOpportunities(
-      parsed.sections.get("Opportunities") ?? "",
-    );
-    const milestones = parseMilestones(
-      parsed.sections.get("Milestones") ?? "",
-    );
+    // Read entities — prefers sub-notes, falls back to section parsing
+    const opps = await readOpportunityNotes(vaultPath, config, customer);
+    const milestones = await readMilestoneNotes(vaultPath, config, customer);
     const team = parseTeam(parsed.sections.get("Team") ?? "");
 
     results.push({
@@ -205,8 +206,8 @@ async function matchEntity(
     }
 
     case "customer": {
-      // Direct customer file lookup
-      const customerFile = `${config.schema.customersRoot}${entity.name}.md`;
+      // Direct customer file lookup (supports nested and flat layouts)
+      const customerFile = await resolveCustomerPath(vaultPath, config, entity.name);
       const node = graph.getNode(customerFile);
       if (node) {
         matchedNotes.push({ path: customerFile, title: entity.name, tags: node.tags });
@@ -255,32 +256,23 @@ async function matchEntity(
     }
 
     case "opportunity": {
-      // Search customer files for opportunity name/GUID
-      const customerNotes = graph.getNotesByFolder(config.schema.customersRoot);
-      for (const ref of customerNotes) {
-        let parsed = cache.getNote(ref.path);
-        if (!parsed) {
-          try {
-            parsed = await readNote(vaultPath, ref.path);
-            cache.putNote(ref.path, parsed);
-          } catch {
-            continue;
-          }
-        }
-
-        const opps = parseOpportunities(
-          parsed.sections.get("Opportunities") ?? "",
-        );
+      // Search customer entity sub-notes and customer file sections for opportunity
+      const allCustomers = await listCustomerNames(vaultPath, config);
+      for (const custName of allCustomers) {
+        const opps = await readOpportunityNotes(vaultPath, config, custName);
         const found = opps.find(
           (o) =>
             o.name.toLowerCase().includes(nameLower) ||
             o.guid?.toLowerCase() === nameLower,
         );
         if (found) {
-          matchedNotes.push(ref);
-          customerAssociations.add(
-            ref.title || ref.path.replace(/^Customers\//, "").replace(/\.md$/, ""),
-          );
+          const custPath = await resolveCustomerPath(vaultPath, config, custName);
+          matchedNotes.push({
+            path: custPath,
+            title: custName,
+            tags: [],
+          });
+          customerAssociations.add(custName);
           confidence = found.guid ? "exact" : "fuzzy";
         }
       }
@@ -323,7 +315,7 @@ export async function buildDriftSnapshot(
   cache: SessionCache,
   customerName: string,
 ): Promise<DriftSnapshot> {
-  const path = `${config.schema.customersRoot}${customerName}.md`;
+  const path = await resolveCustomerPath(vaultPath, config, customerName);
 
   let parsed = cache.getNote(path);
   if (!parsed) {
@@ -342,12 +334,9 @@ export async function buildDriftSnapshot(
     }
   }
 
-  const opportunities = parseOpportunities(
-    parsed.sections.get("Opportunities") ?? "",
-  );
-  const milestones = parseMilestones(
-    parsed.sections.get("Milestones") ?? "",
-  );
+  // Read entities — prefers sub-notes, falls back to section parsing
+  const opportunities = await readOpportunityNotes(vaultPath, config, customerName);
+  const milestones = await readMilestoneNotes(vaultPath, config, customerName);
   const team = parseTeam(parsed.sections.get("Team") ?? "");
 
   // Find most recent Agent Insight date
