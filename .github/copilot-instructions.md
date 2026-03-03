@@ -42,10 +42,10 @@ Use this repository as an MCP-first workflow.
 
 - Capture the user's MSX role up front for every MSX/CRM workflow (before guidance, reads that drive workflow decisions, or any write-intent planning).
 - If role is not already confirmed, present these role workflow options and ask the user to select one:
-	- `Solution Engineer` → `.github/skills/Solution_Engineer_SKILL.md`
-	- `Cloud Solution Architect` → `.github/skills/Cloud_Solution_Architect_SKILL.md`
-	- `Customer Success Account Manager` → `.github/skills/CSAM_SKILL.md`
-	- `Specialist` → `.github/skills/Specialist_SKILL.md`
+	- `Specialist` → `.github/instructions/role-card-specialist.instructions.md`
+	- `Solution Engineer` → `.github/instructions/role-card-se.instructions.md`
+	- `Cloud Solution Architect` → `.github/instructions/role-card-csa.instructions.md`
+	- `Customer Success Account Manager` → `.github/instructions/role-card-csam.instructions.md`
 - If you can infer role from `crm_auth_status`/`crm_whoami` + `crm_get_record`, present the top likely role(s) and ask the user to confirm before proceeding.
 - If role mapping is ambiguous or unknown, do not assume; require explicit user role selection first.
 - For read flows, use MCP tools such as `crm_auth_status`, `crm_whoami`, `crm_query`, `crm_get_record`, `get_milestones`, and `get_milestone_activities`.
@@ -121,7 +121,7 @@ Use this repository as an MCP-first workflow.
 ## WorkIQ Query Scoping
 
 - For broad WorkIQ asks (emails/meetings/chats/files/transcripts), always narrow scope before retrieval.
-- Use `.github/skills/WorkIQ_Query_Scoping_SKILL.md` as the canonical execution playbook for fact mapping, clarifying questions, defaults, two-pass retrieval, and sensitivity boundaries.
+- Use `.github/skills/workiq-query-scoping-SKILL.md` as the canonical execution playbook for fact mapping, clarifying questions, defaults, two-pass retrieval, and sensitivity boundaries.
 - If role mapping and WorkIQ scoping both apply, resolve role first, then apply WorkIQ scoping before retrieval.
 
 ## Knowledge Layer (Vault)

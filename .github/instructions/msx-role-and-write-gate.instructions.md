@@ -22,10 +22,10 @@ Before calling any CRM read tool that may return large result sets (especially `
 1. Identify current user via `crm_auth_status` (or `crm_whoami`).
 2. Fetch profile data using `crm_get_record` for `systemusers(<userId>)` with available identity fields (for example: name/title/email/business unit).
 3. Map the user to one of these role workflows:
-   - `Solution Engineer` → `.github/skills/Solution_Engineer_SKILL.md`
-   - `Cloud Solution Architect` → `.github/skills/Cloud_Solution_Architect_SKILL.md`
-   - `Customer Success Account Manager` → `.github/skills/CSAM_SKILL.md`
-   - `Specialist` → `.github/skills/Specialist_SKILL.md`
+   - `Specialist` → `.github/instructions/role-card-specialist.instructions.md`
+   - `Solution Engineer` → `.github/instructions/role-card-se.instructions.md`
+   - `Cloud Solution Architect` → `.github/instructions/role-card-csa.instructions.md`
+   - `Customer Success Account Manager` → `.github/instructions/role-card-csam.instructions.md`
 4. If mapping is ambiguous or multiple roles match:
    - Present top 1–2 likely role mappings with reasons.
    - Ask the user to confirm role before proceeding.
