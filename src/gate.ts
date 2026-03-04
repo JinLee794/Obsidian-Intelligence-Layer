@@ -223,7 +223,11 @@ export async function logWrite(
 export function queueGatedWrite(
   cache: SessionCache,
   diff: WriteDiff,
-  writePayload: { content: string; mode: "create" | "overwrite" | "append" },
+  writePayload: {
+    content: string;
+    mode: "create" | "overwrite" | "append" | "move";
+    sourcePath?: string;
+  },
 ): string {
   const pending: PendingWrite = {
     id: diff.id,
@@ -234,6 +238,7 @@ export function queueGatedWrite(
       content: writePayload.content,
       mode: writePayload.mode,
       sideEffects: diff.sideEffects,
+      ...(writePayload.sourcePath ? { sourcePath: writePayload.sourcePath } : {}),
     }),
     createdAt: new Date(),
   };
@@ -257,16 +262,27 @@ export async function confirmWrite(
 
   const payload = JSON.parse(pending.diff) as {
     content: string;
-    mode: "create" | "overwrite" | "append";
+    mode: "create" | "overwrite" | "append" | "move";
+    sourcePath?: string;
   };
 
-  await executeWrite(vaultPath, pending.path, payload.content, payload.mode);
+  if (payload.mode === "move" && payload.sourcePath) {
+    // Move operation: create new file, delete old file
+    await executeWrite(vaultPath, pending.path, payload.content, "create");
+    const oldFullPath = securePath(vaultPath, payload.sourcePath);
+    const { unlink } = await import("node:fs/promises");
+    await unlink(oldFullPath);
+  } else {
+    await executeWrite(vaultPath, pending.path, payload.content, payload.mode === "move" ? "create" : payload.mode);
+  }
 
   await logWrite(vaultPath, config, {
     tier: "gated",
     operation: pending.operation,
     path: pending.path,
-    detail: "Confirmed by user",
+    detail: payload.mode === "move"
+      ? `Moved from ${payload.sourcePath} (confirmed by user)`
+      : "Confirmed by user",
   });
 
   cache.removePendingWrite(writeId);

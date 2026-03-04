@@ -12,6 +12,7 @@ import type {
   OilConfig,
   CustomerFreshness,
   StaleEntry,
+  StructuralIssue,
   VaultHealthReport,
 } from "./types.js";
 import {
@@ -21,6 +22,11 @@ import {
   parseTeam,
   securePath,
   listFolder,
+  resolveCustomerPath,
+  readOpportunityNotes,
+  readMilestoneNotes,
+  listCustomerNames,
+  detectFlatCustomers,
 } from "./vault.js";
 
 const STALE_THRESHOLD_DAYS = 30;
@@ -37,7 +43,7 @@ export async function checkCustomerFreshness(
   cache: SessionCache,
   customerName: string,
 ): Promise<CustomerFreshness> {
-  const path = `${config.schema.customersRoot}${customerName}.md`;
+  const path = await resolveCustomerPath(vaultPath, config, customerName);
 
   // File modification time
   let lastModified: Date | null = null;
@@ -74,14 +80,12 @@ export async function checkCustomerFreshness(
   const insightsSection = parsed.sections.get("Agent Insights") ?? "";
   const staleInsights = findStaleEntries(insightsSection);
 
-  // Opportunity completeness
-  const oppSection = parsed.sections.get("Opportunities") ?? "";
-  const opps = parseOpportunities(oppSection);
-  const missingGuid = opps.filter((o) => !o.guid).map((o) => o.name);
+// Opportunity completeness — prefers sub-notes, falls back to section parsing
+    const opps = await readOpportunityNotes(vaultPath, config, customerName);
+    const missingGuid = opps.filter((o) => !o.guid).map((o) => o.name);
 
-  // Milestone completeness
-  const msSection = parsed.sections.get("Milestones") ?? "";
-  const milestones = parseMilestones(msSection);
+    // Milestone completeness — prefers sub-notes, falls back to section parsing
+    const milestones = await readMilestoneNotes(vaultPath, config, customerName);
   const missingId = milestones
     .filter((m) => !m.id && !m.number)
     .map((m) => m.name);
@@ -130,23 +134,19 @@ export async function checkVaultHealth(
   cache: SessionCache,
   filterCustomers?: string[],
 ): Promise<VaultHealthReport> {
-  // Get customer roster from vault
-  let customerFiles: string[];
+  // Get customer roster from vault (supports both nested and flat layouts)
+  let customerNames: string[];
   try {
-    customerFiles = await listFolder(vaultPath, config.schema.customersRoot);
+    customerNames = await listCustomerNames(vaultPath, config);
   } catch {
     return {
       totalCustomers: 0,
       customers: [],
       orphanedMeetings: [],
       rosterGaps: [],
+      structuralIssues: [],
     };
   }
-
-  const customerNames = customerFiles.map((f) => {
-    const parts = f.split("/");
-    return parts[parts.length - 1].replace(/\.md$/, "");
-  });
 
   // Filter if specified
   const targetNames = filterCustomers?.length
@@ -171,11 +171,15 @@ export async function checkVaultHealth(
     vaultPath, graph, config, cache, customerNames,
   );
 
+  // Detect structural issues (flat-layout customers, misplaced entities)
+  const structuralIssues = await detectStructuralIssues(vaultPath, config);
+
   return {
     totalCustomers: customerNames.length,
     customers,
     orphanedMeetings,
     rosterGaps: [], // Populated by copilot after CRM comparison
+    structuralIssues,
   };
 }
 
@@ -256,4 +260,32 @@ async function findOrphanedMeetings(
   }
 
   return orphaned;
+}
+
+// ─── Structural Issue Detection ───────────────────────────────────────────────
+
+/**
+ * Detect vault structure issues: flat-layout customers that should be nested,
+ * and other layout mismatches.
+ */
+async function detectStructuralIssues(
+  vaultPath: string,
+  config: OilConfig,
+): Promise<StructuralIssue[]> {
+  const issues: StructuralIssue[] = [];
+
+  const flatCustomers = await detectFlatCustomers(vaultPath, config);
+  for (const { customer, currentPath, expectedPath } of flatCustomers) {
+    issues.push({
+      type: "flat-customer",
+      currentPath,
+      expectedPath,
+      customer,
+      detail: `Customer "${customer}" uses flat layout (${currentPath}). ` +
+        `Nested layout (${expectedPath}) is required for sub-entity storage ` +
+        `(opportunities/, milestones/). Use migrate_customer_structure to fix.`,
+    });
+  }
+
+  return issues;
 }

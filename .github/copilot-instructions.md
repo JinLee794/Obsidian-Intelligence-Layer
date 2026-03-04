@@ -121,7 +121,7 @@ Use this repository as an MCP-first workflow.
 ## WorkIQ Query Scoping
 
 - For broad WorkIQ asks (emails/meetings/chats/files/transcripts), always narrow scope before retrieval.
-- Use `.github/skills/workiq-query-scoping-SKILL.md` as the canonical execution playbook for fact mapping, clarifying questions, defaults, two-pass retrieval, and sensitivity boundaries.
+- Use `.github/skills/workiq-query-scoping/SKILL.md` as the canonical execution playbook for fact mapping, clarifying questions, defaults, two-pass retrieval, and sensitivity boundaries.
 - If role mapping and WorkIQ scoping both apply, resolve role first, then apply WorkIQ scoping before retrieval.
 
 ## Knowledge Layer (Vault)
@@ -174,7 +174,7 @@ This repository uses a tiered context model to keep the agent focused on relevan
 - **Frontmatter requirements**: Every instruction file MUST have `description` with rich trigger keywords. Use `applyTo` when the instruction is only relevant to a specific file scope (e.g., `mcp-server/**` for CRM schema).
 - **Examples**: `intent.instructions.md` (loaded on cross-role/strategy reasoning), `crm-entity-schema.instructions.md` (loaded when editing `mcp-server/`), `msx-role-and-write-gate.instructions.md` (loaded on CRM write workflows).
 
-### Tier 2 — On-Demand Skills (`.github/skills/*_SKILL.md`)
+### Tier 2 — On-Demand Skills (`.github/skills/{name}/SKILL.md`)
 - **What**: Role-specific operating contracts loaded only when the skill is matched by name/description.
 - **Loaded when**: User request matches the skill's `name`, `description`, or `argument-hint`.
 - **Frontmatter requirements**: Every skill file MUST have `name`, `description`, and `argument-hint` in YAML frontmatter.

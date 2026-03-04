@@ -14,6 +14,7 @@ import type {
   OpportunityRef,
   MilestoneRef,
   TeamMember,
+  OilConfig,
 } from "./types.js";
 
 // ─── Path Security ────────────────────────────────────────────────────────────
@@ -394,4 +395,251 @@ export function toNoteRef(note: ParsedNote): NoteRef {
     tags: note.tags,
     excerpt,
   };
+}
+
+// ─── Customer Path Resolution ─────────────────────────────────────────────────
+
+/**
+ * Resolve the customer note path.
+ * Tries nested layout first: Customers/X/X.md
+ * Falls back to flat layout: Customers/X.md
+ * Returns the path that exists, or the nested path if neither exists.
+ */
+export async function resolveCustomerPath(
+  vaultPath: string,
+  config: OilConfig,
+  customer: string,
+): Promise<string> {
+  const nested = `${config.schema.customersRoot}${customer}/${customer}.md`;
+  const flat = `${config.schema.customersRoot}${customer}.md`;
+
+  if (await noteExists(vaultPath, nested)) return nested;
+  if (await noteExists(vaultPath, flat)) return flat;
+  // Default to nested for new files
+  return nested;
+}
+
+/**
+ * Extract the customer name from a resolved customer path.
+ * Handles both nested (Customers/X/X.md) and flat (Customers/X.md) layouts.
+ */
+export function customerNameFromPath(
+  path: string,
+  config: OilConfig,
+): string {
+  const rel = path.replace(config.schema.customersRoot, "");
+  // Nested: "Contoso/Contoso.md" → "Contoso"
+  if (rel.includes("/")) return rel.split("/")[0];
+  // Flat: "Contoso.md" → "Contoso"
+  return rel.replace(/\.md$/, "");
+}
+
+/**
+ * List entity sub-notes for a customer (opportunities or milestones).
+ * Returns parsed notes from Customers/X/opportunities/ or Customers/X/milestones/.
+ */
+export async function listCustomerEntities(
+  vaultPath: string,
+  config: OilConfig,
+  customer: string,
+  entityType: "opportunities" | "milestones",
+): Promise<ParsedNote[]> {
+  const subdir =
+    entityType === "opportunities"
+      ? config.schema.opportunitiesSubdir
+      : config.schema.milestonesSubdir;
+  const folderPath = `${config.schema.customersRoot}${customer}/${subdir}`;
+
+  let files: string[];
+  try {
+    files = await listFolder(vaultPath, folderPath);
+  } catch {
+    return [];
+  }
+
+  const notes: ParsedNote[] = [];
+  for (const file of files) {
+    try {
+      const parsed = await readNote(vaultPath, file);
+      notes.push(parsed);
+    } catch {
+      // Skip unreadable files
+    }
+  }
+  return notes;
+}
+
+/**
+ * Read opportunity entity notes from the customer's opportunities/ subdirectory.
+ * Falls back to section parsing from the customer file if no sub-notes exist.
+ */
+export async function readOpportunityNotes(
+  vaultPath: string,
+  config: OilConfig,
+  customer: string,
+): Promise<OpportunityRef[]> {
+  const entityNotes = await listCustomerEntities(
+    vaultPath, config, customer, "opportunities",
+  );
+
+  if (entityNotes.length > 0) {
+    return entityNotes.map((note) => ({
+      name: note.title,
+      guid: typeof note.frontmatter.guid === "string"
+        ? note.frontmatter.guid
+        : typeof note.frontmatter.opportunityid === "string"
+          ? note.frontmatter.opportunityid
+          : undefined,
+      status: typeof note.frontmatter.status === "string"
+        ? note.frontmatter.status
+        : undefined,
+      stage: typeof note.frontmatter.stage === "string"
+        ? note.frontmatter.stage
+        : undefined,
+      owner: typeof note.frontmatter.owner === "string"
+        ? note.frontmatter.owner
+        : undefined,
+      salesplay: typeof note.frontmatter.salesplay === "string"
+        ? note.frontmatter.salesplay
+        : undefined,
+      last_validated: typeof note.frontmatter.last_validated === "string"
+        ? note.frontmatter.last_validated
+        : undefined,
+    }));
+  }
+
+  // Fallback: parse from customer file section
+  const customerPath = await resolveCustomerPath(vaultPath, config, customer);
+  try {
+    const parsed = await readNote(vaultPath, customerPath);
+    return parseOpportunities(parsed.sections.get("Opportunities") ?? "");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read milestone entity notes from the customer's milestones/ subdirectory.
+ * Falls back to section parsing from the customer file if no sub-notes exist.
+ */
+export async function readMilestoneNotes(
+  vaultPath: string,
+  config: OilConfig,
+  customer: string,
+): Promise<MilestoneRef[]> {
+  const entityNotes = await listCustomerEntities(
+    vaultPath, config, customer, "milestones",
+  );
+
+  if (entityNotes.length > 0) {
+    return entityNotes.map((note) => ({
+      name: note.title,
+      id: typeof note.frontmatter.milestoneid === "string"
+        ? note.frontmatter.milestoneid
+        : typeof note.frontmatter.id === "string"
+          ? note.frontmatter.id
+          : undefined,
+      number: typeof note.frontmatter.number === "string"
+        ? note.frontmatter.number
+        : typeof note.frontmatter.milestone_number === "string"
+          ? note.frontmatter.milestone_number
+          : undefined,
+      status: typeof note.frontmatter.status === "string"
+        ? note.frontmatter.status
+        : undefined,
+      milestonedate: typeof note.frontmatter.milestonedate === "string"
+        ? note.frontmatter.milestonedate
+        : undefined,
+      owner: typeof note.frontmatter.owner === "string"
+        ? note.frontmatter.owner
+        : undefined,
+      opportunity: typeof note.frontmatter.opportunity === "string"
+        ? note.frontmatter.opportunity
+        : undefined,
+    }));
+  }
+
+  // Fallback: parse from customer file section
+  const customerPath = await resolveCustomerPath(vaultPath, config, customer);
+  try {
+    const parsed = await readNote(vaultPath, customerPath);
+    return parseMilestones(parsed.sections.get("Milestones") ?? "");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * List all customer folders/files in the customers root.
+ * Supports both nested (directories) and flat (.md files) layouts.
+ * Returns customer names (not paths).
+ */
+export async function listCustomerNames(
+  vaultPath: string,
+  config: OilConfig,
+): Promise<string[]> {
+  const fullPath = securePath(vaultPath, config.schema.customersRoot);
+  let entries;
+  try {
+    entries = await readdir(fullPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const names: Set<string> = new Set();
+  for (const entry of entries) {
+    if (entry.isDirectory() && !isExcludedDir(entry.name)) {
+      // Nested layout: directory name is customer name
+      names.add(entry.name);
+    } else if (entry.isFile() && isAllowedFile(entry.name)) {
+      // Flat layout: filename minus extension
+      names.add(basename(entry.name, extname(entry.name)));
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Detect customers using flat layout (Customers/X.md) that should use nested
+ * layout (Customers/X/X.md). Returns only customers where a flat file exists
+ * WITHOUT a corresponding nested directory.
+ */
+export async function detectFlatCustomers(
+  vaultPath: string,
+  config: OilConfig,
+): Promise<{ customer: string; currentPath: string; expectedPath: string }[]> {
+  const fullPath = securePath(vaultPath, config.schema.customersRoot);
+  let entries;
+  try {
+    entries = await readdir(fullPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const dirs = new Set<string>();
+  const flatFiles: { name: string; ext: string }[] = [];
+
+  for (const entry of entries) {
+    if (entry.isDirectory() && !isExcludedDir(entry.name)) {
+      dirs.add(entry.name);
+    } else if (entry.isFile() && isAllowedFile(entry.name)) {
+      flatFiles.push({
+        name: basename(entry.name, extname(entry.name)),
+        ext: extname(entry.name),
+      });
+    }
+  }
+
+  const results: { customer: string; currentPath: string; expectedPath: string }[] = [];
+  for (const file of flatFiles) {
+    // Only flag if there is NO nested directory for this customer
+    if (!dirs.has(file.name)) {
+      results.push({
+        customer: file.name,
+        currentPath: `${config.schema.customersRoot}${file.name}${file.ext}`,
+        expectedPath: `${config.schema.customersRoot}${file.name}/${file.name}${file.ext}`,
+      });
+    }
+  }
+  return results;
 }

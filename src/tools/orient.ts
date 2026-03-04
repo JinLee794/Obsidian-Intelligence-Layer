@@ -18,12 +18,18 @@ import {
   parseTeam,
   parseActionItems,
   toNoteRef,
+  resolveCustomerPath,
+  readOpportunityNotes,
+  readMilestoneNotes,
+  listCustomerEntities,
 } from "../vault.js";
 import type {
   CustomerContext,
   PersonContext,
   NoteRef,
   PeopleResolutionResult,
+  OpportunityRef,
+  MilestoneRef,
 } from "../types.js";
 
 /**
@@ -90,7 +96,7 @@ export function registerOrientTools(
     },
     async ({ customer, lookback_days, include_similar, include_open_items, assignee }) => {
       const lookback = lookback_days ?? 90;
-      const customerFile = `${config.schema.customersRoot}${customer}.md`;
+      const customerFile = await resolveCustomerPath(vaultPath, config, customer);
 
       // Read customer note (with cache)
       let parsed = cache.getNote(customerFile);
@@ -113,14 +119,13 @@ export function registerOrientTools(
       }
 
       // Parse structured sections
-      const oppSection = parsed.sections.get("Opportunities") ?? "";
-      const milestoneSection = parsed.sections.get("Milestones") ?? "";
       const teamSection = parsed.sections.get("Team") ?? "";
       const insightsSection = parsed.sections.get("Agent Insights") ?? "";
       const connectSection = parsed.sections.get("Connect Hooks") ?? "";
 
-      const opportunities = parseOpportunities(oppSection);
-      const milestones = parseMilestones(milestoneSection);
+      // Read entities — prefers sub-notes, falls back to section parsing
+      const opportunities = await readOpportunityNotes(vaultPath, config, customer);
+      const milestones = await readMilestoneNotes(vaultPath, config, customer);
       const team = parseTeam(teamSection);
       const agentInsights = insightsSection
         .split("\n")
@@ -351,6 +356,80 @@ export function registerOrientTools(
       };
     },
   );
+
+  // ── get_opportunity_context ─────────────────────────────────────────────
+
+  server.registerTool(
+    "get_opportunity_context",
+    {
+      description: "Returns all opportunities for a customer as structured data — from entity sub-notes (with full frontmatter) or section parsing fallback. Each opportunity includes GUID, status, stage, owner, and salesplay when available.",
+      inputSchema: {
+        customer: z.string().describe("Customer name"),
+      },
+    },
+    async ({ customer }) => {
+      const opportunities: OpportunityRef[] = await readOpportunityNotes(
+        vaultPath, config, customer,
+      );
+
+      if (opportunities.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              customer,
+              opportunities: [],
+              _note: "No opportunities found. Check customer name or vault structure.",
+            }, null, 2),
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ customer, opportunities }, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ── get_milestone_context ───────────────────────────────────────────────
+
+  server.registerTool(
+    "get_milestone_context",
+    {
+      description: "Returns all milestones for a customer as structured data — from entity sub-notes (with full frontmatter) or section parsing fallback. Each milestone includes ID, number, status, date, owner, and linked opportunity when available.",
+      inputSchema: {
+        customer: z.string().describe("Customer name"),
+      },
+    },
+    async ({ customer }) => {
+      const milestones: MilestoneRef[] = await readMilestoneNotes(
+        vaultPath, config, customer,
+      );
+
+      if (milestones.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              customer,
+              milestones: [],
+              _note: "No milestones found. Check customer name or vault structure.",
+            }, null, 2),
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ customer, milestones }, null, 2),
+        }],
+      };
+    },
+  );
 }
 
 // ─── Helper Functions ───────────────────────────────────────────────────────
@@ -450,7 +529,7 @@ async function findOpenItems(
   const items: import("../types.js").ActionItem[] = [];
 
   // Collect all note paths linked to this customer
-  const customerFile = `${config.schema.customersRoot}${customer}.md`;
+  const customerFile = await resolveCustomerPath(vaultPath, config, customer);
   const forwardLinks = graph.getForwardLinks(customerFile);
   const backlinks = graph.getBacklinks(customerFile);
   const meetingNotes = findRecentMeetings(graph, config, customer, 90);

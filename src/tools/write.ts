@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
-import { readNote, noteExists, securePath } from "../vault.js";
+import { readNote, noteExists, securePath, resolveCustomerPath, detectFlatCustomers } from "../vault.js";
 import {
   isAutoConfirmed,
   generateDiff,
@@ -123,7 +123,7 @@ export function registerWriteTools(
       },
     },
     async ({ customer, hook }) => {
-      const customerFile = `${config.schema.customersRoot}${customer}.md`;
+      const customerFile = await resolveCustomerPath(vaultPath, config, customer);
 
       // Format the hook entry  
       const entry = [
@@ -270,8 +270,9 @@ export function registerWriteTools(
       ].join("\n");
 
       // Generate diff (gated)
+      const customerPath = await resolveCustomerPath(vaultPath, config, customer);
       const sideEffects: string[] = [
-        `\`${config.schema.customersRoot}${customer}.md\` § \`## Agent Insights\` ← append: meeting summary (auto-confirmed)`,
+        `\`${customerPath}\` § \`## Agent Insights\` ← append: meeting summary (auto-confirmed)`,
       ];
 
       const diff = generateDiff("draft_meeting_note", meetingPath, noteContent, true, sideEffects);
@@ -307,7 +308,7 @@ export function registerWriteTools(
       },
     },
     async ({ customer, frontmatter, sections }) => {
-      const customerFile = `${config.schema.customersRoot}${customer}.md`;
+      const customerFile = await resolveCustomerPath(vaultPath, config, customer);
 
       let parsed = cache.getNote(customerFile);
       if (!parsed) {
@@ -395,10 +396,13 @@ export function registerWriteTools(
       },
     },
     async ({ customer, tpid, accountid, opportunities, team }) => {
-      const customerFile = `${config.schema.customersRoot}${customer}.md`;
+      // For new files, prefer the nested layout: Customers/X/X.md
+      const customerFile = `${config.schema.customersRoot}${customer}/${customer}.md`;
 
       const exists = await noteExists(vaultPath, customerFile);
-      if (exists) {
+      // Also check flat layout to avoid duplication
+      const flatExists = await noteExists(vaultPath, `${config.schema.customersRoot}${customer}.md`);
+      if (exists || flatExists) {
         return {
           content: [
             {
@@ -549,6 +553,411 @@ export function registerWriteTools(
               diff: diff.diff,
               notesAffected: paths.length,
             }),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── migrate_customer_structure ────────────────────────────────────────
+
+  server.registerTool(
+    "migrate_customer_structure",
+    {
+      description:
+        "Detects and proposes migration of flat-layout customer files (Customers/X.md) " +
+        "to nested layout (Customers/X/X.md). Nested layout is required for sub-entity " +
+        "storage (opportunities/, milestones/). Gated — returns a diff for each migration.",
+      inputSchema: {
+        customer: z
+          .string()
+          .optional()
+          .describe(
+            "Specific customer name to migrate. Omit to scan all customers.",
+          ),
+      },
+    },
+    async ({ customer }) => {
+      const flatCustomers = await detectFlatCustomers(vaultPath, config);
+
+      // Filter to specific customer if provided
+      const targets = customer
+        ? flatCustomers.filter(
+            (c) => c.customer.toLowerCase() === customer.toLowerCase(),
+          )
+        : flatCustomers;
+
+      if (targets.length === 0) {
+        const msg = customer
+          ? `"${customer}" already uses nested layout or does not exist as a flat file.`
+          : "All customers already use nested layout. No migration needed.";
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify({ status: "ok", message: msg }) },
+          ],
+        };
+      }
+
+      // For each flat customer: read content, propose move
+      const writeIds: string[] = [];
+      const summaries: string[] = [];
+
+      for (const target of targets) {
+        let parsed;
+        try {
+          parsed = await readNote(vaultPath, target.currentPath);
+        } catch {
+          summaries.push(
+            `⚠ Could not read ${target.currentPath} — skipping.`,
+          );
+          continue;
+        }
+
+        // Reconstruct full file content (frontmatter + body)
+        const { stringify } = await import("gray-matter");
+        const fullContent = stringify(parsed.content, parsed.frontmatter);
+
+        const diff = generateDiff(
+          "migrate_customer_structure",
+          target.expectedPath,
+          [
+            `**Move:** \`${target.currentPath}\` → \`${target.expectedPath}\``,
+            "",
+            "This enables sub-entity storage:",
+            `- \`${config.schema.customersRoot}${target.customer}/${config.schema.opportunitiesSubdir}\``,
+            `- \`${config.schema.customersRoot}${target.customer}/${config.schema.milestonesSubdir}\``,
+            "",
+            "File content is preserved as-is.",
+          ].join("\n"),
+          true,
+          [`Delete \`${target.currentPath}\` after creating \`${target.expectedPath}\``],
+        );
+
+        queueGatedWrite(cache, diff, {
+          content: fullContent,
+          mode: "move",
+          sourcePath: target.currentPath,
+        });
+
+        writeIds.push(diff.id);
+        summaries.push(
+          `📁 ${target.customer}: ${target.currentPath} → ${target.expectedPath}`,
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              status: "pending",
+              migrationsProposed: writeIds.length,
+              writeIds,
+              summary: summaries,
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── create_opportunity ──────────────────────────────────────────────────
+
+  server.registerTool(
+    "create_opportunity",
+    {
+      description:
+        "Scaffolds a new opportunity note under a customer's opportunities/ subdirectory. Gated — returns a diff for review.",
+      inputSchema: {
+        customer: z.string().describe("Customer name"),
+        name: z.string().describe("Opportunity name"),
+        guid: z.string().optional().describe("Opportunity GUID from CRM"),
+        status: z.string().optional().describe("Status (e.g. Active, Won, Lost)"),
+        stage: z.string().optional().describe("Sales stage"),
+        owner: z.string().optional().describe("Opportunity owner"),
+        salesplay: z.string().optional().describe("Sales play"),
+      },
+    },
+    async ({ customer, name, guid, status, stage, owner, salesplay }) => {
+      const oppPath = `${config.schema.customersRoot}${customer}/${config.schema.opportunitiesSubdir}${name}.md`;
+
+      const exists = await noteExists(vaultPath, oppPath);
+      if (exists) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: `Opportunity note already exists: ${oppPath}. Use update_opportunity instead.`,
+              }),
+            },
+          ],
+        };
+      }
+
+      // Build frontmatter — plain strings for queryability
+      const fm: Record<string, unknown> = {
+        tags: ["opportunity"],
+        customer,
+      };
+      if (guid) fm.guid = guid;
+      if (status) fm.status = status;
+      if (stage) fm.stage = stage;
+      if (owner) fm.owner = owner;
+      if (salesplay) fm.salesplay = salesplay;
+      fm.last_validated = new Date().toISOString().slice(0, 10);
+
+      const fmYaml = Object.entries(fm)
+        .map(([k, v]) =>
+          Array.isArray(v) ? `${k}: [${v.join(", ")}]` : `${k}: ${v}`,
+        )
+        .join("\n");
+
+      // Body includes wikilinks for Obsidian graph connectivity
+      const ownerLink = owner ? `- **Owner:** [[${owner}]]` : "";
+      const noteContent = [
+        "---",
+        fmYaml,
+        "---",
+        "",
+        `# ${name}`,
+        "",
+        `**Customer:** [[${customer}]]`,
+        ownerLink,
+        "",
+        "## Summary",
+        "",
+        "",
+        "## Notes",
+        "",
+        "",
+      ].filter(line => line !== "").join("\n");
+
+      const diff = generateDiff("create_opportunity", oppPath, noteContent, true);
+      queueGatedWrite(cache, diff, { content: noteContent, mode: "create" });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ status: "pending", writeId: diff.id, diff: diff.diff }),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── update_opportunity ────────────────────────────────────────────────
+
+  server.registerTool(
+    "update_opportunity",
+    {
+      description:
+        "Updates an existing opportunity note's frontmatter fields. Gated — returns a diff for review.",
+      inputSchema: {
+        customer: z.string().describe("Customer name"),
+        name: z.string().describe("Opportunity name (filename without .md)"),
+        fields: z
+          .object({
+            guid: z.string().optional().describe("Opportunity GUID"),
+            status: z.string().optional().describe("Status"),
+            stage: z.string().optional().describe("Sales stage"),
+            owner: z.string().optional().describe("Opportunity owner"),
+            salesplay: z.string().optional().describe("Sales play"),
+            last_validated: z.string().optional().describe("Last validated date (ISO)"),
+          })
+          .describe("Fields to update in frontmatter"),
+      },
+    },
+    async ({ customer, name, fields }) => {
+      const oppPath = `${config.schema.customersRoot}${customer}/${config.schema.opportunitiesSubdir}${name}.md`;
+
+      let parsed = cache.getNote(oppPath);
+      if (!parsed) {
+        try {
+          parsed = await readNote(vaultPath, oppPath);
+          cache.putNote(oppPath, parsed);
+        } catch {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: `Opportunity note not found: ${oppPath}` }),
+              },
+            ],
+          };
+        }
+      }
+
+      const { stringify } = await import("gray-matter");
+      // Strip undefined values from fields before merging
+      const cleanFields = Object.fromEntries(
+        Object.entries(fields).filter(([, v]) => v !== undefined),
+      );
+      const updatedFm = { ...parsed.frontmatter, ...cleanFields };
+      updatedFm.last_validated = new Date().toISOString().slice(0, 10);
+
+      const fullContent = stringify(parsed.content, updatedFm);
+      const diff = generateDiff("update_opportunity", oppPath, fullContent, false);
+      queueGatedWrite(cache, diff, { content: fullContent, mode: "overwrite" });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ status: "pending", writeId: diff.id, diff: diff.diff }),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── create_milestone ──────────────────────────────────────────────────
+
+  server.registerTool(
+    "create_milestone",
+    {
+      description:
+        "Scaffolds a new milestone note under a customer's milestones/ subdirectory. Gated — returns a diff for review.",
+      inputSchema: {
+        customer: z.string().describe("Customer name"),
+        name: z.string().describe("Milestone name"),
+        milestoneid: z.string().optional().describe("Milestone GUID from CRM"),
+        number: z.string().optional().describe("Milestone number"),
+        status: z.string().optional().describe("Status (e.g. On Track, At Risk, Completed)"),
+        milestonedate: z.string().optional().describe("Target date (ISO format)"),
+        owner: z.string().optional().describe("Milestone owner"),
+        opportunity: z.string().optional().describe("Linked opportunity name"),
+      },
+    },
+    async ({ customer, name, milestoneid, number, status, milestonedate, owner, opportunity }) => {
+      const msPath = `${config.schema.customersRoot}${customer}/${config.schema.milestonesSubdir}${name}.md`;
+
+      const exists = await noteExists(vaultPath, msPath);
+      if (exists) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: `Milestone note already exists: ${msPath}. Use update_milestone instead.`,
+              }),
+            },
+          ],
+        };
+      }
+
+      // Build frontmatter — plain strings for queryability
+      const fm: Record<string, unknown> = {
+        tags: ["milestone"],
+        customer,
+      };
+      if (milestoneid) fm.milestoneid = milestoneid;
+      if (number) fm.number = number;
+      if (status) fm.status = status;
+      if (milestonedate) fm.milestonedate = milestonedate;
+      if (owner) fm.owner = owner;
+      if (opportunity) fm.opportunity = opportunity;
+
+      const fmYaml = Object.entries(fm)
+        .map(([k, v]) =>
+          Array.isArray(v) ? `${k}: [${v.join(", ")}]` : `${k}: ${v}`,
+        )
+        .join("\n");
+
+      // Body includes wikilinks for Obsidian graph connectivity
+      const ownerLink = owner ? `- **Owner:** [[${owner}]]` : "";
+      const oppLink = opportunity ? `- **Opportunity:** [[${opportunity}]]` : "";
+      const noteContent = [
+        "---",
+        fmYaml,
+        "---",
+        "",
+        `# ${name}`,
+        "",
+        `**Customer:** [[${customer}]]`,
+        ownerLink,
+        oppLink,
+        "",
+        "## Tasks",
+        "",
+        "",
+        "## Notes",
+        "",
+        "",
+      ].filter(line => line !== "").join("\n");
+
+      const diff = generateDiff("create_milestone", msPath, noteContent, true);
+      queueGatedWrite(cache, diff, { content: noteContent, mode: "create" });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ status: "pending", writeId: diff.id, diff: diff.diff }),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── update_milestone ──────────────────────────────────────────────────
+
+  server.registerTool(
+    "update_milestone",
+    {
+      description:
+        "Updates an existing milestone note's frontmatter fields. Gated — returns a diff for review.",
+      inputSchema: {
+        customer: z.string().describe("Customer name"),
+        name: z.string().describe("Milestone name (filename without .md)"),
+        fields: z
+          .object({
+            milestoneid: z.string().optional().describe("Milestone GUID"),
+            number: z.string().optional().describe("Milestone number"),
+            status: z.string().optional().describe("Status"),
+            milestonedate: z.string().optional().describe("Target date (ISO)"),
+            owner: z.string().optional().describe("Milestone owner"),
+            opportunity: z.string().optional().describe("Linked opportunity name"),
+          })
+          .describe("Fields to update in frontmatter"),
+      },
+    },
+    async ({ customer, name, fields }) => {
+      const msPath = `${config.schema.customersRoot}${customer}/${config.schema.milestonesSubdir}${name}.md`;
+
+      let parsed = cache.getNote(msPath);
+      if (!parsed) {
+        try {
+          parsed = await readNote(vaultPath, msPath);
+          cache.putNote(msPath, parsed);
+        } catch {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: `Milestone note not found: ${msPath}` }),
+              },
+            ],
+          };
+        }
+      }
+
+      const { stringify } = await import("gray-matter");
+      const cleanFields = Object.fromEntries(
+        Object.entries(fields).filter(([, v]) => v !== undefined),
+      );
+      const updatedFm = { ...parsed.frontmatter, ...cleanFields };
+
+      const fullContent = stringify(parsed.content, updatedFm);
+      const diff = generateDiff("update_milestone", msPath, fullContent, false);
+      queueGatedWrite(cache, diff, { content: fullContent, mode: "overwrite" });
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ status: "pending", writeId: diff.id, diff: diff.diff }),
           },
         ],
       };
