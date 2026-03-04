@@ -661,13 +661,13 @@ export function registerWriteTools(
     },
   );
 
-  // ── create_opportunity ──────────────────────────────────────────────────
+  // ── oil_create_opportunity ───────────────────────────────────────────────
 
   server.registerTool(
-    "create_opportunity",
+    "oil_create_opportunity",
     {
       description:
-        "Scaffolds a new opportunity note under a customer's opportunities/ subdirectory. Gated — returns a diff for review.",
+        "[OIL/Vault] Scaffolds a new opportunity note in the Obsidian vault under a customer's opportunities/ subdirectory. Gated — returns a diff for review. Does NOT create a CRM opportunity — use MSX tools for CRM writes.",
       inputSchema: {
         customer: z.string().describe("Customer name"),
         name: z.string().describe("Opportunity name"),
@@ -688,7 +688,7 @@ export function registerWriteTools(
             {
               type: "text" as const,
               text: JSON.stringify({
-                error: `Opportunity note already exists: ${oppPath}. Use update_opportunity instead.`,
+                error: `Opportunity note already exists: ${oppPath}. Use oil_update_opportunity instead.`,
               }),
             },
           ],
@@ -733,7 +733,7 @@ export function registerWriteTools(
         "",
       ].filter(line => line !== "").join("\n");
 
-      const diff = generateDiff("create_opportunity", oppPath, noteContent, true);
+      const diff = generateDiff("oil_create_opportunity", oppPath, noteContent, true);
       queueGatedWrite(cache, diff, { content: noteContent, mode: "create" });
 
       return {
@@ -747,13 +747,13 @@ export function registerWriteTools(
     },
   );
 
-  // ── update_opportunity ────────────────────────────────────────────────
+  // ── oil_update_opportunity ─────────────────────────────────────────────
 
   server.registerTool(
-    "update_opportunity",
+    "oil_update_opportunity",
     {
       description:
-        "Updates an existing opportunity note's frontmatter fields. Gated — returns a diff for review.",
+        "[OIL/Vault] Updates an existing opportunity note's frontmatter fields in the Obsidian vault. Gated — returns a diff for review. Does NOT update CRM — use MSX tools for CRM writes.",
       inputSchema: {
         customer: z.string().describe("Customer name"),
         name: z.string().describe("Opportunity name (filename without .md)"),
@@ -798,7 +798,7 @@ export function registerWriteTools(
       updatedFm.last_validated = new Date().toISOString().slice(0, 10);
 
       const fullContent = stringify(parsed.content, updatedFm);
-      const diff = generateDiff("update_opportunity", oppPath, fullContent, false);
+      const diff = generateDiff("oil_update_opportunity", oppPath, fullContent, false);
       queueGatedWrite(cache, diff, { content: fullContent, mode: "overwrite" });
 
       return {
@@ -812,13 +812,13 @@ export function registerWriteTools(
     },
   );
 
-  // ── create_milestone ──────────────────────────────────────────────────
+  // ── oil_create_milestone ───────────────────────────────────────────────
 
   server.registerTool(
-    "create_milestone",
+    "oil_create_milestone",
     {
       description:
-        "Scaffolds a new milestone note under a customer's milestones/ subdirectory. Gated — returns a diff for review.",
+        "[OIL/Vault] Scaffolds a new milestone note in the Obsidian vault under a customer's milestones/ subdirectory. Gated — returns a diff for review. Does NOT create a CRM milestone — use MSX tools for CRM writes.",
       inputSchema: {
         customer: z.string().describe("Customer name"),
         name: z.string().describe("Milestone name"),
@@ -840,7 +840,7 @@ export function registerWriteTools(
             {
               type: "text" as const,
               text: JSON.stringify({
-                error: `Milestone note already exists: ${msPath}. Use update_milestone instead.`,
+                error: `Milestone note already exists: ${msPath}. Use oil_update_milestone instead.`,
               }),
             },
           ],
@@ -887,7 +887,7 @@ export function registerWriteTools(
         "",
       ].filter(line => line !== "").join("\n");
 
-      const diff = generateDiff("create_milestone", msPath, noteContent, true);
+      const diff = generateDiff("oil_create_milestone", msPath, noteContent, true);
       queueGatedWrite(cache, diff, { content: noteContent, mode: "create" });
 
       return {
@@ -901,13 +901,13 @@ export function registerWriteTools(
     },
   );
 
-  // ── update_milestone ──────────────────────────────────────────────────
+  // ── oil_update_milestone ───────────────────────────────────────────────
 
   server.registerTool(
-    "update_milestone",
+    "oil_update_milestone",
     {
       description:
-        "Updates an existing milestone note's frontmatter fields. Gated — returns a diff for review.",
+        "[OIL/Vault] Updates an existing milestone note's frontmatter fields in the Obsidian vault. Gated — returns a diff for review. Does NOT update CRM — use MSX tools for CRM writes.",
       inputSchema: {
         customer: z.string().describe("Customer name"),
         name: z.string().describe("Milestone name (filename without .md)"),
@@ -950,7 +950,7 @@ export function registerWriteTools(
       const updatedFm = { ...parsed.frontmatter, ...cleanFields };
 
       const fullContent = stringify(parsed.content, updatedFm);
-      const diff = generateDiff("update_milestone", msPath, fullContent, false);
+      const diff = generateDiff("oil_update_milestone", msPath, fullContent, false);
       queueGatedWrite(cache, diff, { content: fullContent, mode: "overwrite" });
 
       return {

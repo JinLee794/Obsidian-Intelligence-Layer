@@ -357,12 +357,12 @@ export function registerOrientTools(
     },
   );
 
-  // ── get_opportunity_context ─────────────────────────────────────────────
+  // ── oil_get_opportunity_context ──────────────────────────────────────────
 
   server.registerTool(
-    "get_opportunity_context",
+    "oil_get_opportunity_context",
     {
-      description: "Returns all opportunities for a customer as structured data — from entity sub-notes (with full frontmatter) or section parsing fallback. Each opportunity includes GUID, status, stage, owner, and salesplay when available.",
+      description: "[OIL/Vault] Returns all opportunities for a customer as structured data from the Obsidian vault — entity sub-notes (with full frontmatter) or section parsing fallback. Each opportunity includes GUID, status, stage, owner, and salesplay when available. NOT a CRM query — use MSX tools for live CRM data.",
       inputSchema: {
         customer: z.string().describe("Customer name"),
       },
@@ -394,12 +394,12 @@ export function registerOrientTools(
     },
   );
 
-  // ── get_milestone_context ───────────────────────────────────────────────
+  // ── oil_get_milestone_context ────────────────────────────────────────────
 
   server.registerTool(
-    "get_milestone_context",
+    "oil_get_milestone_context",
     {
-      description: "Returns all milestones for a customer as structured data — from entity sub-notes (with full frontmatter) or section parsing fallback. Each milestone includes ID, number, status, date, owner, and linked opportunity when available.",
+      description: "[OIL/Vault] Returns all milestones for a customer as structured data from the Obsidian vault — entity sub-notes (with full frontmatter) or section parsing fallback. Each milestone includes ID, number, status, date, owner, and linked opportunity when available. NOT a CRM query — use MSX tools for live CRM data.",
       inputSchema: {
         customer: z.string().describe("Customer name"),
       },
