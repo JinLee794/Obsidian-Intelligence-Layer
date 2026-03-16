@@ -27,6 +27,8 @@ export interface PersonFrontmatter extends NoteFrontmatter {
   company?: string;
   org?: "internal" | "customer" | "partner";
   customers?: string[];
+  email?: string;
+  teams_id?: string;
 }
 
 export interface MeetingFrontmatter extends NoteFrontmatter {
@@ -115,6 +117,8 @@ export interface CustomerContext {
 
 export interface PersonContext {
   frontmatter: PersonFrontmatter;
+  email?: string;
+  teamsId?: string;
   linkedCustomers: string[];
   recentMeetings: NoteRef[];
   backlinks: NoteRef[];

@@ -1,16 +1,30 @@
 {
-  "name": "obsidian-intelligence-layer",
+  "name": "@jinlee794/obsidian-intelligence-layer",
   "version": "0.1.0",
   "description": "Obsidian Intelligence Layer — Knowledge Layer MCP Server for AI Agent Workflows",
   "type": "module",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JinLee794/MCAPS-IQ.git",
+    "directory": "mcp/oil"
+  },
   "main": "dist/index.js",
   "bin": {
-    "oil-server": "dist/index.js"
+    "obsidian-intelligence-layer": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
+    "prepublishOnly": "tsc",
     "lint": "tsc --noEmit",
     "bench": "vitest run",
     "bench:watch": "vitest"

@@ -242,6 +242,8 @@ export function registerOrientTools(
           org: fm.org as PersonContext["frontmatter"]["org"],
           customers: linkedCustomers,
         },
+        email: typeof fm.email === "string" ? fm.email : undefined,
+        teamsId: typeof fm.teams_id === "string" ? fm.teams_id : undefined,
         linkedCustomers,
         recentMeetings,
         backlinks,

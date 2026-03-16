@@ -3,8 +3,9 @@
  * Safe file reads, frontmatter parsing, path security, markdown section parsing.
  */
 
+import { existsSync, realpathSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join, relative, resolve, extname, basename } from "node:path";
+import { join, relative, resolve, extname, basename, dirname, isAbsolute } from "node:path";
 import matter from "gray-matter";
 import type {
   NoteFrontmatter,
@@ -27,11 +28,47 @@ const EXCLUDED_DIRS = new Set([".obsidian", ".trash", "node_modules", ".git"]);
  * Prevents path traversal attacks outside the vault root.
  */
 export function securePath(vaultPath: string, notePath: string): string {
-  const resolved = resolve(vaultPath, notePath);
-  const rel = relative(vaultPath, resolved);
-  if (rel.startsWith("..") || resolve(resolved) !== resolved.replace(/\/$/, "")) {
+  const vaultResolved = resolve(vaultPath);
+  const resolved = resolve(vaultResolved, notePath);
+
+  // Lexical traversal guard first.
+  const lexicalRel = relative(vaultResolved, resolved);
+  if (lexicalRel.startsWith("..") || isAbsolute(lexicalRel)) {
     throw new Error(`Path traversal denied: ${notePath}`);
   }
+
+  // Realpath guard: deny symlink escapes by checking the real filesystem target
+  // (or nearest existing ancestor for non-existing paths) stays under vault root.
+  let vaultReal: string;
+  try {
+    vaultReal = realpathSync(vaultResolved);
+  } catch {
+    throw new Error(`Vault path is not accessible: ${vaultPath}`);
+  }
+
+  let pathToCheck = resolved;
+  if (!existsSync(pathToCheck)) {
+    let cursor = dirname(pathToCheck);
+    while (!existsSync(cursor)) {
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+    pathToCheck = cursor;
+  }
+
+  let targetReal: string;
+  try {
+    targetReal = realpathSync(pathToCheck);
+  } catch {
+    throw new Error(`Path traversal denied: ${notePath}`);
+  }
+
+  const realRel = relative(vaultReal, targetReal);
+  if (realRel.startsWith("..") || isAbsolute(realRel)) {
+    throw new Error(`Path traversal denied: ${notePath}`);
+  }
+
   return resolved;
 }
 
