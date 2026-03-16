@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig, NoteRef } from "../types.js";
+import { validateVaultPath, validationError } from "../validation.js";
 import { readNote } from "../vault.js";
 import { queryNotes } from "../query.js";
 import { searchVault } from "../search.js";
@@ -43,6 +44,11 @@ export function registerRetrieveTools(
       },
     },
     async ({ query, tier, limit, filter_folder, filter_tags }) => {
+      if (filter_folder) {
+        const folderErr = validateVaultPath(filter_folder);
+        if (folderErr) return validationError(`search_vault: filter_folder — ${folderErr}`);
+      }
+
       const results = await searchVault(graph, config, query, tier, limit ?? 10, {
         folder: filter_folder,
         tags: filter_tags,
@@ -80,6 +86,11 @@ export function registerRetrieveTools(
       },
     },
     async ({ where, and, or, order_by, limit, folder }) => {
+      if (folder) {
+        const folderErr = validateVaultPath(folder);
+        if (folderErr) return validationError(`query_notes: folder — ${folderErr}`);
+      }
+
       const results = queryNotes(graph, config, {
         where,
         and,
@@ -110,6 +121,9 @@ export function registerRetrieveTools(
       },
     },
     async ({ path, top_n, method }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) return validationError(`find_similar_notes: ${pathErr}`);
+
       const limit = top_n ?? 5;
       const sourceNode = graph.getNode(path);
       if (!sourceNode) {
@@ -190,6 +204,9 @@ export function registerRetrieveTools(
       },
     },
     async ({ path, section }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) return validationError(`read_note: ${pathErr}`);
+
       try {
         const parsed = await readNote(vaultPath, path);
 

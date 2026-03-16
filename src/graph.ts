@@ -287,6 +287,18 @@ export class GraphIndex {
         return false;
       }
 
+      // Validate persisted shape before trusting it
+      if (!Array.isArray(data.nodes)) {
+        console.error("[OIL] Graph index corrupt: nodes is not an array, will rebuild.");
+        return false;
+      }
+      for (const pn of data.nodes) {
+        if (typeof pn.path !== "string" || typeof pn.title !== "string" || !Array.isArray(pn.tags)) {
+          console.error("[OIL] Graph index corrupt: invalid node shape, will rebuild.");
+          return false;
+        }
+      }
+
       this.nodes.clear();
       this.tagIndex.clear();
       this.titleIndex.clear();

@@ -10,6 +10,11 @@ import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
 import {
+  validateCustomerName,
+  validateVaultPath,
+  validationError,
+} from "../validation.js";
+import {
   readNote,
   buildFolderTree,
   listFolder,
@@ -95,6 +100,9 @@ export function registerOrientTools(
       },
     },
     async ({ customer, lookback_days, include_similar, include_open_items, assignee }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`get_customer_context: ${custErr}`);
+
       const lookback = lookback_days ?? 90;
       const customerFile = await resolveCustomerPath(vaultPath, config, customer);
 
@@ -204,6 +212,9 @@ export function registerOrientTools(
       },
     },
     async ({ name }) => {
+      const nameErr = validateCustomerName(name);
+      if (nameErr) return validationError(`get_person_context: person name — ${nameErr}`);
+
       const personFile = `${config.schema.peopleRoot}${name}.md`;
 
       let parsed = cache.getNote(personFile);
@@ -284,6 +295,13 @@ export function registerOrientTools(
       },
     },
     async ({ path, direction, hops, filter_tags, filter_folder }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) return validationError(`query_graph: ${pathErr}`);
+      if (filter_folder) {
+        const folderErr = validateVaultPath(filter_folder);
+        if (folderErr) return validationError(`query_graph: filter_folder — ${folderErr}`);
+      }
+
       const cacheKey = `graph:${direction}:${path}:${hops ?? 2}:${filter_tags?.join(",") ?? ""}:${filter_folder ?? ""}`;
       let result = cache.getTraversal(cacheKey);
 
@@ -370,6 +388,9 @@ export function registerOrientTools(
       },
     },
     async ({ customer }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`oil_get_opportunity_context: ${custErr}`);
+
       const opportunities: OpportunityRef[] = await readOpportunityNotes(
         vaultPath, config, customer,
       );
@@ -407,6 +428,9 @@ export function registerOrientTools(
       },
     },
     async ({ customer }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`oil_get_milestone_context: ${custErr}`);
+
       const milestones: MilestoneRef[] = await readMilestoneNotes(
         vaultPath, config, customer,
       );

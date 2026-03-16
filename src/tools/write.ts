@@ -11,6 +11,13 @@ import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
 import { readNote, noteExists, securePath, resolveCustomerPath, detectFlatCustomers } from "../vault.js";
 import {
+  validateVaultPath,
+  validateCustomerName,
+  isValidGuid,
+  isValidIsoDate,
+  validationError,
+} from "../validation.js";
+import {
   isAutoConfirmed,
   generateDiff,
   generateCompactBatchDiff,
@@ -49,6 +56,9 @@ export function registerWriteTools(
       },
     },
     async ({ path, heading, content, operation }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) return validationError(`patch_note: ${pathErr}`);
+
       const op = operation ?? "append";
       const autoConfirm = isAutoConfirmed(config, "patch_note", heading);
 
@@ -123,6 +133,10 @@ export function registerWriteTools(
       },
     },
     async ({ customer, hook }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`capture_connect_hook: ${custErr}`);
+      if (!isValidIsoDate(hook.date)) return validationError("capture_connect_hook: hook.date must be a valid ISO date");
+
       const customerFile = await resolveCustomerPath(vaultPath, config, customer);
 
       // Format the hook entry  
@@ -187,6 +201,8 @@ export function registerWriteTools(
       },
     },
     async ({ action, context, session_id }) => {
+      if (!session_id || session_id.length > 200) return validationError("log_agent_action: session_id must be a non-empty string (max 200 chars)");
+
       const now = new Date();
       const dateStr = now.toISOString().slice(0, 10);
       const timeStr = now.toISOString().slice(11, 19);
@@ -236,6 +252,10 @@ export function registerWriteTools(
       },
     },
     async ({ customer, content, attendees, date, title }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`draft_meeting_note: ${custErr}`);
+      if (date && !isValidIsoDate(date)) return validationError("draft_meeting_note: date must be a valid ISO date");
+
       const meetingDate = date ?? new Date().toISOString().slice(0, 10);
       const meetingTitle = title ?? `${customer} Meeting`;
       const filename = `${meetingDate} - ${meetingTitle}.md`;
@@ -308,6 +328,9 @@ export function registerWriteTools(
       },
     },
     async ({ customer, frontmatter, sections }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`update_customer_file: ${custErr}`);
+
       const customerFile = await resolveCustomerPath(vaultPath, config, customer);
 
       let parsed = cache.getNote(customerFile);
@@ -396,6 +419,16 @@ export function registerWriteTools(
       },
     },
     async ({ customer, tpid, accountid, opportunities, team }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`create_customer_file: ${custErr}`);
+      if (tpid && !/^\d+$/.test(tpid)) return validationError("create_customer_file: tpid must be numeric");
+      if (accountid && !isValidGuid(accountid)) return validationError("create_customer_file: accountid must be a valid GUID");
+      if (opportunities) {
+        for (const opp of opportunities) {
+          if (opp.guid && !isValidGuid(opp.guid)) return validationError(`create_customer_file: opportunity guid '${opp.guid}' is not a valid GUID`);
+        }
+      }
+
       // For new files, prefer the nested layout: Customers/X/X.md
       const customerFile = `${config.schema.customersRoot}${customer}/${customer}.md`;
 
@@ -492,6 +525,9 @@ export function registerWriteTools(
       },
     },
     async ({ path, content, mode }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) return validationError(`write_note: ${pathErr}`);
+
       const writeMode = mode ?? "overwrite";
       const isNew = !(await noteExists(vaultPath, path));
 
@@ -531,6 +567,11 @@ export function registerWriteTools(
       },
     },
     async ({ paths, tags, operation }) => {
+      for (const p of paths) {
+        const pathErr = validateVaultPath(p);
+        if (pathErr) return validationError(`apply_tags: path '${p}' — ${pathErr}`);
+      }
+
       const diff = generateCompactBatchDiff(
         "apply_tags",
         `${operation} tags [${tags.join(", ")}]`,
@@ -679,6 +720,10 @@ export function registerWriteTools(
       },
     },
     async ({ customer, name, guid, status, stage, owner, salesplay }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`oil_create_opportunity: ${custErr}`);
+      if (guid && !isValidGuid(guid)) return validationError("oil_create_opportunity: guid must be a valid GUID format");
+
       const oppPath = `${config.schema.customersRoot}${customer}/${config.schema.opportunitiesSubdir}${name}.md`;
 
       const exists = await noteExists(vaultPath, oppPath);
@@ -770,6 +815,11 @@ export function registerWriteTools(
       },
     },
     async ({ customer, name, fields }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`oil_update_opportunity: ${custErr}`);
+      if (fields.guid && !isValidGuid(fields.guid)) return validationError("oil_update_opportunity: guid must be a valid GUID format");
+      if (fields.last_validated && !isValidIsoDate(fields.last_validated)) return validationError("oil_update_opportunity: last_validated must be a valid ISO date");
+
       const oppPath = `${config.schema.customersRoot}${customer}/${config.schema.opportunitiesSubdir}${name}.md`;
 
       let parsed = cache.getNote(oppPath);
@@ -831,6 +881,11 @@ export function registerWriteTools(
       },
     },
     async ({ customer, name, milestoneid, number, status, milestonedate, owner, opportunity }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`oil_create_milestone: ${custErr}`);
+      if (milestoneid && !isValidGuid(milestoneid)) return validationError("oil_create_milestone: milestoneid must be a valid GUID format");
+      if (milestonedate && !isValidIsoDate(milestonedate)) return validationError("oil_create_milestone: milestonedate must be a valid ISO date");
+
       const msPath = `${config.schema.customersRoot}${customer}/${config.schema.milestonesSubdir}${name}.md`;
 
       const exists = await noteExists(vaultPath, msPath);
@@ -924,6 +979,11 @@ export function registerWriteTools(
       },
     },
     async ({ customer, name, fields }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`oil_update_milestone: ${custErr}`);
+      if (fields.milestoneid && !isValidGuid(fields.milestoneid)) return validationError("oil_update_milestone: milestoneid must be a valid GUID format");
+      if (fields.milestonedate && !isValidIsoDate(fields.milestonedate)) return validationError("oil_update_milestone: milestonedate must be a valid ISO date");
+
       const msPath = `${config.schema.customersRoot}${customer}/${config.schema.milestonesSubdir}${name}.md`;
 
       let parsed = cache.getNote(msPath);

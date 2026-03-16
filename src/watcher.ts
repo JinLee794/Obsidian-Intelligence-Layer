@@ -117,7 +117,9 @@ export class VaultWatcher {
       // add or change — re-index the note
       await this.graph.updateNote(notePath);
       // Update embedding asynchronously (non-blocking)
-      this.embeddings?.updateNote(notePath).catch(() => {});
+      this.embeddings?.updateNote(notePath).catch((err) => {
+        console.error(`[OIL] Embedding update failed for ${notePath}:`, err);
+      });
     }
   }
 }

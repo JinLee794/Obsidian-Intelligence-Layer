@@ -118,6 +118,22 @@ export class EmbeddingIndex {
         return false;
       }
 
+      // Validate persisted shape before trusting it
+      if (!Array.isArray(data.entries)) {
+        console.error("[OIL] Embedding index corrupt: entries is not an array, rebuilding.");
+        return false;
+      }
+      for (const entry of data.entries) {
+        if (
+          typeof entry.path !== "string" ||
+          !Array.isArray(entry.embedding) ||
+          typeof entry.lastModified !== "number"
+        ) {
+          console.error("[OIL] Embedding index corrupt: invalid entry shape, rebuilding.");
+          return false;
+        }
+      }
+
       for (const entry of data.entries) {
         if (this.graph.getNode(entry.path)) {
           this.entries.set(entry.path, entry);
@@ -351,7 +367,9 @@ export class EmbeddingIndex {
     this.dirty = true;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      this.save().catch(() => {});
+      this.save().catch((err) => {
+        console.error('[OIL] Scheduled embedding index save failed:', err);
+      });
     }, SAVE_DEBOUNCE_MS);
   }
 }

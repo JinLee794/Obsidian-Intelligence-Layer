@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
+import { validateCustomerName, validationError } from "../validation.js";
 import { listFolder, noteExists, resolveCustomerPath } from "../vault.js";
 import { extractPrefetchIds, correlateEntities, buildDriftSnapshot } from "../correlate.js";
 import { checkVaultHealth, checkCustomerFreshness } from "../hygiene.js";
@@ -43,6 +44,11 @@ export function registerCompositeTools(
       },
     },
     async ({ customers }) => {
+      for (const c of customers) {
+        const custErr = validateCustomerName(c);
+        if (custErr) return validationError(`prepare_crm_prefetch: customer '${c}' — ${custErr}`);
+      }
+
       const prefetchData = await extractPrefetchIds(
         vaultPath, graph, config, cache, customers,
       );
@@ -111,6 +117,12 @@ export function registerCompositeTools(
       },
     },
     async ({ entities, date_range }) => {
+      if (date_range) {
+        const { isValidIsoDate } = await import("../validation.js");
+        if (!isValidIsoDate(date_range.start)) return validationError("correlate_with_vault: date_range.start must be a valid ISO date");
+        if (!isValidIsoDate(date_range.end)) return validationError("correlate_with_vault: date_range.end must be a valid ISO date");
+      }
+
       const result = await correlateEntities(
         vaultPath, graph, config, cache, entities, date_range,
       );
@@ -164,6 +176,11 @@ export function registerCompositeTools(
       },
     },
     async ({ findings }) => {
+      for (const f of findings) {
+        const custErr = validateCustomerName(f.customer);
+        if (custErr) return validationError(`promote_findings: customer '${f.customer}' — ${custErr}`);
+      }
+
       const dateStr = new Date().toISOString().slice(0, 10);
       const executed: { customer: string; section: string; path: string }[] = [];
       const gatedItems: { customer: string; section: string; content: string; path: string }[] = [];
@@ -270,6 +287,13 @@ export function registerCompositeTools(
       },
     },
     async ({ customers }) => {
+      if (customers) {
+        for (const c of customers) {
+          const custErr = validateCustomerName(c);
+          if (custErr) return validationError(`check_vault_health: customer '${c}' — ${custErr}`);
+        }
+      }
+
       const report = await checkVaultHealth(
         vaultPath, graph, config, cache, customers,
       );
@@ -336,6 +360,9 @@ export function registerCompositeTools(
       },
     },
     async ({ customer }) => {
+      const custErr = validateCustomerName(customer);
+      if (custErr) return validationError(`get_drift_report: ${custErr}`);
+
       const snapshot = await buildDriftSnapshot(
         vaultPath, graph, config, cache, customer,
       );
