@@ -34,7 +34,7 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm bench
+      - run: npm run bench
 
       - name: Check if version changed
         id: version
