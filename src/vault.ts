@@ -680,3 +680,102 @@ export async function detectFlatCustomers(
   }
   return results;
 }
+
+// ─── Partitioned Insights ─────────────────────────────────────────────────────
+
+/**
+ * Read Agent Insights from per-quarter sub-notes (e.g. insights/2026-Q1.md)
+ * instead of a monolithic section. Returns current + previous quarters.
+ * Falls back to empty when no partitioned sub-notes exist (caller should
+ * parse the monolithic section as before).
+ */
+export async function readInsightsPartitioned(
+  vaultPath: string,
+  config: OilConfig,
+  customer: string,
+  quarters: number = 2,
+): Promise<{ partitioned: boolean; entries: string[]; files: string[] }> {
+  const insightsDir = `${config.schema.customersRoot}${customer}/${config.schema.insightsSubdir}`;
+
+  let insightFiles: string[];
+  try {
+    insightFiles = await listFolder(vaultPath, insightsDir);
+  } catch {
+    insightFiles = [];
+  }
+
+  if (insightFiles.length > 0) {
+    // Sort descending by filename (YYYY-QN.md sorts correctly)
+    insightFiles.sort((a, b) => b.localeCompare(a));
+    const recent = insightFiles.slice(0, quarters);
+
+    const entries: string[] = [];
+    for (const file of recent) {
+      try {
+        const parsed = await readNote(vaultPath, file);
+        const lines = parsed.content
+          .split("\n")
+          .filter((l) => l.trim())
+          .map((l) => l.replace(/^[-*]\s+/, "").trim());
+        entries.push(...lines);
+      } catch {
+        continue;
+      }
+    }
+
+    return { partitioned: true, entries, files: recent };
+  }
+
+  // No partitioned sub-notes — caller should fall back to monolithic section
+  return { partitioned: false, entries: [], files: [] };
+}
+
+// ─── Frontmatter-Indexed Meeting Lookup ───────────────────────────────────────
+
+/**
+ * Read recent meetings for a customer using the `recent_meetings` frontmatter
+ * field in the customer file. O(1) lookup instead of full graph scan.
+ *
+ * Returns null if the field doesn't exist (caller should fall back to graph scan).
+ *
+ * Expected frontmatter format:
+ *   recent_meetings:
+ *     - path: Meetings/2026-03-15-Contoso-QBR.md
+ *       date: "2026-03-15"
+ *     - path: Meetings/2026-03-01-Contoso-Review.md
+ *       date: "2026-03-01"
+ */
+export function readMeetingsFromFrontmatter(
+  frontmatter: Record<string, unknown>,
+  lookbackDays: number,
+): NoteRef[] | null {
+  const meetingsList = frontmatter.recent_meetings;
+  if (!Array.isArray(meetingsList) || meetingsList.length === 0) return null;
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - lookbackDays);
+
+  const refs: NoteRef[] = [];
+  for (const entry of meetingsList) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const rec = entry as Record<string, unknown>;
+    const path = typeof rec.path === "string" ? rec.path : null;
+    if (!path) continue;
+
+    // Filter by date — skip entries without a valid date (avoids immortal entries)
+    const dateStr = typeof rec.date === "string" ? rec.date : null;
+    if (!dateStr) continue;
+    const meetingDate = new Date(dateStr);
+    if (isNaN(meetingDate.getTime()) || meetingDate < cutoff) continue;
+
+    const title = typeof rec.title === "string"
+      ? rec.title
+      : basename(path, extname(path));
+
+    refs.push({ path, title, tags: [] });
+  }
+
+  // Return null (not empty array) when no entries survive filtering,
+  // so the caller's `?? fallback` graph scan still triggers.
+  return refs.length > 0 ? refs : null;
+}

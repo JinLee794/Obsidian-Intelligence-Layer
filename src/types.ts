@@ -46,6 +46,8 @@ export interface GraphNode {
   path: string;
   title: string;
   tags: string[];
+  headings: string[];
+  bodySnippet: string; // first N chars of body (frontmatter-stripped) for search
   frontmatter: NoteFrontmatter;
   outLinks: Set<string>; // paths this note links to
   inLinks: Set<string>; // paths that link to this note
@@ -195,6 +197,7 @@ export interface SchemaConfig {
   connectHooksBackup: string;
   opportunitiesSubdir: string;
   milestonesSubdir: string;
+  insightsSubdir: string;
 }
 
 export interface FrontmatterSchemaConfig {

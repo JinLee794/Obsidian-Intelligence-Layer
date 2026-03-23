@@ -17,13 +17,15 @@ interface PersistedGraphNode {
   path: string;
   title: string;
   tags: string[];
+  headings: string[];
+  bodySnippet?: string;
   frontmatter: Record<string, unknown>;
   rawOutLinks: string[];
   lastModified: number;
 }
 
 interface PersistedGraph {
-  version: 1;
+  version: 1 | 2;
   builtAt: string;
   nodes: PersistedGraphNode[];
 }
@@ -111,6 +113,8 @@ export class GraphIndex {
       const title = this.extractTitle(notePath, content);
       const wikilinks = extractWikilinks(content);
       const tags = this.extractTags(frontmatter, content);
+      const headings = this.extractHeadings(content);
+      const bodySnippet = content.slice(0, 10_000);
 
       // Store raw wikilink targets for persistence
       this.rawOutLinks.set(notePath, wikilinks);
@@ -119,6 +123,8 @@ export class GraphIndex {
         path: notePath,
         title,
         tags,
+        headings,
+        bodySnippet,
         frontmatter: frontmatter as Record<string, unknown>,
         outLinks: new Set(wikilinks), // Temporarily stores link targets (names)
         inLinks: new Set(),
@@ -256,6 +262,8 @@ export class GraphIndex {
         path,
         title: node.title,
         tags: node.tags,
+        headings: node.headings,
+        bodySnippet: node.bodySnippet,
         frontmatter: node.frontmatter,
         rawOutLinks: this.rawOutLinks.get(path) ?? [],
         lastModified: this.fileMtimes.get(path) ?? 0,
@@ -263,7 +271,7 @@ export class GraphIndex {
     }
 
     const data: PersistedGraph = {
-      version: 1,
+      version: 2,
       builtAt: this._lastIndexed.toISOString(),
       nodes: persistedNodes,
     };
@@ -282,7 +290,7 @@ export class GraphIndex {
       const raw = await readFile(fullPath, "utf-8");
       const data: PersistedGraph = JSON.parse(raw);
 
-      if (data.version !== 1) {
+      if (data.version !== 1 && data.version !== 2) {
         console.error("[OIL] Graph index version mismatch, will rebuild.");
         return false;
       }
@@ -310,6 +318,8 @@ export class GraphIndex {
           path: pn.path,
           title: pn.title,
           tags: pn.tags,
+          headings: pn.headings ?? [],
+          bodySnippet: pn.bodySnippet ?? "",
           frontmatter: pn.frontmatter,
           outLinks: new Set(pn.rawOutLinks), // Will be resolved below
           inLinks: new Set(),
@@ -604,6 +614,20 @@ export class GraphIndex {
     }
 
     return [...tags];
+  }
+
+  /**
+   * Extract markdown headings (## and ###) from content for search indexing.
+   * Skips the H1 (used as title) and stops at depth 3 to avoid noise.
+   */
+  private extractHeadings(content: string): string[] {
+    const headings: string[] = [];
+    const headingRegex = /^#{2,3}\s+(.+)$/gm;
+    let match;
+    while ((match = headingRegex.exec(content)) !== null) {
+      headings.push(match[1].trim());
+    }
+    return headings;
   }
 
   private toNoteRef(path: string): NoteRef | null {

@@ -1,6 +1,6 @@
 /**
  * OIL — Retrieve tools
- * Higher-level retrieval tools: search, query, similarity.
+ * Higher-level retrieval tools: search, query, similarity, frontmatter index.
  * All fully autonomous (no confirmation gate).
  */
 
@@ -14,6 +14,159 @@ import { readNote } from "../vault.js";
 import { queryNotes } from "../query.js";
 import { searchVault } from "../search.js";
 import type { EmbeddingIndex } from "../embeddings.js";
+
+// ─── Frontmatter Index ────────────────────────────────────────────────────────
+
+interface FrontmatterIndexEntry {
+  path: string;
+  value: string;
+}
+
+/** Module-level frontmatter index — rebuilt on invalidation. */
+let _frontmatterIndex: Map<string, FrontmatterIndexEntry[]> | null = null;
+
+function buildFrontmatterIndex(graph: GraphIndex): Map<string, FrontmatterIndexEntry[]> {
+  const index = new Map<string, FrontmatterIndexEntry[]>();
+  const all = graph.getNotesByFolder("");
+
+  for (const ref of all) {
+    const node = graph.getNode(ref.path);
+    if (!node) continue;
+
+    for (const [rawKey, rawValue] of Object.entries(node.frontmatter)) {
+      const key = rawKey.toLowerCase();
+      const values = normalizeFrontmatterValues(rawValue);
+      if (values.length === 0) continue;
+
+      const bucket = index.get(key) ?? [];
+      for (const value of values) {
+        bucket.push({ path: node.path, value });
+      }
+      index.set(key, bucket);
+    }
+  }
+
+  return index;
+}
+
+function normalizeFrontmatterValues(value: unknown): string[] {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return [String(value).toLowerCase()];
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry) => typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean")
+      .map((entry) => String(entry).toLowerCase());
+  }
+  // Nested objects — stringify so they're at least findable
+  if (typeof value === "object" && value !== null) {
+    return [JSON.stringify(value).toLowerCase()];
+  }
+  return [];
+}
+
+/**
+ * Get or build the frontmatter index. Cached at module level.
+ */
+function getOrBuildFrontmatterIndex(graph: GraphIndex): Map<string, FrontmatterIndexEntry[]> {
+  if (!_frontmatterIndex) {
+    _frontmatterIndex = buildFrontmatterIndex(graph);
+  }
+  return _frontmatterIndex;
+}
+
+/**
+ * Invalidate the frontmatter index so it rebuilds on next query.
+ * Call this from the file watcher when notes change.
+ */
+export function invalidateFrontmatterIndex(): void {
+  _frontmatterIndex = null;
+}
+
+// ─── Content Search (fallback) ────────────────────────────────────────────────
+
+/**
+ * Full-content term frequency search — reads every note from disk.
+ * Expensive but guarantees any detail can be found when fuzzy/lexical miss.
+ */
+async function contentSearch(
+  graph: GraphIndex,
+  vaultPath: string,
+  query: string,
+  limit: number,
+): Promise<Array<{ path: string; title: string; score: number }>> {
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((term) => term.length >= 2);
+
+  if (terms.length === 0) return [];
+
+  const scored: Array<{ path: string; title: string; score: number }> = [];
+  const refs = graph.getNotesByFolder("");
+
+  for (const ref of refs) {
+    try {
+      const note = await readNote(vaultPath, ref.path);
+      const lower = note.content.toLowerCase();
+
+      let totalHits = 0;
+      for (const term of terms) {
+        let idx = lower.indexOf(term);
+        while (idx >= 0) {
+          totalHits++;
+          idx = lower.indexOf(term, idx + term.length);
+        }
+      }
+
+      if (totalHits > 0) {
+        scored.push({
+          path: ref.path,
+          title: ref.title,
+          score: Math.min(totalHits / terms.length / 10, 1),
+        });
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit);
+}
+
+/**
+ * Build a contextual snippet around the first matching term.
+ */
+function buildSnippet(content: string, query: string): string {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((term) => term.length >= 2);
+
+  const lower = compact.toLowerCase();
+  let firstIdx = -1;
+  for (const term of terms) {
+    const idx = lower.indexOf(term);
+    if (idx >= 0) {
+      firstIdx = idx;
+      break;
+    }
+  }
+
+  if (firstIdx < 0) {
+    return compact.slice(0, 220);
+  }
+
+  const start = Math.max(0, firstIdx - 80);
+  const end = Math.min(compact.length, firstIdx + 140);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < compact.length ? "..." : "";
+  return `${prefix}${compact.slice(start, end)}${suffix}`;
+}
 
 /**
  * Register all Retrieve tools on the MCP server.
@@ -49,10 +202,40 @@ export function registerRetrieveTools(
         if (folderErr) return validationError(`search_vault: filter_folder — ${folderErr}`);
       }
 
-      const results = await searchVault(graph, config, query, tier, limit ?? 10, {
+      const boundedLimit = limit ?? 10;
+      let results = await searchVault(graph, config, query, tier, boundedLimit, {
         folder: filter_folder,
         tags: filter_tags,
       }, embeddings);
+
+      // Content search fallback: if tier 1/2 didn't find enough, search full note bodies
+      if (results.length < boundedLimit && tier !== "semantic") {
+        const contentMatches = await contentSearch(graph, vaultPath, query, boundedLimit);
+        const seen = new Set(results.map((r) => r.path));
+        for (const candidate of contentMatches) {
+          if (seen.has(candidate.path)) continue;
+          // Respect folder/tag filters from the primary search
+          if (filter_folder && !candidate.path.startsWith(filter_folder)) continue;
+          if (filter_tags && filter_tags.length > 0) {
+            const node = graph.getNode(candidate.path);
+            const nodeTags = node?.tags ?? [];
+            if (!filter_tags.some((t) => nodeTags.includes(t))) continue;
+          }
+          try {
+            const note = await readNote(vaultPath, candidate.path);
+            results.push({
+              path: candidate.path,
+              title: candidate.title,
+              excerpt: buildSnippet(note.content, query),
+              score: candidate.score * 0.4, // downweight vs primary tiers
+              matchType: "lexical" as const,
+            });
+            seen.add(candidate.path);
+          } catch { continue; }
+          if (results.length >= boundedLimit) break;
+        }
+      }
+
       return {
         content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
       };
@@ -269,6 +452,44 @@ export function registerRetrieveTools(
           ],
         };
       }
+    },
+  );
+
+  // ── query_frontmatter ────────────────────────────────────────────────
+
+  server.registerTool(
+    "query_frontmatter",
+    {
+      description:
+        "Fast frontmatter index lookup by key and value fragment. O(1) key lookup instead of full vault scan. Use for quick TPID, customer, status, or tag lookups.",
+      inputSchema: {
+        key: z.string().describe("Frontmatter key to search (e.g. 'tpid', 'customer', 'status')"),
+        value_fragment: z.string().describe("Case-insensitive value fragment to match"),
+      },
+    },
+    async ({ key, value_fragment }) => {
+      const fmIndex = getOrBuildFrontmatterIndex(graph);
+      const entries = fmIndex.get(key.toLowerCase()) ?? [];
+      const fragment = value_fragment.toLowerCase();
+
+      const paths = [...new Set(
+        entries
+          .filter((entry) => entry.value.includes(fragment))
+          .map((entry) => entry.path),
+      )].slice(0, 20);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { key, value_fragment, count: paths.length, paths },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
     },
   );
 }

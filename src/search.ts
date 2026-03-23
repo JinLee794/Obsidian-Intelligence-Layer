@@ -15,6 +15,7 @@ interface SearchEntry {
   title: string;
   tags: string[];
   headings: string[];
+  bodySnippet: string;
 }
 
 // ─── Fuse Index Cache ─────────────────────────────────────────────────────────
@@ -38,13 +39,12 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
     const node = graph.getNode(ref.path);
     if (!node) continue;
 
-    // Extract headings from frontmatter or content won't be available here
-    // We can use tags and title for fuzzy matching
     entries.push({
       path: node.path,
       title: node.title,
       tags: node.tags,
-      headings: [], // Would need vault reads for full heading extraction
+      headings: node.headings,
+      bodySnippet: node.bodySnippet ?? "",
     });
   }
 
@@ -53,6 +53,7 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
       { name: "title", weight: 3 },
       { name: "tags", weight: 2 },
       { name: "headings", weight: 1 },
+      { name: "bodySnippet", weight: 0.5 },
     ],
     threshold: 0.4,
     includeScore: true,
@@ -90,15 +91,26 @@ export function lexicalSearch(
   for (const ref of allRefs) {
     if (!passesFilters(ref.path, graph, filters)) continue;
 
+    const node = graph.getNode(ref.path);
     const titleMatch = ref.title.toLowerCase().includes(q);
     const tagMatch = ref.tags.some((t) => t.toLowerCase().includes(q));
+    const headingMatch = node?.headings.some((h) => h.toLowerCase().includes(q)) ?? false;
+    const bodyMatch = node?.bodySnippet?.toLowerCase().includes(q) ?? false;
 
-    if (titleMatch || tagMatch) {
+    if (titleMatch || tagMatch || headingMatch || bodyMatch) {
+      // Build a contextual excerpt for body matches
+      let excerpt = ref.tags.join(", ");
+      if (bodyMatch && !titleMatch && !tagMatch && !headingMatch && node?.bodySnippet) {
+        const idx = node.bodySnippet.toLowerCase().indexOf(q);
+        const start = Math.max(0, idx - 40);
+        const end = Math.min(node.bodySnippet.length, idx + q.length + 40);
+        excerpt = (start > 0 ? "…" : "") + node.bodySnippet.slice(start, end).trim() + (end < node.bodySnippet.length ? "…" : "");
+      }
       results.push({
         path: ref.path,
         title: ref.title,
-        excerpt: ref.tags.join(", "),
-        score: titleMatch ? 1.0 : 0.7,
+        excerpt,
+        score: titleMatch ? 1.0 : headingMatch ? 0.85 : tagMatch ? 0.7 : 0.5,
         matchType: "lexical",
       });
     }

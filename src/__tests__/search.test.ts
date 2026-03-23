@@ -27,15 +27,16 @@ beforeAll(async () => {
 
   await mkdir(join(vaultRoot, "Customers"), { recursive: true });
   await mkdir(join(vaultRoot, "Meetings"), { recursive: true });
+  await mkdir(join(vaultRoot, "Reference"), { recursive: true });
 
   await writeFile(
     join(vaultRoot, "Customers/Contoso.md"),
-    `---\ntags: [customer, azure]\n---\n# Contoso\nKey customer.\n`,
+    `---\ntags: [customer, azure]\n---\n# Contoso\nKey customer.\n\n## GHCP Seat Analysis\n\n292 active seats.\n\n## Team\n\n- Alice (CSA)\n`,
     "utf-8",
   );
   await writeFile(
     join(vaultRoot, "Customers/Fabrikam.md"),
-    `---\ntags: [customer, m365]\n---\n# Fabrikam\nSecondary customer.\n`,
+    `---\ntags: [customer, m365]\n---\n# Fabrikam\nSecondary customer.\n\n## Azure Migration Plan\n\nPhase 1 complete.\n`,
     "utf-8",
   );
   await writeFile(
@@ -46,6 +47,12 @@ beforeAll(async () => {
   await writeFile(
     join(vaultRoot, "Meetings/2026-03-01 - Contoso Sync.md"),
     `---\ntags: [meeting]\ncustomer: Contoso\n---\n# Contoso Sync\nDiscussed migration.\n`,
+    "utf-8",
+  );
+  // Body-only content — person name buried in a markdown table (not in title, tags, or headings)
+  await writeFile(
+    join(vaultRoot, "Reference/Committed-Milestone-Handoff-Tracker.md"),
+    `---\ntags: [reference, tracker]\n---\n# Committed Milestone Handoff Tracker\n\n## Active Handoffs\n\n| Customer | Owner | Status |\n|---|---|---|\n| Contoso | Tony Bell | In Progress |\n| Fabrikam | Jane Smith | Complete |\n| Northwind | Carlos Rivera | Pending |\n`,
     "utf-8",
   );
 
@@ -108,6 +115,45 @@ describe("lexicalSearch", () => {
     // Only Contoso and Northwind have the azure tag
     expect(results.every((r) => r.title !== "Fabrikam")).toBe(true);
   });
+
+  it("finds notes by heading substring", () => {
+    const results = lexicalSearch(graph, "GHCP Seat", 10);
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results.some((r) => r.title === "Contoso")).toBe(true);
+  });
+
+  it("heading matches score between title and tag matches", () => {
+    const results = lexicalSearch(graph, "GHCP Seat", 10);
+    const headingMatch = results.find((r) => r.title === "Contoso");
+    expect(headingMatch).toBeDefined();
+    expect(headingMatch!.score).toBe(0.85);
+  });
+
+  it("finds notes by body content substring", () => {
+    const results = lexicalSearch(graph, "Tony Bell", 10);
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results.some((r) => r.title === "Committed Milestone Handoff Tracker")).toBe(true);
+  });
+
+  it("body matches score lower than heading and tag matches", () => {
+    const results = lexicalSearch(graph, "Tony Bell", 10);
+    const bodyMatch = results.find((r) => r.title === "Committed Milestone Handoff Tracker");
+    expect(bodyMatch).toBeDefined();
+    expect(bodyMatch!.score).toBe(0.5);
+  });
+
+  it("includes contextual excerpt for body-only matches", () => {
+    const results = lexicalSearch(graph, "Tony Bell", 10);
+    const bodyMatch = results.find((r) => r.title === "Committed Milestone Handoff Tracker");
+    expect(bodyMatch).toBeDefined();
+    expect(bodyMatch!.excerpt).toContain("Tony Bell");
+  });
+
+  it("finds inline data in markdown tables via body search", () => {
+    const results = lexicalSearch(graph, "Carlos Rivera", 10);
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results.some((r) => r.title === "Committed Milestone Handoff Tracker")).toBe(true);
+  });
 });
 
 describe("fuzzySearch", () => {
@@ -140,6 +186,30 @@ describe("fuzzySearch", () => {
   it("respects limit", () => {
     const results = fuzzySearch(graph, "customer", 1);
     expect(results.length).toBeLessThanOrEqual(1);
+  });
+
+  it("finds notes by fuzzy heading match", () => {
+    invalidateSearchIndex();
+    const results = fuzzySearch(graph, "GHCP Seat Analysis", 10);
+    expect(results.some((r) => r.title === "Contoso")).toBe(true);
+  });
+
+  it("finds notes by heading even with typos", () => {
+    invalidateSearchIndex();
+    const results = fuzzySearch(graph, "Azure Migraton Plan", 10);
+    expect(results.some((r) => r.title === "Fabrikam")).toBe(true);
+  });
+
+  it("finds notes by body content via fuzzy match", () => {
+    invalidateSearchIndex();
+    const results = fuzzySearch(graph, "Tony Bell", 10);
+    expect(results.some((r) => r.title === "Committed Milestone Handoff Tracker")).toBe(true);
+  });
+
+  it("finds body content with typos via fuzzy match", () => {
+    invalidateSearchIndex();
+    const results = fuzzySearch(graph, "Toni Bel", 10);
+    expect(results.some((r) => r.title === "Committed Milestone Handoff Tracker")).toBe(true);
   });
 });
 

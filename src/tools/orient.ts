@@ -27,6 +27,8 @@ import {
   readOpportunityNotes,
   readMilestoneNotes,
   listCustomerEntities,
+  readInsightsPartitioned,
+  readMeetingsFromFrontmatter,
 } from "../vault.js";
 import type {
   CustomerContext,
@@ -128,23 +130,32 @@ export function registerOrientTools(
 
       // Parse structured sections
       const teamSection = parsed.sections.get("Team") ?? "";
-      const insightsSection = parsed.sections.get("Agent Insights") ?? "";
       const connectSection = parsed.sections.get("Connect Hooks") ?? "";
 
       // Read entities — prefers sub-notes, falls back to section parsing
       const opportunities = await readOpportunityNotes(vaultPath, config, customer);
       const milestones = await readMilestoneNotes(vaultPath, config, customer);
       const team = parseTeam(teamSection);
-      const agentInsights = insightsSection
-        .split("\n")
-        .filter((l) => l.trim())
-        .map((l) => l.replace(/^[-*]\s+/, "").trim());
+
+      // Agent Insights — partitioned sub-notes first, fallback to monolithic section
+      const insightsResult = await readInsightsPartitioned(vaultPath, config, customer);
+      let agentInsights: string[];
+      if (insightsResult.partitioned) {
+        agentInsights = insightsResult.entries;
+      } else {
+        const insightsSection = parsed.sections.get("Agent Insights") ?? "";
+        agentInsights = insightsSection
+          .split("\n")
+          .filter((l) => l.trim())
+          .map((l) => l.replace(/^[-*]\s+/, "").trim());
+      }
 
       // Linked people: find People notes that reference this customer
       const linkedPeople = findLinkedPeople(graph, config, customer);
 
-      // Recent meetings — notes in Meetings/ with matching customer frontmatter
-      const recentMeetings = findRecentMeetings(
+      // Recent meetings — prefer frontmatter index (O(1)), fall back to graph scan
+      const fmMeetings = readMeetingsFromFrontmatter(parsed.frontmatter, lookback);
+      const recentMeetings = fmMeetings ?? findRecentMeetings(
         graph,
         config,
         customer,

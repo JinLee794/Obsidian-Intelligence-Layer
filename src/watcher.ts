@@ -10,6 +10,7 @@ import type { GraphIndex } from "./graph.js";
 import type { SessionCache } from "./cache.js";
 import type { EmbeddingIndex } from "./embeddings.js";
 import { invalidateSearchIndex } from "./search.js";
+import { invalidateFrontmatterIndex } from "./tools/retrieve.js";
 
 export class VaultWatcher {
   private watcher: FSWatcher | null = null;
@@ -106,20 +107,24 @@ export class VaultWatcher {
     notePath: string,
     event: "add" | "change" | "unlink",
   ): Promise<void> {
-    // Invalidate session cache and search index
+    // Invalidate session cache first (always safe)
     this.cache.invalidateNote(notePath);
-    invalidateSearchIndex();
 
     if (event === "unlink") {
       this.graph.removeNote(notePath);
       this.embeddings?.removeNote(notePath);
     } else {
-      // add or change — re-index the note
+      // add or change — re-index the note first
       await this.graph.updateNote(notePath);
       // Update embedding asynchronously (non-blocking)
       this.embeddings?.updateNote(notePath).catch((err) => {
         console.error(`[OIL] Embedding update failed for ${notePath}:`, err);
       });
     }
+
+    // Invalidate search & frontmatter indexes AFTER graph is current,
+    // so rebuilt indexes reflect the updated node data.
+    invalidateSearchIndex();
+    invalidateFrontmatterIndex();
   }
 }
