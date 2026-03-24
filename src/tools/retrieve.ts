@@ -184,7 +184,8 @@ export function registerRetrieveTools(
   _config: OilConfig,
   embeddings: EmbeddingIndex | null,
 ): void {
-  const frontmatterIndex = buildFrontmatterIndex(graph);
+  // Invalidate module-level frontmatter index so it rebuilds from the current graph
+  invalidateFrontmatterIndex();
 
   server.registerTool(
     "search_vault",
@@ -392,6 +393,105 @@ export function registerRetrieveTools(
               null,
               2,
             ),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── get_related_entities ──────────────────────────────────────────────
+
+  server.registerTool(
+    "get_related_entities",
+    {
+      description:
+        "Graph traversal: returns notes linked to a given note up to N hops away. Returns refs without full content for token efficiency.",
+      inputSchema: {
+        path: z.string().describe("Note path relative to vault root"),
+        max_hops: z.number().optional().describe("Maximum link hops (default: 2)"),
+      },
+    },
+    async ({ path, max_hops }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) return validationError(`get_related_entities: ${pathErr}`);
+
+      const related = graph.getRelatedNotes(path, max_hops ?? 2);
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ path, max_hops: max_hops ?? 2, related }, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // ── semantic_search ──────────────────────────────────────────────────
+
+  server.registerTool(
+    "semantic_search",
+    {
+      description:
+        "Semantic search across vault notes. Returns ranked results with short snippets.",
+      inputSchema: {
+        query: z.string().describe("Natural language search query"),
+        limit: z.number().optional().describe("Max results (default: 10)"),
+      },
+    },
+    async ({ query, limit }) => {
+      const boundedLimit = limit ?? 10;
+
+      // Use embedding index if available, otherwise fall back to fuzzy + content search
+      let results: Array<{ path: string; title: string; snippet: string; score: number }>;
+
+      if (embeddings) {
+        const searchResults = await searchVault(graph, _config, query, "semantic", boundedLimit, {}, embeddings);
+        results = await Promise.all(
+          searchResults.map(async (r: SearchResult) => {
+            let snippet = r.excerpt ?? "";
+            if (!snippet) {
+              try {
+                const note = await readNote(vaultPath, r.path);
+                snippet = buildSnippet(note.content, query);
+              } catch { snippet = ""; }
+            }
+            return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
+          }),
+        );
+      } else {
+        // Fallback: fuzzy search + content search
+        const fuzzyResults = fuzzySearch(graph, query, boundedLimit);
+        const contentResults = await contentSearch(graph, vaultPath, query, boundedLimit);
+
+        const seen = new Set<string>();
+        const merged: Array<{ path: string; title: string; score: number }> = [];
+        for (const r of [...fuzzyResults, ...contentResults]) {
+          if (!seen.has(r.path)) {
+            seen.add(r.path);
+            merged.push(r);
+          }
+        }
+        merged.sort((a, b) => b.score - a.score);
+
+        results = await Promise.all(
+          merged.slice(0, boundedLimit).map(async (r) => {
+            let snippet = "";
+            try {
+              const note = await readNote(vaultPath, r.path);
+              snippet = buildSnippet(note.content, query);
+            } catch { /* skip */ }
+            return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
+          }),
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ count: results.length, results }, null, 2),
           },
         ],
       };
