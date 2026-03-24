@@ -105,6 +105,26 @@ describe("retrieve v2 — get_note_metadata", () => {
     expect(result.headings).toContain("CRM Updates");
     expect(typeof result.mtime_ms).toBe("number");
   });
+
+  it("resolves TPID to customer name automatically", async () => {
+    const result = await server.callToolJson("get_customer_context", {
+      customer: "12345",
+    });
+
+    // Should resolve TPID "12345" → Contoso (via frontmatter tpid field)
+    expect(result.frontmatter).toBeDefined();
+    expect(result.frontmatter.tpid).toBe("12345");
+    expect(result.opportunities.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("returns descriptive error for unresolvable TPID", async () => {
+    const result = await server.callToolJson("get_customer_context", {
+      customer: "99999999",
+    });
+
+    expect(result.error).toBeTruthy();
+    expect(result.error).toContain("TPID");
+  });
 });
 
 describe("retrieve v2 — read_note_section", () => {

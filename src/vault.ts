@@ -235,7 +235,8 @@ async function walkDir(
         await walkDir(root, join(dir, entry.name), results);
       }
     } else if (entry.isFile() && isAllowedFile(entry.name)) {
-      results.push(relative(root, join(dir, entry.name)));
+      // Normalize to forward slashes — Obsidian uses POSIX paths regardless of OS
+      results.push(relative(root, join(dir, entry.name)).replace(/\\/g, "/"));
     }
   }
 }
@@ -454,6 +455,39 @@ export async function resolveCustomerPath(
   if (await noteExists(vaultPath, flat)) return flat;
   // Default to nested for new files
   return nested;
+}
+
+/**
+ * Detect whether a string looks like a TPID (numeric identifier).
+ * TPIDs are purely numeric strings, typically 5-12 digits.
+ */
+export function looksLikeTpid(input: string): boolean {
+  return /^\d{4,15}$/.test(input.trim());
+}
+
+/**
+ * Resolve a TPID to a customer folder name by scanning the graph index
+ * for customer notes whose frontmatter tpid field matches.
+ * Returns the customer name (folder name) or undefined if not found.
+ */
+export function resolveCustomerByTpid(
+  graph: import("./graph.js").GraphIndex,
+  config: OilConfig,
+  tpid: string,
+): string | undefined {
+  const customerNotes = graph.getNotesByFolder(config.schema.customersRoot);
+  for (const ref of customerNotes) {
+    const node = graph.getNode(ref.path);
+    if (!node) continue;
+    const noteTpid = node.frontmatter[config.frontmatterSchema.tpidField];
+    if (
+      typeof noteTpid === "string" &&
+      noteTpid.replace(/^"|"$/g, "").trim() === tpid.trim()
+    ) {
+      return customerNameFromPath(ref.path, config);
+    }
+  }
+  return undefined;
 }
 
 /**

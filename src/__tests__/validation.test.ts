@@ -6,6 +6,7 @@ import {
   validateCustomerName,
   validationError,
 } from "../validation.js";
+import { looksLikeTpid } from "../vault.js";
 
 describe("isValidGuid", () => {
   it("accepts well-formed GUIDs", () => {

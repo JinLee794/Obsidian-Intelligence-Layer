@@ -10,7 +10,7 @@ import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
 import { validateCustomerName, validationError } from "../validation.js";
-import { listFolder, noteExists, resolveCustomerPath } from "../vault.js";
+import { listFolder, noteExists, resolveCustomerPath, looksLikeTpid, resolveCustomerByTpid } from "../vault.js";
 import { extractPrefetchIds, correlateEntities, buildDriftSnapshot } from "../correlate.js";
 import { checkVaultHealth, checkCustomerFreshness } from "../hygiene.js";
 import {
@@ -44,13 +44,21 @@ export function registerCompositeTools(
       },
     },
     async ({ customers }) => {
-      for (const c of customers) {
+      // Resolve TPIDs to customer names before validation
+      const resolvedCustomers = customers.map((c) => {
+        if (looksLikeTpid(c)) {
+          return resolveCustomerByTpid(graph, config, c) ?? c;
+        }
+        return c;
+      });
+
+      for (const c of resolvedCustomers) {
         const custErr = validateCustomerName(c);
         if (custErr) return validationError(`prepare_crm_prefetch: customer '${c}' — ${custErr}`);
       }
 
       const prefetchData = await extractPrefetchIds(
-        vaultPath, graph, config, cache, customers,
+        vaultPath, graph, config, cache, resolvedCustomers,
       );
 
       // Shape for copilot: include OData filter hints

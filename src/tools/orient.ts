@@ -29,6 +29,8 @@ import {
   listCustomerEntities,
   readInsightsPartitioned,
   readMeetingsFromFrontmatter,
+  looksLikeTpid,
+  resolveCustomerByTpid,
 } from "../vault.js";
 import type {
   CustomerContext,
@@ -80,9 +82,9 @@ export function registerOrientTools(
   server.registerTool(
     "get_customer_context",
     {
-      description: "Full assembled context for a named customer — customer file content, opportunities with GUIDs, team composition, recent meetings, linked people, open action items, and optionally similar customers. Primary tool for VAULT-PREFETCH.",
+      description: "Full assembled context for a named customer — customer file content, opportunities with GUIDs, team composition, recent meetings, linked people, open action items, and optionally similar customers. Primary tool for VAULT-PREFETCH. Accepts customer name, folder name, or TPID (numeric ID) — TPIDs are auto-resolved to the matching customer.",
       inputSchema: {
-        customer: z.string().describe("Customer name or folder name under Customers/"),
+        customer: z.string().describe("Customer name, folder name under Customers/, or TPID (numeric ID auto-resolved)"),
         lookback_days: z
           .number()
           .optional()
@@ -105,8 +107,18 @@ export function registerOrientTools(
       const custErr = validateCustomerName(customer);
       if (custErr) return validationError(`get_customer_context: ${custErr}`);
 
+      // TPID auto-resolution: if input looks like a TPID, resolve to customer name first
+      let resolvedCustomer = customer;
+      if (looksLikeTpid(customer)) {
+        const tpidMatch = resolveCustomerByTpid(graph, config, customer);
+        if (tpidMatch) {
+          resolvedCustomer = tpidMatch;
+        }
+        // If no match, fall through — will produce a clear "not found" error
+      }
+
       const lookback = lookback_days ?? 90;
-      const customerFile = await resolveCustomerPath(vaultPath, config, customer);
+      const customerFile = await resolveCustomerPath(vaultPath, config, resolvedCustomer);
 
       // Read customer note (with cache)
       let parsed = cache.getNote(customerFile);
@@ -115,12 +127,15 @@ export function registerOrientTools(
           parsed = await readNote(vaultPath, customerFile);
           cache.putNote(customerFile, parsed);
         } catch {
+          const hint = looksLikeTpid(customer)
+            ? ` (input '${customer}' looks like a TPID — no customer file has this TPID in frontmatter)`
+            : "";
           return {
             content: [
               {
                 type: "text" as const,
                 text: JSON.stringify({
-                  error: `Customer file not found: ${customerFile}`,
+                  error: `Customer file not found: ${customerFile}${hint}`,
                 }),
               },
             ],
@@ -133,12 +148,12 @@ export function registerOrientTools(
       const connectSection = parsed.sections.get("Connect Hooks") ?? "";
 
       // Read entities — prefers sub-notes, falls back to section parsing
-      const opportunities = await readOpportunityNotes(vaultPath, config, customer);
-      const milestones = await readMilestoneNotes(vaultPath, config, customer);
+      const opportunities = await readOpportunityNotes(vaultPath, config, resolvedCustomer);
+      const milestones = await readMilestoneNotes(vaultPath, config, resolvedCustomer);
       const team = parseTeam(teamSection);
 
       // Agent Insights — partitioned sub-notes first, fallback to monolithic section
-      const insightsResult = await readInsightsPartitioned(vaultPath, config, customer);
+      const insightsResult = await readInsightsPartitioned(vaultPath, config, resolvedCustomer);
       let agentInsights: string[];
       if (insightsResult.partitioned) {
         agentInsights = insightsResult.entries;
@@ -151,14 +166,14 @@ export function registerOrientTools(
       }
 
       // Linked people: find People notes that reference this customer
-      const linkedPeople = findLinkedPeople(graph, config, customer);
+      const linkedPeople = findLinkedPeople(graph, config, resolvedCustomer);
 
       // Recent meetings — prefer frontmatter index (O(1)), fall back to graph scan
       const fmMeetings = readMeetingsFromFrontmatter(parsed.frontmatter, lookback);
       const recentMeetings = fmMeetings ?? findRecentMeetings(
         graph,
         config,
-        customer,
+        resolvedCustomer,
         lookback,
       );
 
@@ -169,7 +184,7 @@ export function registerOrientTools(
           vaultPath,
           graph,
           config,
-          customer,
+          resolvedCustomer,
           cache,
         );
         if (assignee) {
