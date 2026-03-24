@@ -10,14 +10,13 @@ import { loadConfig } from "./config.js";
 import { GraphIndex } from "./graph.js";
 import { SessionCache } from "./cache.js";
 import { VaultWatcher } from "./watcher.js";
-import { registerOrientTools } from "./tools/orient.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
-import { registerCompositeTools } from "./tools/composite.js";
+import { registerDomainTools } from "./tools/domain.js";
 import { EmbeddingIndex } from "./embeddings.js";
 
 const SERVER_NAME = "obsidian-intelligence-layer";
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.5.1";
 
 async function main(): Promise<void> {
   // ── Resolve vault path ─────────────────────────────────────────────────
@@ -93,17 +92,14 @@ async function main(): Promise<void> {
     version: SERVER_VERSION,
   });
 
-  // Phase 1: Orient tools
-  registerOrientTools(server, vaultPath, graph, cache, config);
-
-  // Phase 2: Retrieve tools (search, query, composites)
+  // Optimized retrieve/search tools
   registerRetrieveTools(server, vaultPath, graph, cache, config, embeddings);
 
-  // Phase 2: Write tools (tiered gate)
+  // Atomic write tools with mtime concurrency checks
   registerWriteTools(server, vaultPath, graph, cache, config);
 
-  // Phase 3: Composite tools (cross-MCP, hygiene, drift)
-  registerCompositeTools(server, vaultPath, graph, cache, config);
+  // High-value domain tools (deterministic assembly, CRM prefetch, health)
+  registerDomainTools(server, vaultPath, graph, cache, config);
 
   console.error("[OIL] Tools registered.");
 

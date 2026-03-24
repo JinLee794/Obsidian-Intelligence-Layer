@@ -26,7 +26,8 @@
     "prepublishOnly": "tsc",
     "lint": "tsc --noEmit",
     "bench": "vitest run",
-    "bench:watch": "vitest"
+    "bench:watch": "vitest",
+    "bench:compare": "bash ../../scripts/bench-against.sh"
   },
   "keywords": [
     "mcp",

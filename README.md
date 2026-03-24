@@ -1,6 +1,6 @@
 # Obsidian Intelligence Layer (OIL)
 
-An [MCP](https://modelcontextprotocol.io/) server that turns an Obsidian vault into a semantic knowledge graph for AI agents. Instead of raw file reads and writes, OIL gives agents pre-indexed search, context-aware composites, and gated writes — so the LLM spends tokens on reasoning, not data assembly.
+An [MCP](https://modelcontextprotocol.io/) server that turns an Obsidian vault into a token-efficient knowledge layer for AI agents. Instead of raw file reads and full-note dumps, OIL gives agents pre-indexed search, section-level reads, and atomic writes with concurrency safety — so the LLM spends tokens on reasoning, not data assembly.
 
 **Node 20+** · **TypeScript** · **ES modules** · **MIT**
 
@@ -24,13 +24,13 @@ An [MCP](https://modelcontextprotocol.io/) server that turns an Obsidian vault i
 
 **OIL is not a REST API wrapper around Obsidian.** It's an MCP server — meaning it speaks the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio, designed for AI agents (like GitHub Copilot, Claude, etc.) to call as a tool provider.
 
-| Thin REST Wrapper | OIL |
+| Thin REST Wrapper | OIL v2 |
 |---|---|
-| `GET /notes/Customers/Contoso.md` → raw file | `get_customer_context("Contoso")` → assembled context with opportunities, team, action items, meetings |
-| Full-vault scan for backlinks | O(1) graph lookup via pre-built index |
-| Regex search over files | 3-tier search: lexical → fuzzy → semantic embeddings |
-| `PUT /notes/...` — blind overwrite | Two-tier write gate with diffs, confirmation, and audit trail |
-| No awareness of other tools | Cross-MCP bridge: shapes output for CRM/M365 tool consumption |
+| `GET /notes/Customers/Contoso.md` → raw file | `read_note_section(path, "Team")` → just the section you need |
+| Full-vault scan for backlinks | `get_related_entities(path)` → deduped, capped traversal from pre-built graph |
+| Regex search over files | `semantic_search(query)` → ranked snippets via fuzzy + semantic fallback |
+| `PUT /notes/...` → blind overwrite | `atomic_append(path, heading, content, expected_mtime)` → mtime-checked safe write |
+| No awareness of staleness | `query_frontmatter(key, value)` → fast cached index lookup |
 
 ---
 
@@ -97,7 +97,7 @@ The server communicates over **stdio** (stdin/stdout). You don't hit it with cur
 
 > **Note:** Use absolute paths in `args` since there's no workspace-relative root. The top-level key is `mcpServers` (not `servers` like the workspace config).
 
-Once configured, the agent can call any of OIL's 22 tools by name.
+Once configured, the agent can call any of OIL's 7 tools by name.
 
 ---
 
@@ -106,24 +106,26 @@ Once configured, the agent can call any of OIL's 22 tools by name.
 ```
 src/
 ├── index.ts          # Entry point — startup sequence, tool registration, shutdown
-├── types.ts          # Shared TypeScript types (NoteRef, CustomerContext, GraphNode, etc.)
+├── cli.ts            # CLI wrapper — .env loading, subcommand routing
+├── types.ts          # Shared TypeScript types (NoteRef, OilConfig, etc.)
 ├── config.ts         # Reads oil.config.yaml from vault root; merges with defaults
+├── validation.ts     # Domain-level input validation — path safety, GUID format, ISO dates
 ├── vault.ts          # Filesystem read layer — note parsing, frontmatter, sections, wikilinks
 ├── graph.ts          # GraphIndex — bidirectional link graph, tag index, N-hop traversal
-├── cache.ts          # SessionCache — LRU note cache (200 notes, 5min TTL), pending writes queue
+├── cache.ts          # SessionCache — LRU note cache (200 notes, 5min TTL)
 ├── embeddings.ts     # EmbeddingIndex — local 384-dim embeddings (lazy-loaded, persisted)
 ├── watcher.ts        # VaultWatcher — chokidar file watcher, invalidates caches on change
-├── gate.ts           # Write gate engine — tiered confirmation, diff generation, audit logging
-├── query.ts          # Frontmatter predicate query engine (where/and/or, ordering, limits)
-├── search.ts         # 3-tier search: lexical → fuzzy (fuse.js) → semantic (embeddings)
+├── gate.ts           # Write helpers — appendToSection, executeWrite, diff generation
+├── query.ts          # Frontmatter predicate query engine
+├── search.ts         # Fuzzy search (fuse.js) + content search fallback
 ├── hygiene.ts        # Vault freshness scanning, staleness detection, health checks
 ├── correlate.ts      # Entity matching — cross-references external entities with vault notes
 └── tools/
-    ├── orient.ts     # 5 tools — "Where am I?" (vault map, customer context, person lookup)
-    ├── retrieve.ts   # 3 tools — Search, query, similarity
-    ├── write.ts      # 9 tools — Gated writes (patch, create, tag, meeting notes, etc.)
-    └── composite.ts  # 5 tools — Cross-MCP workflows (CRM prefetch, correlation, drift, hygiene)
+    ├── retrieve.ts   # 5 tools — search, query, metadata, section reads, related entities
+    └── write.ts      # 2 tools — atomic_append, atomic_replace (mtime-checked)
 ```
+
+> **Note:** `tools/orient.ts` and `tools/composite.ts` also exist in the codebase with tool definitions for context assembly (customer/person/vault context) and cross-MCP workflows (CRM prefetch, correlation, vault hygiene). These are not currently registered in the server — they're available for future phases when the tool surface expands.
 
 ### What Each Layer Does
 
@@ -133,7 +135,8 @@ src/
 | **graph.ts** | Builds a link graph from wikilinks across all notes | "The database index" |
 | **cache.ts** | Avoids re-reading disk in the same conversation | "The L1 cache" |
 | **search.ts** | Finds notes by content (not just filename) | "The search engine" |
-| **gate.ts** | Prevents the agent from blindly overwriting files | "The code review step" |
+| **gate.ts** | Section-level appends and full-file writes | "The write layer" |
+| **validation.ts** | Rejects bad paths, names, and IDs before they hit disk | "The input bouncer" |
 | **tools/*.ts** | Exposes everything above as named MCP tools | "The API controllers" |
 
 ---
@@ -148,158 +151,141 @@ When `node dist/index.js` runs:
 1. Read OBSIDIAN_VAULT_PATH env var
 2. Load oil.config.yaml (or use defaults)
 3. Load graph index from _oil-graph.json (or full-build if first run)
-4. Start incremental graph rebuild in background
-5. Initialize session cache (in-memory)
+4. Start incremental graph rebuild in background (if persisted index found)
+5. Initialize session cache (in-memory, 200-note LRU)
 6. Create embedding index (lazy — won't download model until first semantic search)
 7. Start chokidar file watcher (invalidates caches on vault changes)
-8. Register all 22 MCP tools
+8. Register 7 MCP tools (5 retrieve + 2 write)
 9. Connect stdio transport → server ready
 ```
 
-### Request Flow (Example: Agent asks "What's the context for Contoso?")
+### Request Flow (Example: Agent needs the Team section from a customer note)
 
 ```
-Agent calls: get_customer_context({ customer: "Contoso" })
+Agent calls: read_note_section({ path: "Customers/Contoso.md", heading: "Team" })
       │
       ▼
-  orient.ts handler
+  retrieve.ts handler
       │
-      ├─ cache.getNote("Customers/Contoso.md")     ← cache hit? return immediately
-      │   └─ cache miss → vault.readNote()          ← parse file from disk, cache result
+      ├─ validation.ts → validateVaultPath()   ← reject path traversal, invalid chars
       │
-      ├─ vault.parseOpportunities(content)          ← extract ## Opportunities section → [{name, guid}]
-      ├─ vault.parseTeam(content)                   ← extract ## Team section → [{name, role}]
-      ├─ vault.parseActionItems(content)            ← extract checkbox items → [{text, assignee, done}]
+      ├─ vault.readNote("Customers/Contoso.md") ← parse file, extract sections map
       │
-      ├─ graph.getBacklinks("Customers/Contoso.md") ← O(1) from pre-built index
-      │   └─ filter by People/ folder → linkedPeople
-      │   └─ filter by Meetings/ folder → recentMeetings
+      ├─ sections.get("Team")                   ← O(1) lookup from parsed sections
       │
-      └─ Return JSON: { frontmatter, opportunities, team, agentInsights, meetings, ... }
+      └─ Return JSON: { path, heading, content }
 ```
 
-The agent gets **one structured response** instead of making 6 separate calls and stitching the data itself.
+The agent gets **just the section it needs** instead of the entire note — keeping token budgets tight.
 
 ### Write Safety
 
-When the agent wants to modify a note:
+OIL v2 uses **mtime-based concurrency checks** instead of a gated approval queue. The pattern:
 
 ```
-Agent calls: update_customer_file({ customer: "Contoso", section: "Notes", content: "New insight" })
+1. Agent calls get_note_metadata(path) → receives mtime_ms
+2. Agent decides to write
+3. Agent calls atomic_append(path, heading, content, expected_mtime=mtime_ms)
       │
-      ▼
-  gate.ts checks: Is "Notes" in autoConfirmedSections?
+      ├─ Read current file mtime from disk
       │
-      ├─ YES (e.g., "Agent Insights") → Execute immediately, log to _agent-log/
+      ├─ expected_mtime matches? → Execute write, invalidate cache, return new mtime
       │
-      └─ NO → Generate diff → Queue as pending write → Return diff to agent
+      └─ Mismatch? → Reject immediately with "Stale write rejected" error
                │
-               Agent shows diff to user → User confirms
-               │
-               Agent calls: manage_pending_writes({ action: "confirm", write_id: "abc-123" })
-               │
-               └─ Execute write, log to _agent-log/
+               Agent must re-read metadata and retry with fresh mtime
 ```
+
+This eliminates the complexity of pending write queues and multi-step confirmation flows. If a workflow requires user approval, that's handled by the Copilot UI — the MCP server simply executes or rejects.
 
 ---
 
 ## Tools Reference
 
-### Orient (5 tools) — "Where am I?"
+OIL v2 exposes **7 tools** in two categories: optimized reads and atomic writes.
+
+### Retrieve (5 tools) — Token-efficient reads and search
 
 All read-only. No confirmation needed.
 
 | Tool | What It Does |
 |---|---|
-| `get_vault_context` | High-level vault map — folder tree, note count, top tags, most-linked notes. **Call this first in any new session.** |
-| `get_customer_context` | Full assembled context for a customer — opportunities, team, meetings, action items, insights. The workhorse tool. |
-| `get_person_context` | Person profile — customer associations, org type, company, linked notes. |
-| `query_graph` | Graph traversal — backlinks, forward links, or N-hop neighborhood with tag/folder filters. |
-| `resolve_people_to_customers` | Batch-resolves person names to customer associations. Used for WorkIQ entity resolution. |
+| `get_note_metadata` | Peek at a note before loading full content — returns frontmatter, creation/modification timestamps, word count, headings, and `mtime_ms` (needed for writes). |
+| `read_note_section` | Read only a specific heading section from a note. The most token-efficient read operation — request `## Team` instead of loading a 5,000-word note. |
+| `get_related_entities` | Deduped flat list of linked notes from the graph index — paths and titles only, capped at 50 results, max 3 hops. |
+| `semantic_search` | Semantic-first search with context snippets. Falls back to fuzzy (fuse.js) then lexical content search when embeddings aren't available. Results capped at 20. |
+| `query_frontmatter` | Fast cached frontmatter index lookup by key and value fragment. Returns up to 20 matching paths. No disk scan — built at startup. |
 
-### Retrieve (3 tools) — "Find me something"
+### Write (2 tools) — Atomic writes with mtime concurrency
 
-Read-only. Supports filtering and ranking.
-
-| Tool | What It Does |
-|---|---|
-| `search_vault` | Unified search across lexical, fuzzy (fuse.js), and semantic tiers. Ranked results with scores. |
-| `query_notes` | SQL-like frontmatter query — `where`, `and`, `or`, `order_by`, `limit`. |
-| `find_similar_notes` | Similarity by tags or semantic embeddings — finds comparable customers, patterns, risks. |
-
-### Write (9 tools) — "Change something"
-
-All writes go through the gate engine. Some are auto-confirmed (safe operations), others require human review.
-
-| Tool | Gate | What It Does |
-|---|---|---|
-| `patch_note` | Auto / Gated | Append/prepend to a heading section. Auto-confirmed for "Agent Insights" and "Connect Hooks"; gated for others. |
-| `capture_connect_hook` | Auto | Appends a Connect evidence entry to customer file + backup. |
-| `log_agent_action` | Auto | Writes to `_agent-log/YYYY-MM-DD.md`. Audit trail only. |
-| `draft_meeting_note` | Gated | Generates a meeting note from template. Returns diff before creation. |
-| `update_customer_file` | Gated | Proposes frontmatter or section changes to a customer file. |
-| `create_customer_file` | Gated | Scaffolds a new customer file for onboarding. |
-| `write_note` | Gated | Low-level note write. Always gated. |
-| `apply_tags` | Gated | Batch tag add/remove across multiple notes. Shows batch diff. |
-| `manage_pending_writes` | — | List, confirm, or reject queued writes. |
-
-### Composite (5 tools) — "Do a multi-step workflow"
-
-These bundle sequences that would otherwise require multiple tool calls:
+Both tools require `expected_mtime` — the file's modification timestamp from `get_note_metadata`. If the mtime doesn't match the file's current state on disk, the write is rejected immediately.
 
 | Tool | What It Does |
 |---|---|
-| `prepare_crm_prefetch` | Extracts opportunity GUIDs, TPIDs, account IDs from vault and returns them with pre-built OData filter strings — ready to paste into `crm_query`. |
-| `correlate_with_vault` | Takes external entities (people, meetings from M365) and batch-resolves them against vault notes with confidence scoring. |
-| `promote_findings` | Batch-promotes validated findings to customer files. Auto-confirms for designated sections; gated for others. |
-| `check_vault_health` | Surfaces stale insights, missing IDs, incomplete sections, orphaned notes. Returns both structured report and English issue list. |
-| `get_drift_report` | Compares vault snapshots against expected CRM state to detect stale data. |
+| `atomic_append` | Append content under a specific heading section. Fails if `expected_mtime` doesn't match — prevents stale overwrites. Returns new `mtime_ms` on success. |
+| `atomic_replace` | Replace entire note content. Same mtime check. Use for full-file rewrites when section-level append isn't sufficient. |
+
+### Design Rationale
+
+The v2 tool surface is deliberately minimal:
+
+- **No orchestration phases.** The LLM decides when to read, search, and write — OIL doesn't impose pipelines.
+- **No pending write queue.** If user approval is needed, the Copilot UI handles it. The MCP server executes or rejects.
+- **No CRM queries.** OIL surfaces vault-stored IDs (GUIDs, TPIDs). The copilot calls the CRM MCP separately.
+- **Reads are optimized for tokens.** Section-level reads and snippet-only search keep context budgets tight.
+- **Writes are optimized for safety.** mtime checks prevent race conditions without complex state machines.
 
 ---
 
 ## Configuration
 
-Create `oil.config.yaml` in your vault root. If it doesn't exist, sensible defaults are used.
+Create `oil.config.yaml` in your vault root. If it doesn't exist, sensible defaults are used. Supports **snake_case YAML** that remaps to camelCase internally.
 
 ```yaml
 # Folder mappings (where things live in your vault)
 schema:
-  customersRoot: "Customers/"
-  peopleRoot: "People/"
-  meetingsRoot: "Meetings/"
-  projectsRoot: "Projects/"
-  agentLog: "_agent-log/"
+  customers_root: "Customers/"
+  people_root: "People/"
+  meetings_root: "Meetings/"
+  projects_root: "Projects/"
+  weekly_root: "Weekly/"
+  templates_root: "Templates/"
+  agent_log: "_agent-log/"
+  connect_hooks_backup: ".connect/hooks/hooks.md"
+  opportunities_subdir: "opportunities/"
+  milestones_subdir: "milestones/"
 
 # Frontmatter field names (match your vault conventions)
-frontmatterSchema:
-  customerField: "customer"
-  tagsField: "tags"
-  tpidField: "tpid"
-  accountidField: "accountid"
+frontmatter_schema:
+  customer_field: "customer"
+  tags_field: "tags"
+  date_field: "date"
+  status_field: "status"
+  project_field: "project"
+  tpid_field: "tpid"
+  accountid_field: "accountid"
 
 # Search configuration
 search:
-  defaultTier: "fuzzy"              # lexical | fuzzy | semantic
-  semanticModel: "local"            # local embeddings (no API calls)
-  semanticIndexFile: "_oil-index.json"
-  graphIndexFile: "_oil-graph.json"
-  backgroundIndexThresholdMs: 3000
+  default_tier: "fuzzy"              # lexical | fuzzy | semantic
+  semantic_model: "local"            # local embeddings (no API calls)
+  semantic_index_file: "_oil-index.json"
+  graph_index_file: "_oil-graph.json"
+  background_index_threshold_ms: 3000
 
 # Write safety
-writeGate:
-  diffFormat: "markdown"
-  logAllWrites: true
-  batchDiffMaxNotes: 50
-  autoConfirmedSections:             # Sections that skip confirmation
+write_gate:
+  diff_format: "markdown"
+  log_all_writes: true
+  batch_diff_max_notes: 50
+  auto_confirmed_sections:           # Sections used by composite tools (future)
     - "Agent Insights"
     - "Connect Hooks"
-  autoConfirmedOperations:           # Operations that skip confirmation
+  auto_confirmed_operations:
     - "log_agent_action"
     - "capture_connect_hook"
     - "patch_note_designated"
 ```
-
-See [_specs/06-configuration.md](./_specs/06-configuration.md) for the full schema reference.
 
 ---
 
@@ -313,6 +299,8 @@ npm run build        # Compile TypeScript → dist/
 npm run dev          # Watch mode (recompiles on change)
 npm run lint         # Type-check without emitting
 npm start            # Run the server (needs OBSIDIAN_VAULT_PATH)
+npm run bench        # Run benchmark suite (vitest)
+npm run bench:watch  # Benchmarks in watch mode
 ```
 
 ### Build Requirements
@@ -323,7 +311,7 @@ npm start            # Run the server (needs OBSIDIAN_VAULT_PATH)
 
 ### Adding a New Tool
 
-1. Decide which category it belongs to: `orient` (read-only context), `retrieve` (search/query), `write` (modifies vault), or `composite` (multi-step workflow).
+1. Decide which category: `retrieve` (read-only search/query) or `write` (modifies vault).
 
 2. Open the corresponding file in `src/tools/`.
 
@@ -350,10 +338,12 @@ server.registerTool(
 );
 ```
 
-4. If the tool writes to the vault, use the gate engine from `gate.ts`:
-   - Call `generateDiff()` to create a reviewable diff
-   - Call `queueGatedWrite()` to queue it for confirmation
-   - Return the diff — don't execute the write directly
+4. If the tool writes to the vault, use the mtime concurrency pattern:
+   - Accept `expected_mtime` as a required parameter
+   - Read the file's current mtime before writing
+   - Reject immediately if mtimes don't match
+   - Invalidate the session cache after a successful write
+   - Return the new `mtime_ms` so the agent can chain further writes
 
 5. Rebuild: `npm run build`
 
@@ -370,14 +360,14 @@ server.registerTool(
 
 ### Index Stack
 
-OIL maintains three persistent/cached indices so that most tool calls resolve in milliseconds:
+OIL maintains cached indices so that most tool calls resolve in milliseconds:
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Tier 0: Graph Index (persistent)                   │
 │  _oil-graph.json — wikilinks, backlinks, tags       │
 │  Rebuilt incrementally on startup (mtime-based)     │
-│  Backlink lookup: O(1)                              │
+│  Backlink lookup: O(1), frontmatter index at startup│
 ├─────────────────────────────────────────────────────┤
 │  Tier 1: Fuzzy Search Index (in-memory, lazy)       │
 │  fuse.js — built on first search, invalidated on    │
@@ -389,10 +379,14 @@ OIL maintains three persistent/cached indices so that most tool calls resolve in
 ├─────────────────────────────────────────────────────┤
 │  Tier 3: Embedding Index (optional, persistent)     │
 │  _oil-index.json — 384-dim MiniLM-L6-v2            │
-│  Lazy-loaded on first semantic search               │
+│  Lazy-loaded on first semantic_search call          │
 │  Runs locally — no external API calls               │
 └─────────────────────────────────────────────────────┘
 ```
+
+### Frontmatter Index
+
+Built once at startup from the graph index. Maps every frontmatter key → list of `{ path, value }` entries. `query_frontmatter` runs against this in-memory index — no disk scan needed.
 
 ### File Watcher
 
@@ -407,11 +401,11 @@ OIL maintains three persistent/cached indices so that most tool calls resolve in
 
 Every tool response is designed to minimize tokens while maximizing usability:
 
-- **Excerpts, not full content**: `NoteRef` includes title + tags + first ~200 chars, not the full note
-- **Pre-built filters**: `prepare_crm_prefetch` returns OData filter strings ready to paste into `crm_query`
-- **Scored rankings**: Search results include match scores and tier labels
-- **Issue lists**: `check_vault_health` returns both structured data and a plain English issue list for reasoning
-- **Compact batch diffs**: Operations on >5 notes show folder-grouped summaries instead of per-file diffs
+- **Sections, not full content**: `read_note_section` returns only the heading you ask for
+- **Metadata before content**: `get_note_metadata` lets the agent peek (word count, headings) before committing to a full read
+- **Snippets, not full notes**: `semantic_search` returns match snippets with scores, not entire files
+- **Capped results**: Search returns max 20, graph traversals max 50 — prevents context blowout
+- **mtime in every read**: Metadata includes `mtime_ms` so the agent can chain reads → writes without an extra call
 
 ---
 
@@ -427,7 +421,19 @@ No. OIL reads/writes the vault folder directly on disk. Obsidian will pick up ch
 
 ### What's the embedding model? Does it need an API key?
 
-OIL uses `Xenova/all-MiniLM-L6-v2` locally via `@xenova/transformers`. No API key needed. The model is downloaded on first semantic search (~80MB) and cached.
+OIL uses `Xenova/all-MiniLM-L6-v2` locally via `@xenova/transformers`. No API key needed. The model is downloaded on first semantic search (~80MB) and cached. If embeddings aren't available, `semantic_search` falls back to fuzzy (fuse.js) + lexical content search.
+
+### What happened to the 22 tools from v1?
+
+The v2 redesign ([spec 11](./_specs/11-optimized-mcp-design.md)) reduced the tool surface to 7. The core insight: the LLM is already good at orchestration — OIL shouldn't replicate that. Instead, v2 focuses on token-efficient reads and safe atomic writes. The orient and composite tool code still exists in `src/tools/` for potential future use.
+
+### What about CRM integration?
+
+OIL no longer queries CRM directly. It surfaces vault-stored IDs (opportunity GUIDs, TPIDs, account IDs) through its read tools. The copilot takes those IDs and calls a separate CRM MCP (like MSX) itself.
+
+### What happened to the write gate / pending writes?
+
+Replaced by mtime-based concurrency checks. Every write requires `expected_mtime` — if the file changed since you last read it, the write is rejected. This is simpler, stateless, and prevents race conditions without a pending queue.
 
 ### What happens if I don't create `oil.config.yaml`?
 
@@ -435,28 +441,8 @@ All defaults are used. Customers in `Customers/`, people in `People/`, meetings 
 
 ### How do I see what the agent did to my vault?
 
-Check `_agent-log/` in your vault root. Every write (auto-confirmed or gated) is logged with timestamp, tool name, path, and detail.
-
-### Why not use a generic Obsidian MCP server?
-
-There are solid general-purpose Obsidian MCP servers out there — they expose clean CRUD operations (read, write, search, list) and work well for basic vault interaction. OIL takes a different approach: it's a **domain-specific** server built for account-team workflows, and the trade-offs are measurable.
-
-We ran a benchmark suite (`npm run bench`) comparing OIL against a generic CRUD-style MCP interface operating on the same vault:
-
-| Dimension | Generic CRUD | OIL (Domain-Specific) | Why It Matters |
-|---|---|---|---|
-| **Schema overhead** | ~612 tokens/turn | ~1,036 tokens/turn (1.7×) | OIL's richer tool surface costs more context per turn |
-| **MCP round-trips** (4 workflows) | 20+ calls | 6 calls (3.3× fewer) | Composite tools collapse multi-step sequences into single calls |
-| **Search latency** (warm) | ~1.3 ms | ~0.01 ms (lexical), ~0.3 ms (fuzzy) | Pre-built graph index vs. per-call file walks |
-| **Cold start** | ~1.5 ms | ~14 ms | OIL builds its graph on startup — amortizes after 1 query |
-| **Search precision** | 0.60 | 1.00 (lexical) | Structured index avoids false positives |
-| **Search recall** | 0.77 | 0.43 (lexical) → 0.80 (graph-augmented) | Graph traversal recovers recall that pure search misses |
-| **Write safety** | Direct writes | Diff → confirm → execute → audit log | ~3 extra calls and ~100–200 tokens per gated write |
-
-The takeaway isn't that generic servers are bad — they're simpler, lighter on startup, and perfectly fine for personal vaults. The domain-specific approach pays off when workflows are repetitive and multi-step (customer context assembly, CRM prefetch, cross-entity resolution), because those extra schema tokens are recouped many times over in saved round-trips and more precise retrieval.
-
-The full benchmark suite lives in `bench/` — run `npm run bench` to reproduce.
+Use `get_note_metadata` to check file timestamps, or use git / Obsidian's file recovery to track changes. The `writeGate.logAllWrites` config option and `_agent-log/` directory are available for audit logging when composite tools are enabled.
 
 ### Can I undo agent writes?
 
-Gated writes require explicit confirmation before execution. For auto-confirmed writes (Agent Insights, Connect Hooks), check `_agent-log/` and use Obsidian's file recovery or git to roll back.
+Writes require a valid mtime check, so accidental overwrites from stale state are prevented. For rollback, use Obsidian's file recovery or git.
