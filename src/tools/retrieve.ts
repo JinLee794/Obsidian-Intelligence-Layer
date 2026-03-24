@@ -12,8 +12,9 @@ import type { SessionCache } from "../cache.js";
 import type { OilConfig, NoteRef } from "../types.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { readNote, securePath } from "../vault.js";
-import { fuzzySearch } from "../search.js";
+import { fuzzySearch, searchVault } from "../search.js";
 import type { EmbeddingIndex } from "../embeddings.js";
+import type { SearchResult } from "../types.js";
 
 // ─── Frontmatter Index ────────────────────────────────────────────────────────
 
@@ -138,6 +139,10 @@ async function contentSearch(
 /**
  * Build a contextual snippet around the first matching term.
  */
+function getWordCount(text: string): number {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+
 function buildSnippet(content: string, query: string): string {
   const compact = content.replace(/\s+/g, " ").trim();
   if (!compact) return "";
@@ -203,7 +208,7 @@ export function registerRetrieveTools(
       }
 
       const boundedLimit = limit ?? 10;
-      let results = await searchVault(graph, config, query, tier, boundedLimit, {
+      let results = await searchVault(graph, _config, query, tier, boundedLimit, {
         folder: filter_folder,
         tags: filter_tags,
       }, embeddings);
@@ -211,7 +216,7 @@ export function registerRetrieveTools(
       // Content search fallback: if tier 1/2 didn't find enough, search full note bodies
       if (results.length < boundedLimit && tier !== "semantic") {
         const contentMatches = await contentSearch(graph, vaultPath, query, boundedLimit);
-        const seen = new Set(results.map((r) => r.path));
+        const seen = new Set(results.map((r: SearchResult) => r.path));
         for (const candidate of contentMatches) {
           if (seen.has(candidate.path)) continue;
           // Respect folder/tag filters from the primary search
