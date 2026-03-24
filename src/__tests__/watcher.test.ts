@@ -134,6 +134,9 @@ describe("VaultWatcher — file change detection", () => {
     watcher = new VaultWatcher(vaultRoot, graph, cache);
     watcher.start();
 
+    // Give chokidar time to initialize
+    await new Promise((r) => setTimeout(r, 500));
+
     // Modify the file
     await writeFile(
       join(vaultRoot, "notes/existing.md"),
