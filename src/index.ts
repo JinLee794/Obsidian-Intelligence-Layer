@@ -15,7 +15,7 @@ import { registerWriteTools } from "./tools/write.js";
 import { registerDomainTools } from "./tools/domain.js";
 
 const SERVER_NAME = "obsidian-intelligence-layer";
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.3.1";
 
 async function main(): Promise<void> {
   // ── Resolve vault path ─────────────────────────────────────────────────
