@@ -164,7 +164,7 @@ describe("write/read integration", () => {
     const graph = new GraphIndex(vaultRoot);
     await graph.build();
     const cache = new SessionCache();
-    registerRetrieveTools(server as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
     registerWriteTools(server as any, vaultRoot, graph, cache, config);
 
     const meta = await server.callToolJson("get_note_metadata", {
@@ -232,7 +232,7 @@ async function readCurrentMtime(vaultRoot: string, _config: OilConfig): Promise<
   const graph = new GraphIndex(vaultRoot);
   await graph.build();
   const cache = new SessionCache();
-  registerRetrieveTools(server as any, vaultRoot, graph, cache, DEFAULT_CONFIG, null);
+  registerRetrieveTools(server as any, vaultRoot, graph, cache, DEFAULT_CONFIG);
   const metadata = await server.callToolJson("get_note_metadata", {
     path: "Customers/Contoso/Contoso.md",
   });

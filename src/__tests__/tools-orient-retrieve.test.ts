@@ -92,7 +92,7 @@ describe("retrieve v2 — get_note_metadata", () => {
     const graph = new GraphIndex(vaultRoot);
     await graph.build();
     const cache = new SessionCache();
-    registerRetrieveTools(server as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
   it("returns metadata including mtime and headings", async () => {
@@ -135,7 +135,7 @@ describe("retrieve v2 — read_note_section", () => {
     const graph = new GraphIndex(vaultRoot);
     await graph.build();
     const cache = new SessionCache();
-    registerRetrieveTools(server as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
   it("returns only the requested heading content", async () => {
@@ -168,7 +168,7 @@ describe("retrieve v2 — get_related_entities", () => {
     const graph = new GraphIndex(vaultRoot);
     await graph.build();
     const cache = new SessionCache();
-    registerRetrieveTools(server as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
   it("returns linked note refs without content", async () => {
@@ -191,7 +191,7 @@ describe("retrieve v2 — semantic_search", () => {
     const graph = new GraphIndex(vaultRoot);
     await graph.build();
     const cache = new SessionCache();
-    registerRetrieveTools(server as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
   it("returns bounded snippet results", async () => {
@@ -214,7 +214,7 @@ describe("retrieve v2 — query_frontmatter", () => {
     const graph = new GraphIndex(vaultRoot);
     await graph.build();
     const cache = new SessionCache();
-    registerRetrieveTools(server as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
   it("queries frontmatter by key and value fragment", async () => {
@@ -237,7 +237,7 @@ describe("retrieve v2 — query_frontmatter", () => {
     await graph.build();
     const cache = new SessionCache();
     const newServer = new MockMcpServer();
-    registerRetrieveTools(newServer as any, vaultRoot, graph, cache, config, null);
+    registerRetrieveTools(newServer as any, vaultRoot, graph, cache, config);
 
     const result = await newServer.callToolJson("query_frontmatter", {
       key: "status",

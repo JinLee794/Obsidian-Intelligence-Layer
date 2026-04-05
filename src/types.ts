@@ -174,7 +174,7 @@ export interface SearchResult {
   title: string;
   excerpt: string;
   score: number;
-  matchType: "lexical" | "fuzzy" | "semantic";
+  matchType: "lexical" | "fuzzy";
 }
 
 // ─── Config Types ─────────────────────────────────────────────────────────────
@@ -211,9 +211,7 @@ export interface FrontmatterSchemaConfig {
 }
 
 export interface SearchConfig {
-  defaultTier: "lexical" | "fuzzy" | "semantic";
-  semanticModel: "local" | "openai" | "azure-openai";
-  semanticIndexFile: string;
+  defaultTier: "lexical" | "fuzzy";
   graphIndexFile: string;
   backgroundIndexThresholdMs: number;
 }

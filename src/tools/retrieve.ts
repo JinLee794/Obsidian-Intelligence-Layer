@@ -13,7 +13,6 @@ import type { OilConfig, NoteRef } from "../types.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { readNote, securePath } from "../vault.js";
 import { fuzzySearch, searchVault } from "../search.js";
-import type { EmbeddingIndex } from "../embeddings.js";
 import type { SearchResult } from "../types.js";
 
 // ─── Frontmatter Index ────────────────────────────────────────────────────────
@@ -23,9 +22,10 @@ interface FrontmatterIndexEntry {
   value: string;
 }
 
-/** Module-level frontmatter index — rebuilt on invalidation. */
-let _frontmatterIndex: Map<string, FrontmatterIndexEntry[]> | null = null;
-
+/**
+ * Build the frontmatter index from the current graph.
+ * Takes ~5ms for 1,696 notes — cheap enough to rebuild on every call.
+ */
 function buildFrontmatterIndex(graph: GraphIndex): Map<string, FrontmatterIndexEntry[]> {
   const index = new Map<string, FrontmatterIndexEntry[]>();
   const all = graph.getNotesByFolder("");
@@ -64,24 +64,6 @@ function normalizeFrontmatterValues(value: unknown): string[] {
     return [JSON.stringify(value).toLowerCase()];
   }
   return [];
-}
-
-/**
- * Get or build the frontmatter index. Cached at module level.
- */
-function getOrBuildFrontmatterIndex(graph: GraphIndex): Map<string, FrontmatterIndexEntry[]> {
-  if (!_frontmatterIndex) {
-    _frontmatterIndex = buildFrontmatterIndex(graph);
-  }
-  return _frontmatterIndex;
-}
-
-/**
- * Invalidate the frontmatter index so it rebuilds on next query.
- * Call this from the file watcher when notes change.
- */
-export function invalidateFrontmatterIndex(): void {
-  _frontmatterIndex = null;
 }
 
 // ─── Content Search (fallback) ────────────────────────────────────────────────
@@ -182,21 +164,17 @@ export function registerRetrieveTools(
   graph: GraphIndex,
   _cache: SessionCache,
   _config: OilConfig,
-  embeddings: EmbeddingIndex | null,
 ): void {
-  // Invalidate module-level frontmatter index so it rebuilds from the current graph
-  invalidateFrontmatterIndex();
-
   server.registerTool(
     "search_vault",
     {
-      description: "Unified search across lexical and fuzzy tiers. Returns ranked results matching the query.",
+      description: "Unified search across lexical and fuzzy tiers. Tries lexical first (fast substring), falls back to fuzzy if needed. Returns ranked results.",
       inputSchema: {
         query: z.string().describe("Search query text"),
         tier: z
-          .enum(["lexical", "fuzzy", "semantic"])
+          .enum(["lexical", "fuzzy"])
           .optional()
-          .describe("Search tier (default: from config)"),
+          .describe("Force a specific search tier (default: lexical first, fuzzy fallback)"),
         limit: z.number().optional().describe("Max results (default: 10)"),
         filter_folder: z.string().optional().describe("Restrict to this folder prefix"),
         filter_tags: z.array(z.string()).optional().describe("Restrict to notes with these tags"),
@@ -209,13 +187,13 @@ export function registerRetrieveTools(
       }
 
       const boundedLimit = limit ?? 10;
-      let results = await searchVault(graph, _config, query, tier, boundedLimit, {
+      let results = searchVault(graph, _config, query, tier, boundedLimit, {
         folder: filter_folder,
         tags: filter_tags,
-      }, embeddings);
+      });
 
-      // Content search fallback: if tier 1/2 didn't find enough, search full note bodies
-      if (results.length < boundedLimit && tier !== "semantic") {
+      // Content search fallback: if tiers didn't find enough, search full note bodies
+      if (results.length < boundedLimit) {
         const contentMatches = await contentSearch(graph, vaultPath, query, boundedLimit);
         const seen = new Set(results.map((r: SearchResult) => r.path));
         for (const candidate of contentMatches) {
@@ -374,7 +352,7 @@ export function registerRetrieveTools(
       },
     },
     async ({ key, value_fragment }) => {
-      const fmIndex = getOrBuildFrontmatterIndex(graph);
+      const fmIndex = buildFrontmatterIndex(graph);
       const entries = fmIndex.get(key.toLowerCase()) ?? [];
       const fragment = value_fragment.toLowerCase();
 
@@ -434,7 +412,7 @@ export function registerRetrieveTools(
     "semantic_search",
     {
       description:
-        "Semantic search across vault notes. Returns ranked results with short snippets.",
+        "Natural-language search across vault notes. Combines fuzzy matching with full-content search for broad recall. Returns ranked results with short snippets.",
       inputSchema: {
         query: z.string().describe("Natural language search query"),
         limit: z.number().optional().describe("Max results (default: 10)"),
@@ -443,49 +421,30 @@ export function registerRetrieveTools(
     async ({ query, limit }) => {
       const boundedLimit = limit ?? 10;
 
-      // Use embedding index if available, otherwise fall back to fuzzy + content search
-      let results: Array<{ path: string; title: string; snippet: string; score: number }>;
+      // Fuzzy search + content search for broad recall
+      const fuzzyResults = fuzzySearch(graph, query, boundedLimit);
+      const contentResults = await contentSearch(graph, vaultPath, query, boundedLimit);
 
-      if (embeddings) {
-        const searchResults = await searchVault(graph, _config, query, "semantic", boundedLimit, {}, embeddings);
-        results = await Promise.all(
-          searchResults.map(async (r: SearchResult) => {
-            let snippet = r.excerpt ?? "";
-            if (!snippet) {
-              try {
-                const note = await readNote(vaultPath, r.path);
-                snippet = buildSnippet(note.content, query);
-              } catch { snippet = ""; }
-            }
-            return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
-          }),
-        );
-      } else {
-        // Fallback: fuzzy search + content search
-        const fuzzyResults = fuzzySearch(graph, query, boundedLimit);
-        const contentResults = await contentSearch(graph, vaultPath, query, boundedLimit);
-
-        const seen = new Set<string>();
-        const merged: Array<{ path: string; title: string; score: number }> = [];
-        for (const r of [...fuzzyResults, ...contentResults]) {
-          if (!seen.has(r.path)) {
-            seen.add(r.path);
-            merged.push(r);
-          }
+      const seen = new Set<string>();
+      const merged: Array<{ path: string; title: string; score: number }> = [];
+      for (const r of [...fuzzyResults, ...contentResults]) {
+        if (!seen.has(r.path)) {
+          seen.add(r.path);
+          merged.push(r);
         }
-        merged.sort((a, b) => b.score - a.score);
-
-        results = await Promise.all(
-          merged.slice(0, boundedLimit).map(async (r) => {
-            let snippet = "";
-            try {
-              const note = await readNote(vaultPath, r.path);
-              snippet = buildSnippet(note.content, query);
-            } catch { /* skip */ }
-            return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
-          }),
-        );
       }
+      merged.sort((a, b) => b.score - a.score);
+
+      const results = await Promise.all(
+        merged.slice(0, boundedLimit).map(async (r) => {
+          let snippet = "";
+          try {
+            const note = await readNote(vaultPath, r.path);
+            snippet = buildSnippet(note.content, query);
+          } catch { /* skip */ }
+          return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
+        }),
+      );
 
       return {
         content: [

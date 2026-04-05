@@ -13,7 +13,6 @@ import { VaultWatcher } from "./watcher.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
 import { registerDomainTools } from "./tools/domain.js";
-import { EmbeddingIndex } from "./embeddings.js";
 
 const SERVER_NAME = "obsidian-intelligence-layer";
 const SERVER_VERSION = "0.5.1";
@@ -74,15 +73,8 @@ async function main(): Promise<void> {
   // ── 3. Initialise session cache ────────────────────────────────────────
   const cache = new SessionCache();
 
-  // ── 3b. Create embedding index (lazy — loads on first semantic query) ───
-  const embeddings = new EmbeddingIndex(
-    vaultPath,
-    config.search.semanticIndexFile,
-    graph,
-  );
-
   // ── 4. Start file watcher ──────────────────────────────────────────────
-  const watcher = new VaultWatcher(vaultPath, graph, cache, embeddings);
+  const watcher = new VaultWatcher(vaultPath, graph, cache);
   watcher.start();
   console.error("[OIL] File watcher started.");
 
@@ -93,7 +85,7 @@ async function main(): Promise<void> {
   });
 
   // Optimized retrieve/search tools
-  registerRetrieveTools(server, vaultPath, graph, cache, config, embeddings);
+  registerRetrieveTools(server, vaultPath, graph, cache, config);
 
   // Atomic write tools with mtime concurrency checks
   registerWriteTools(server, vaultPath, graph, cache, config);

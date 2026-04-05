@@ -8,16 +8,13 @@ import { relative } from "node:path";
 import { isAllowedFile } from "./vault.js";
 import type { GraphIndex } from "./graph.js";
 import type { SessionCache } from "./cache.js";
-import type { EmbeddingIndex } from "./embeddings.js";
 import { invalidateSearchIndex } from "./search.js";
-import { invalidateFrontmatterIndex } from "./tools/retrieve.js";
 
 export class VaultWatcher {
   private watcher: FSWatcher | null = null;
   private vaultPath: string;
   private graph: GraphIndex;
   private cache: SessionCache;
-  private embeddings: EmbeddingIndex | null;
 
   /** Debounce timer for batching rapid changes */
   private pendingUpdates = new Map<string, NodeJS.Timeout>();
@@ -27,12 +24,10 @@ export class VaultWatcher {
     vaultPath: string,
     graph: GraphIndex,
     cache: SessionCache,
-    embeddings?: EmbeddingIndex | null,
   ) {
     this.vaultPath = vaultPath;
     this.graph = graph;
     this.cache = cache;
-    this.embeddings = embeddings ?? null;
   }
 
   /**
@@ -45,7 +40,6 @@ export class VaultWatcher {
       ignored: [
         /(^|[/\\])\../, // dotfiles/dirs
         "**/node_modules/**",
-        "**/_oil-index.json",
       ],
       persistent: true,
       ignoreInitial: true,
@@ -112,19 +106,13 @@ export class VaultWatcher {
 
     if (event === "unlink") {
       this.graph.removeNote(notePath);
-      this.embeddings?.removeNote(notePath);
     } else {
-      // add or change — re-index the note first
+      // add or change — re-index the note
       await this.graph.updateNote(notePath);
-      // Update embedding asynchronously (non-blocking)
-      this.embeddings?.updateNote(notePath).catch((err) => {
-        console.error(`[OIL] Embedding update failed for ${notePath}:`, err);
-      });
     }
 
-    // Invalidate search & frontmatter indexes AFTER graph is current,
-    // so rebuilt indexes reflect the updated node data.
+    // Invalidate search index AFTER graph is current,
+    // so rebuilt index reflects the updated node data.
     invalidateSearchIndex();
-    invalidateFrontmatterIndex();
   }
 }

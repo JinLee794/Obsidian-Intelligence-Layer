@@ -10,8 +10,6 @@ schema:
 
 search:
   default_tier: fuzzy
-  semantic_model: local
-  semantic_index_file: "_oil-index.json"
   graph_index_file: "_oil-graph.json"
 
 write_gate:

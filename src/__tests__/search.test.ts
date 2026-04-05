@@ -214,35 +214,41 @@ describe("fuzzySearch", () => {
 });
 
 describe("searchVault — unified search", () => {
-  it("uses config default tier (fuzzy)", async () => {
-    const results = await searchVault(graph, config, "Contoso");
+  it("returns results with default cascade (lexical first)", () => {
+    const results = searchVault(graph, config, "Contoso");
     expect(results.length).toBeGreaterThan(0);
   });
 
-  it("can be forced to lexical tier", async () => {
-    const results = await searchVault(graph, config, "Contoso", "lexical");
+  it("prefers lexical results when they fill the limit", () => {
+    // "Contoso" appears in title — lexical should find it before fuzzy fires
+    const results = searchVault(graph, config, "Contoso", undefined, 1);
+    expect(results.length).toBe(1);
+    expect(results[0].matchType).toBe("lexical");
+  });
+
+  it("falls back to fuzzy when lexical finds nothing", () => {
+    // Transposition that lexical can't match but fuzzy can
+    const results = searchVault(graph, config, "Cnotoso", undefined, 5);
+    expect(results.some((r) => r.matchType === "fuzzy")).toBe(true);
+  });
+
+  it("can be forced to lexical tier", () => {
+    const results = searchVault(graph, config, "Contoso", "lexical");
     expect(results.every((r) => r.matchType === "lexical")).toBe(true);
   });
 
-  it("can be forced to fuzzy tier", async () => {
-    const results = await searchVault(graph, config, "Contoso", "fuzzy");
+  it("can be forced to fuzzy tier", () => {
+    const results = searchVault(graph, config, "Contoso", "fuzzy");
     expect(results.every((r) => r.matchType === "fuzzy")).toBe(true);
   });
 
-  it("falls back to fuzzy when semantic requested but unavailable", async () => {
-    const results = await searchVault(
-      graph, config, "Contoso", "semantic", 10, undefined, null,
-    );
-    expect(results.every((r) => r.matchType === "fuzzy")).toBe(true);
-  });
-
-  it("passes limit through", async () => {
-    const results = await searchVault(graph, config, "customer", undefined, 1);
+  it("passes limit through", () => {
+    const results = searchVault(graph, config, "customer", undefined, 1);
     expect(results.length).toBeLessThanOrEqual(1);
   });
 
-  it("passes filters through", async () => {
-    const results = await searchVault(
+  it("passes filters through", () => {
+    const results = searchVault(
       graph, config, "Contoso", "lexical", 10,
       { folder: "Meetings/" },
     );

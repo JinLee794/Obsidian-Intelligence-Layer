@@ -1,12 +1,12 @@
 /**
  * OIL — Search Engine
- * Tier 1: Lexical (substring match). Tier 2: Fuzzy (fuse.js). Tier 3: Semantic (embeddings).
+ * Tier 1: Lexical (substring match). Tier 2: Fuzzy (fuse.js).
+ * Default behaviour: lexical first, fuzzy fallback when lexical returns < limit.
  */
 
 import Fuse from "fuse.js";
 import type { GraphIndex } from "./graph.js";
 import type { SearchResult, OilConfig } from "./types.js";
-import type { EmbeddingIndex } from "./embeddings.js";
 
 // ─── Search Index Entry ───────────────────────────────────────────────────────
 
@@ -151,35 +151,38 @@ export function fuzzySearch(
 }
 
 /**
- * Unified search — picks tier based on config default or explicit tier.
- * Semantic tier requires an EmbeddingIndex with @xenova/transformers installed.
+ * Unified search — cascades lexical → fuzzy by default.
+ * When no explicit tier is given, tries lexical first (3ms).
+ * Falls back to fuzzy (65-180ms) only when lexical returns fewer than `limit` results.
+ * An explicit tier skips the cascade and runs only that tier.
  */
-export async function searchVault(
+export function searchVault(
   graph: GraphIndex,
-  config: OilConfig,
+  _config: OilConfig,
   query: string,
-  tier?: "lexical" | "fuzzy" | "semantic",
+  tier?: "lexical" | "fuzzy",
   limit: number = 10,
   filters?: SearchFilters,
-  embeddings?: EmbeddingIndex | null,
-): Promise<SearchResult[]> {
-  const selectedTier = tier ?? config.search.defaultTier;
+): SearchResult[] {
+  // Explicit tier — run only that tier
+  if (tier === "lexical") return lexicalSearch(graph, query, limit, filters);
+  if (tier === "fuzzy") return fuzzySearch(graph, query, limit, filters);
 
-  switch (selectedTier) {
-    case "lexical":
-      return lexicalSearch(graph, query, limit, filters);
-    case "fuzzy":
-      return fuzzySearch(graph, query, limit, filters);
-    case "semantic": {
-      if (embeddings && (await embeddings.isAvailable())) {
-        return embeddings.search(query, limit, filters);
-      }
-      // Fall back to fuzzy when semantic is unavailable
-      return fuzzySearch(graph, query, limit, filters);
-    }
-    default:
-      return fuzzySearch(graph, query, limit, filters);
+  // Default: lexical first, fuzzy fallback if insufficient results
+  const lexResults = lexicalSearch(graph, query, limit, filters);
+  if (lexResults.length >= limit) return lexResults;
+
+  // Lexical didn't fill the limit — augment with fuzzy
+  const fuzzyResults = fuzzySearch(graph, query, limit, filters);
+  const seen = new Set(lexResults.map((r) => r.path));
+  const merged = [...lexResults];
+  for (const r of fuzzyResults) {
+    if (seen.has(r.path)) continue;
+    seen.add(r.path);
+    merged.push(r);
+    if (merged.length >= limit) break;
   }
+  return merged;
 }
 
 // ─── Filters ──────────────────────────────────────────────────────────────────

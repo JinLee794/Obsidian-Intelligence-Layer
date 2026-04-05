@@ -33,8 +33,6 @@ const DEFAULTS: OilConfig = {
   },
   search: {
     defaultTier: "fuzzy",
-    semanticModel: "local",
-    semanticIndexFile: "_oil-index.json",
     graphIndexFile: "_oil-graph.json",
     backgroundIndexThresholdMs: 3000,
   },
@@ -107,8 +105,6 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     tpid_field: "tpidField",
     accountid_field: "accountidField",
     default_tier: "defaultTier",
-    semantic_model: "semanticModel",
-    semantic_index_file: "semanticIndexFile",
     graph_index_file: "graphIndexFile",
     background_index_threshold_ms: "backgroundIndexThresholdMs",
     write_gate: "writeGate",
