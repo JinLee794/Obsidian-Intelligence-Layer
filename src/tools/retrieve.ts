@@ -69,15 +69,15 @@ function normalizeFrontmatterValues(value: unknown): string[] {
 // ─── Content Search (fallback) ────────────────────────────────────────────────
 
 /**
- * Full-content term frequency search — reads every note from disk.
- * Expensive but guarantees any detail can be found when fuzzy/lexical miss.
+ * In-memory content search using bodySnippet from the graph index.
+ * Scans the first ~500 chars of each note already loaded in memory.
+ * No disk I/O — runs in <5ms for ~1,700 notes.
  */
-async function contentSearch(
+function contentSearch(
   graph: GraphIndex,
-  vaultPath: string,
   query: string,
   limit: number,
-): Promise<Array<{ path: string; title: string; score: number }>> {
+): Array<{ path: string; title: string; score: number }> {
   const terms = query
     .toLowerCase()
     .split(/\s+/)
@@ -89,28 +89,25 @@ async function contentSearch(
   const refs = graph.getNotesByFolder("");
 
   for (const ref of refs) {
-    try {
-      const note = await readNote(vaultPath, ref.path);
-      const lower = note.content.toLowerCase();
+    const node = graph.getNode(ref.path);
+    if (!node?.bodySnippet) continue;
+    const lower = node.bodySnippet.toLowerCase();
 
-      let totalHits = 0;
-      for (const term of terms) {
-        let idx = lower.indexOf(term);
-        while (idx >= 0) {
-          totalHits++;
-          idx = lower.indexOf(term, idx + term.length);
-        }
+    let totalHits = 0;
+    for (const term of terms) {
+      let idx = lower.indexOf(term);
+      while (idx >= 0) {
+        totalHits++;
+        idx = lower.indexOf(term, idx + term.length);
       }
+    }
 
-      if (totalHits > 0) {
-        scored.push({
-          path: ref.path,
-          title: ref.title,
-          score: Math.min(totalHits / terms.length / 10, 1),
-        });
-      }
-    } catch {
-      continue;
+    if (totalHits > 0) {
+      scored.push({
+        path: ref.path,
+        title: ref.title,
+        score: Math.min(totalHits / terms.length / 10, 1),
+      });
     }
   }
 
@@ -192,30 +189,27 @@ export function registerRetrieveTools(
         tags: filter_tags,
       });
 
-      // Content search fallback: if tiers didn't find enough, search full note bodies
+      // Content search fallback: if tiers didn't find enough, search in-memory bodySnippets
       if (results.length < boundedLimit) {
-        const contentMatches = await contentSearch(graph, vaultPath, query, boundedLimit);
+        const contentMatches = contentSearch(graph, query, boundedLimit);
         const seen = new Set(results.map((r: SearchResult) => r.path));
         for (const candidate of contentMatches) {
           if (seen.has(candidate.path)) continue;
-          // Respect folder/tag filters from the primary search
           if (filter_folder && !candidate.path.startsWith(filter_folder)) continue;
           if (filter_tags && filter_tags.length > 0) {
             const node = graph.getNode(candidate.path);
             const nodeTags = node?.tags ?? [];
             if (!filter_tags.some((t) => nodeTags.includes(t))) continue;
           }
-          try {
-            const note = await readNote(vaultPath, candidate.path);
-            results.push({
-              path: candidate.path,
-              title: candidate.title,
-              excerpt: buildSnippet(note.content, query),
-              score: candidate.score * 0.4, // downweight vs primary tiers
-              matchType: "lexical" as const,
-            });
-            seen.add(candidate.path);
-          } catch { continue; }
+          const node = graph.getNode(candidate.path);
+          results.push({
+            path: candidate.path,
+            title: candidate.title,
+            excerpt: buildSnippet(node?.bodySnippet ?? "", query),
+            score: candidate.score * 0.4,
+            matchType: "lexical" as const,
+          });
+          seen.add(candidate.path);
           if (results.length >= boundedLimit) break;
         }
       }
@@ -421,9 +415,9 @@ export function registerRetrieveTools(
     async ({ query, limit }) => {
       const boundedLimit = limit ?? 10;
 
-      // Fuzzy search + content search for broad recall
+      // Fuzzy search + in-memory content search for broad recall
       const fuzzyResults = fuzzySearch(graph, query, boundedLimit);
-      const contentResults = await contentSearch(graph, vaultPath, query, boundedLimit);
+      const contentResults = contentSearch(graph, query, boundedLimit);
 
       const seen = new Set<string>();
       const merged: Array<{ path: string; title: string; score: number }> = [];
@@ -435,16 +429,11 @@ export function registerRetrieveTools(
       }
       merged.sort((a, b) => b.score - a.score);
 
-      const results = await Promise.all(
-        merged.slice(0, boundedLimit).map(async (r) => {
-          let snippet = "";
-          try {
-            const note = await readNote(vaultPath, r.path);
-            snippet = buildSnippet(note.content, query);
-          } catch { /* skip */ }
-          return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
-        }),
-      );
+      const results = merged.slice(0, boundedLimit).map((r) => {
+        const node = graph.getNode(r.path);
+        const snippet = buildSnippet(node?.bodySnippet ?? "", query);
+        return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
+      });
 
       return {
         content: [

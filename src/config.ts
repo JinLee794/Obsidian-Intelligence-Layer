@@ -32,7 +32,6 @@ const DEFAULTS: OilConfig = {
     accountidField: "accountid",
   },
   search: {
-    defaultTier: "fuzzy",
     graphIndexFile: "_oil-graph.json",
     backgroundIndexThresholdMs: 3000,
   },
@@ -104,7 +103,6 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     project_field: "projectField",
     tpid_field: "tpidField",
     accountid_field: "accountidField",
-    default_tier: "defaultTier",
     graph_index_file: "graphIndexFile",
     background_index_threshold_ms: "backgroundIndexThresholdMs",
     write_gate: "writeGate",

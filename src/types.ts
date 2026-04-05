@@ -211,7 +211,6 @@ export interface FrontmatterSchemaConfig {
 }
 
 export interface SearchConfig {
-  defaultTier: "lexical" | "fuzzy";
   graphIndexFile: string;
   backgroundIndexThresholdMs: number;
 }

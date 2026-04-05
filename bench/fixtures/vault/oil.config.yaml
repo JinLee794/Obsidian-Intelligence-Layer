@@ -9,7 +9,6 @@ schema:
   connect_hooks_backup: ".connect/hooks/hooks.md"
 
 search:
-  default_tier: fuzzy
   graph_index_file: "_oil-graph.json"
 
 write_gate:
