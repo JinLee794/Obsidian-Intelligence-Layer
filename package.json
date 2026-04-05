@@ -1,6 +1,6 @@
 {
   "name": "@jinlee794/obsidian-intelligence-layer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Obsidian Intelligence Layer — Knowledge Layer MCP Server for AI Agent Workflows",
   "type": "module",
   "publishConfig": {
