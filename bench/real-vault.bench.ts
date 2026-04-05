@@ -3,10 +3,12 @@
  * Measures latency at true scale (1,696+ notes).
  *
  * Set OBSIDIAN_VAULT_PATH env var or uses default ~/Documents/Obsidian/Jin @ Microsoft/
+ * Skips automatically when the vault path doesn't exist (e.g. CI).
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { loadConfig } from "../src/config.js";
 import { GraphIndex } from "../src/graph.js";
 import {
@@ -20,6 +22,8 @@ import type { OilConfig } from "../src/types.js";
 
 const VAULT = process.env.OBSIDIAN_VAULT_PATH
   ?? resolve(process.env.HOME ?? "", "Documents/Obsidian/Jin @ Microsoft");
+
+const VAULT_EXISTS = existsSync(VAULT);
 
 const ITERATIONS = 20;
 
@@ -48,7 +52,9 @@ function avgSync<T>(fn: () => T, runs: number): { avgMs: number; result: T } {
   return { avgMs: total / runs, result };
 }
 
-// ─── Setup ────────────────────────────────────────────────────────────────────
+// ─── Skip entirely when vault is not available (CI) ───────────────────────────
+
+describe.skipIf(!VAULT_EXISTS)("Real vault benchmarks", () => {
 
 let config: OilConfig;
 let graph: GraphIndex;
@@ -75,7 +81,7 @@ beforeAll(async () => {
 
 // ─── 1. Cold start ───────────────────────────────────────────────────────────
 
-describe("Real vault — Cold start", () => {
+describe("Cold start", () => {
   it("graph build from scratch", async () => {
     const fresh = new GraphIndex(VAULT);
     const { ms } = await timedAsync(() => fresh.build());
@@ -88,7 +94,7 @@ describe("Real vault — Cold start", () => {
 
 // ─── 2. Search tier latency ──────────────────────────────────────────────────
 
-describe("Real vault — Search tier latency", () => {
+describe("Search tier latency", () => {
   const queries = ["migration", "risk", "PriorAuth", "copilot", "escalation"];
 
   it("lexical search (avg of 20)", () => {
@@ -132,7 +138,7 @@ describe("Real vault — Search tier latency", () => {
 
 // ─── 3. Fuse index build time ────────────────────────────────────────────────
 
-describe("Real vault — Fuse.js index build", () => {
+describe("Fuse.js index build", () => {
   it("cold fuse index build", () => {
     invalidateSearchIndex();
     const { ms } = timedSync(() => fuzzySearch(graph, "warmup", 1));
@@ -142,7 +148,7 @@ describe("Real vault — Fuse.js index build", () => {
 
 // ─── 4. In-memory content search vs simulated disk read ──────────────────────
 
-describe("Real vault — Content search: in-memory vs disk", () => {
+describe("Content search: in-memory vs disk", () => {
   it("in-memory bodySnippet scan", () => {
     // Reproduce what contentSearch does now — scan bodySnippet from graph
     const refs = graph.getNotesByFolder("");
@@ -190,7 +196,7 @@ describe("Real vault — Content search: in-memory vs disk", () => {
 
 // ─── 5. Graph operations ─────────────────────────────────────────────────────
 
-describe("Real vault — Graph operations", () => {
+describe("Graph operations", () => {
   it("backlinks lookup", () => {
     const { avgMs, result } = avgSync(
       () => graph.getBacklinks(sampleNote),
@@ -210,7 +216,7 @@ describe("Real vault — Graph operations", () => {
 
 // ─── 6. Frontmatter index build ──────────────────────────────────────────────
 
-describe("Real vault — Frontmatter index build", () => {
+describe("Frontmatter index build", () => {
   it("full rebuild", () => {
     const refs = graph.getNotesByFolder("");
     const { ms } = timedSync(() => {
@@ -235,3 +241,5 @@ describe("Real vault — Frontmatter index build", () => {
     console.log(`\n  Frontmatter index rebuild: ${ms.toFixed(1)}ms (${refs.length} notes)`);
   });
 });
+
+}); // end describe.skipIf
