@@ -28,6 +28,8 @@ import {
   readMilestoneNotes,
   readInsightsPartitioned,
   readMeetingsFromFrontmatter,
+  looksLikeTpid,
+  resolveCustomerByTpid,
 } from "../vault.js";
 import { extractPrefetchIds } from "../correlate.js";
 import { checkVaultHealth } from "../hygiene.js";
@@ -70,11 +72,28 @@ export function registerDomainTools(
       },
     },
     async ({ customer, lookback_days, include_similar, include_open_items, assignee }) => {
-      const custErr = validateCustomerName(customer);
+      // Auto-resolve TPID to customer name
+      let resolvedCustomer = customer;
+      if (looksLikeTpid(customer)) {
+        const found = resolveCustomerByTpid(graph, config, customer);
+        if (!found) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: `No customer found for TPID "${customer}". Check the TPID or use the customer name directly.` }),
+              },
+            ],
+          };
+        }
+        resolvedCustomer = found;
+      }
+
+      const custErr = validateCustomerName(resolvedCustomer);
       if (custErr) return validationError(`get_customer_context: ${custErr}`);
 
       const lookback = lookback_days ?? 90;
-      const customerFile = await resolveCustomerPath(vaultPath, config, customer);
+      const customerFile = await resolveCustomerPath(vaultPath, config, resolvedCustomer);
 
       // Read customer note (with cache)
       let parsed = cache.getNote(customerFile);
