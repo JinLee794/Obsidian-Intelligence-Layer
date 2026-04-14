@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OIL — Safe Writes (mtime Concurrency)</title>
+<style>
+:root {
+  --bg: #f8f9fa;
+  --card: #ffffff;
+  --text: #1a1a1a;
+  --text2: #505050;
+  --muted: #9e9e9e;
+  --accent: #0078d4;
+  --accent2: #8764b8;
+  --green: #107c10;
+  --red: #d13438;
+  --orange: #f7630c;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+  --radius: 10px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  width: 800px; height: 450px; overflow: hidden;
+  background: var(--bg); font-family: var(--font);
+  display: flex; flex-direction: column;
+  position: relative;
+}
+body::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(0,0,0,0.015) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0,0,0,0.015) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 28px 0; position: relative; z-index: 1;
+}
+.header-icon {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--green), #0b6a0b);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 14px; font-weight: 700;
+}
+.header h1 { font-size: 16px; font-weight: 600; color: var(--text); }
+.header .badge {
+  margin-left: auto; background: color-mix(in srgb, var(--green) 10%, transparent);
+  color: var(--green); font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 100px; letter-spacing: 0.04em;
+}
+
+/* --- Flow container --- */
+.flow {
+  flex: 1; display: flex; flex-direction: column;
+  padding: 16px 28px 20px; gap: 10px;
+  position: relative; z-index: 1;
+}
+
+/* --- Step row --- */
+.step {
+  display: flex; align-items: center; gap: 14px;
+  opacity: 0; transform: translateY(6px);
+}
+.step.visible { animation: slideIn 0.4s ease forwards; }
+
+.step-num {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--card); border: 2px solid rgba(0,0,0,0.08);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  flex-shrink: 0;
+}
+.step-num.active { border-color: var(--accent); color: var(--accent); }
+.step-num.done { background: var(--green); border-color: var(--green); color: #fff; }
+
+.step-content {
+  flex: 1; background: var(--card); border-radius: 8px;
+  padding: 10px 14px; box-shadow: var(--shadow);
+  border: 1px solid rgba(0,0,0,0.04);
+  display: flex; align-items: center; gap: 12px;
+}
+
+.step-code {
+  font-family: var(--mono); font-size: 11px; color: #d4d4d4;
+  background: #1e1e1e; border-radius: 6px; padding: 8px 12px;
+  line-height: 1.5; flex: 1;
+}
+.step-code .fn { color: #dcdcaa; }
+.step-code .str { color: #ce9178; }
+.step-code .key { color: #9cdcfe; }
+.step-code .num { color: #b5cea8; }
+.step-code .comment { color: #6a9955; }
+
+.step-label {
+  font-size: 12px; color: var(--text2); font-weight: 500;
+}
+.step-arrow {
+  font-size: 11px; color: var(--muted); flex-shrink: 0;
+}
+.step-result {
+  font-family: var(--mono); font-size: 11px; padding: 5px 10px;
+  border-radius: 6px; background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent); font-weight: 500; white-space: nowrap;
+}
+
+/* --- Fork section --- */
+.fork-container {
+  display: flex; gap: 14px; margin-top: 4px;
+  opacity: 0; transform: translateY(6px);
+}
+.fork-container.visible { animation: slideIn 0.4s ease forwards; }
+
+.fork-branch {
+  flex: 1; border-radius: 8px; padding: 12px 14px;
+  box-shadow: var(--shadow); border: 2px solid transparent;
+  opacity: 0; transform: scale(0.96);
+}
+.fork-branch.visible { animation: branchIn 0.4s ease forwards; }
+.fork-branch.success {
+  background: color-mix(in srgb, var(--green) 4%, var(--card));
+  border-color: color-mix(in srgb, var(--green) 20%, transparent);
+}
+.fork-branch.fail {
+  background: color-mix(in srgb, var(--red) 4%, var(--card));
+  border-color: color-mix(in srgb, var(--red) 20%, transparent);
+}
+
+.branch-header {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 8px;
+}
+.branch-icon {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: #fff;
+}
+.branch-icon.ok { background: var(--green); }
+.branch-icon.err { background: var(--red); }
+.branch-title { font-size: 12px; font-weight: 600; }
+.branch-title.ok { color: var(--green); }
+.branch-title.err { color: var(--red); }
+
+.branch-detail {
+  font-size: 11px; color: var(--text2); line-height: 1.6;
+}
+.branch-detail code {
+  font-family: var(--mono); font-size: 10px;
+  background: rgba(0,0,0,0.05); padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* --- Connector line between steps --- */
+.step-connector {
+  width: 2px; height: 10px; background: rgba(0,0,0,0.08);
+  margin-left: 41px; /* align with step circle center */
+  opacity: 0;
+}
+.step-connector.visible { animation: fadeIn 0.2s ease forwards; }
+
+/* Highlight pulse for the fork */
+.fork-branch.success.highlight { animation: successPulse 0.6s ease; }
+.fork-branch.fail.highlight { animation: failPulse 0.6s ease; }
+
+@keyframes slideIn { to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeIn { to { opacity: 1; } }
+@keyframes branchIn { to { opacity: 1; transform: scale(1); } }
+@keyframes successPulse {
+  0% { box-shadow: 0 0 0 0 rgba(16,124,16,0.3); }
+  70% { box-shadow: 0 0 0 10px rgba(16,124,16,0); }
+  100% { box-shadow: var(--shadow); }
+}
+@keyframes failPulse {
+  0% { box-shadow: 0 0 0 0 rgba(209,52,56,0.3); }
+  70% { box-shadow: 0 0 0 10px rgba(209,52,56,0); }
+  100% { box-shadow: var(--shadow); }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🔒</div>
+  <h1>Safe Writes — mtime Concurrency</h1>
+  <span class="badge">3 TOOLS · ATOMIC</span>
+</div>
+
+<div class="flow">
+  <!-- Step 1: Read metadata -->
+  <div class="step" id="s1">
+    <div class="step-num" id="sn1">1</div>
+    <div class="step-content">
+      <div class="step-code">
+        <span class="fn">get_note_metadata</span>(<span class="str">"Customers/Contoso.md"</span>)
+      </div>
+      <span class="step-arrow">→</span>
+      <div class="step-result" id="sr1" style="opacity:0">mtime_ms: 1713045600000</div>
+    </div>
+  </div>
+
+  <div class="step-connector" id="c1"></div>
+
+  <!-- Step 2: Agent prepares content -->
+  <div class="step" id="s2">
+    <div class="step-num" id="sn2">2</div>
+    <div class="step-content">
+      <div class="step-label">Agent prepares content to write</div>
+      <div class="step-code" style="flex:none; font-size:10px;">
+        <span class="comment">// append new insight under ## Agent Insights</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="step-connector" id="c2"></div>
+
+  <!-- Step 3: Write call -->
+  <div class="step" id="s3">
+    <div class="step-num" id="sn3">3</div>
+    <div class="step-content">
+      <div class="step-code">
+        <span class="fn">atomic_append</span>(<br>
+        &nbsp;&nbsp;<span class="key">path</span>: <span class="str">"Customers/Contoso.md"</span>,<br>
+        &nbsp;&nbsp;<span class="key">heading</span>: <span class="str">"Agent Insights"</span>,<br>
+        &nbsp;&nbsp;<span class="key">expected_mtime</span>: <span class="num">1713045600000</span><br>
+        )
+      </div>
+    </div>
+  </div>
+
+  <div class="step-connector" id="c3"></div>
+
+  <!-- Step 4: Fork — mtime check -->
+  <div class="step" id="s4">
+    <div class="step-num" id="sn4">4</div>
+    <div class="step-content" style="background: none; box-shadow: none; border: none; padding: 0;">
+      <div class="step-label" style="font-weight:600; color: var(--text);">
+        OIL checks current mtime on disk…
+      </div>
+    </div>
+  </div>
+
+  <div class="fork-container" id="fork">
+    <div class="fork-branch success" id="branchOk">
+      <div class="branch-header">
+        <div class="branch-icon ok">✓</div>
+        <div class="branch-title ok">mtime matches</div>
+      </div>
+      <div class="branch-detail">
+        Write executes. Cache invalidated.<br>
+        Returns <code>new_mtime_ms: 1713045612345</code><br>
+        Audit log entry created.
+      </div>
+    </div>
+    <div class="fork-branch fail" id="branchFail">
+      <div class="branch-header">
+        <div class="branch-icon err">✗</div>
+        <div class="branch-title err">mtime mismatch</div>
+      </div>
+      <div class="branch-detail">
+        "Stale write rejected" — file was edited<br>
+        since agent last read it.<br>
+        Agent must <code>get_note_metadata</code> → retry.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const timeline = [
+  // Step 1
+  { t: 400,  fn: () => { show('s1'); setNum('sn1', 'active'); } },
+  { t: 1000, fn: () => { fadeIn('sr1'); setNum('sn1', 'done'); } },
+  { t: 1200, fn: () => show('c1') },
+  // Step 2
+  { t: 1400, fn: () => { show('s2'); setNum('sn2', 'active'); } },
+  { t: 2000, fn: () => { setNum('sn2', 'done'); show('c2'); } },
+  // Step 3
+  { t: 2200, fn: () => { show('s3'); setNum('sn3', 'active'); } },
+  { t: 3200, fn: () => { setNum('sn3', 'done'); show('c3'); } },
+  // Step 4: mtime check
+  { t: 3600, fn: () => { show('s4'); setNum('sn4', 'active'); } },
+  { t: 4200, fn: () => show('fork') },
+  // Branches
+  { t: 4600, fn: () => showBranch('branchOk') },
+  { t: 5000, fn: () => showBranch('branchFail') },
+  // Highlight success
+  { t: 5800, fn: () => highlight('branchOk', 'success') },
+  // Reset
+  { t: 12000, fn: () => reset() },
+];
+
+function show(id) { document.getElementById(id).classList.add('visible'); }
+function fadeIn(id) { document.getElementById(id).style.opacity = '1'; document.getElementById(id).style.transition = 'opacity 0.3s'; }
+function setNum(id, cls) {
+  const el = document.getElementById(id);
+  el.classList.remove('active', 'done');
+  el.classList.add(cls);
+}
+function showBranch(id) {
+  document.getElementById(id).classList.add('visible');
+}
+function highlight(id, type) {
+  document.getElementById(id).classList.add('highlight');
+}
+
+function reset() {
+  document.querySelectorAll('.visible').forEach(el => el.classList.remove('visible'));
+  document.querySelectorAll('.highlight').forEach(el => el.classList.remove('highlight'));
+  document.querySelectorAll('.step-num').forEach(el => el.classList.remove('active', 'done'));
+  document.getElementById('sr1').style.opacity = '0';
+  document.getElementById('sr1').style.transition = 'none';
+  runTimeline();
+}
+
+function runTimeline() {
+  timeline.forEach(({ t, fn }) => setTimeout(fn, t));
+}
+
+runTimeline();
+</script>
+</body>
+</html>

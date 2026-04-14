@@ -1,5 +1,5 @@
 ---
-name: showrunner
+name: showrunner-video
 description: 'Generate Showrunner storyboard JSON for rendering animated MP4 videos. Use when asked to create a video, render a presentation, build an animated recap, or produce visual content from data. Covers scene type selection, animation overrides, asset references, branding, and storyboard structure. Triggers: create video, render video, make a video, video recap, animated presentation, showrunner, storyboard, render MP4, video from data.'
 argument-hint: 'Describe what the video should contain — topic, data, audience, tone'
 allowed-tools: mcp_showrunner_*
@@ -96,6 +96,8 @@ Use this table to select scene types. For full data schemas, read [scene-types](
 | | `code-terminal` | Code walkthroughs |
 | | `image-card` | Full-bleed images |
 | | `scene-showcase` | Card grids |
+| **Technical** | `tool-call` | API/tool call request→response |
+| | `logic-flow` | Flowcharts and decision trees |
 
 ## Critical Rules
 

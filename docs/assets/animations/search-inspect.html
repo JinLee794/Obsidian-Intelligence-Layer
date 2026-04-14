@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OIL — Search &amp; Inspect Tools</title>
+<style>
+:root {
+  --bg: #f8f9fa;
+  --card: #ffffff;
+  --text: #1a1a1a;
+  --text2: #505050;
+  --muted: #9e9e9e;
+  --accent: #0078d4;
+  --accent2: #8764b8;
+  --green: #107c10;
+  --red: #d13438;
+  --orange: #f7630c;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+  --radius: 10px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  width: 800px; height: 450px; overflow: hidden;
+  background: var(--bg); font-family: var(--font);
+  display: flex; flex-direction: column;
+  position: relative;
+}
+/* Subtle grid */
+body::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(0,0,0,0.015) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0,0,0,0.015) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* --- Header --- */
+.header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 28px 0; position: relative; z-index: 1;
+}
+.header-icon {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 14px; font-weight: 700;
+}
+.header h1 {
+  font-size: 16px; font-weight: 600; color: var(--text);
+  letter-spacing: -0.01em;
+}
+.header .badge {
+  margin-left: auto; background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent); font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 100px; letter-spacing: 0.04em;
+}
+
+/* --- Main layout --- */
+.main {
+  flex: 1; display: flex; gap: 20px;
+  padding: 16px 28px 20px; position: relative; z-index: 1;
+}
+
+/* --- Left: Agent query --- */
+.agent-panel {
+  width: 220px; display: flex; flex-direction: column; gap: 12px;
+}
+.agent-bubble {
+  background: var(--card); border-radius: var(--radius);
+  padding: 14px 16px; box-shadow: var(--shadow);
+  border: 1px solid rgba(0,0,0,0.06);
+  opacity: 0; transform: translateY(8px);
+}
+.agent-bubble.visible {
+  animation: slideIn 0.4s ease forwards;
+}
+.agent-label {
+  font-size: 10px; font-weight: 600; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px;
+}
+.agent-text {
+  font-size: 13px; color: var(--text); line-height: 1.5;
+}
+.tool-call {
+  background: #1e1e1e; border-radius: 8px; padding: 10px 12px;
+  font-family: var(--mono); font-size: 11px; color: #d4d4d4;
+  opacity: 0; transform: translateY(8px);
+  line-height: 1.6;
+}
+.tool-call.visible { animation: slideIn 0.4s ease forwards; }
+.tool-call .fn { color: #dcdcaa; }
+.tool-call .str { color: #ce9178; }
+.tool-call .key { color: #9cdcfe; }
+.tool-call .comment { color: #6a9955; }
+
+/* --- Center: OIL processing --- */
+.oil-panel {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 8px; position: relative;
+}
+.oil-core {
+  width: 64px; height: 64px; border-radius: 16px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 18px;
+  box-shadow: 0 4px 20px rgba(0,120,212,0.2);
+  position: relative;
+}
+.oil-core.active { animation: pulseGlow 1.5s ease infinite; }
+.oil-label {
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+
+/* Processing layers */
+.layer {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--card); border-radius: 6px; padding: 6px 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid rgba(0,0,0,0.04);
+  font-size: 11px; color: var(--text2);
+  opacity: 0; transform: scale(0.9);
+}
+.layer.visible { animation: popIn 0.3s ease forwards; }
+.layer-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+}
+.layer-dot.search { background: var(--accent); }
+.layer-dot.graph { background: var(--accent2); }
+.layer-dot.cache { background: var(--green); }
+
+/* --- Right: Results --- */
+.results-panel {
+  width: 260px; display: flex; flex-direction: column; gap: 8px;
+}
+.result-card {
+  background: var(--card); border-radius: 8px; padding: 10px 12px;
+  box-shadow: var(--shadow); border: 1px solid rgba(0,0,0,0.04);
+  opacity: 0; transform: translateX(12px);
+}
+.result-card.visible { animation: slideInRight 0.35s ease forwards; }
+.result-path {
+  font-family: var(--mono); font-size: 10px; color: var(--accent);
+  margin-bottom: 4px; display: flex; align-items: center; gap: 4px;
+}
+.result-path .score {
+  margin-left: auto; background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green); padding: 1px 6px; border-radius: 4px;
+  font-size: 9px; font-weight: 600;
+}
+.result-snippet {
+  font-size: 11px; color: var(--text2); line-height: 1.5;
+}
+.result-snippet mark {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent); border-radius: 2px; padding: 0 2px;
+}
+
+/* --- Token savings bar --- */
+.savings-bar {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  background: var(--card); border-top: 1px solid rgba(0,0,0,0.06);
+  padding: 10px 28px; display: flex; align-items: center; gap: 20px;
+  opacity: 0; z-index: 2;
+}
+.savings-bar.visible { animation: fadeIn 0.5s ease forwards; }
+.savings-item {
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+}
+.savings-item .label { color: var(--muted); }
+.savings-item .value { font-weight: 600; font-family: var(--mono); font-size: 13px; }
+.savings-item .value.good { color: var(--green); }
+.savings-item .value.bad { color: var(--red); text-decoration: line-through; opacity: 0.5; }
+.savings-arrow { color: var(--muted); font-size: 16px; }
+
+/* --- Animations --- */
+@keyframes slideIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInRight {
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes popIn {
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 4px 20px rgba(0,120,212,0.2); }
+  50% { box-shadow: 0 4px 30px rgba(0,120,212,0.35), 0 0 40px rgba(0,120,212,0.1); }
+}
+@keyframes typing {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+/* --- Connector lines --- */
+.connector {
+  position: absolute; opacity: 0;
+}
+.connector.visible { animation: fadeIn 0.3s ease forwards; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🔍</div>
+  <h1>Search &amp; Inspect</h1>
+  <span class="badge">6 TOOLS · READ-ONLY</span>
+</div>
+
+<div class="main">
+  <!-- Left: Agent query -->
+  <div class="agent-panel">
+    <div class="agent-bubble" id="bubble1">
+      <div class="agent-label">Agent Request</div>
+      <div class="agent-text">"What are the open action items for Contoso?"</div>
+    </div>
+    <div class="tool-call" id="call1">
+      <span class="fn">search_vault</span>(<br>
+      &nbsp;&nbsp;<span class="key">query</span>: <span class="str">"Contoso action items"</span>,<br>
+      &nbsp;&nbsp;<span class="key">folder</span>: <span class="str">"Customers/"</span><br>
+      )
+    </div>
+    <div class="tool-call" id="call2">
+      <span class="fn">read_note_section</span>(<br>
+      &nbsp;&nbsp;<span class="key">path</span>: <span class="str">"Customers/Contoso.md"</span>,<br>
+      &nbsp;&nbsp;<span class="key">heading</span>: <span class="str">"Action Items"</span><br>
+      )
+    </div>
+  </div>
+
+  <!-- Center: OIL processing -->
+  <div class="oil-panel">
+    <div class="oil-label">OIL PROCESSING</div>
+    <div class="oil-core" id="oilCore">OIL</div>
+    <div class="layer" id="layer1"><span class="layer-dot search"></span> Fuzzy search index</div>
+    <div class="layer" id="layer2"><span class="layer-dot graph"></span> Graph traversal</div>
+    <div class="layer" id="layer3"><span class="layer-dot cache"></span> Session cache hit</div>
+  </div>
+
+  <!-- Right: Results -->
+  <div class="results-panel">
+    <div class="result-card" id="r1">
+      <div class="result-path">
+        📄 Customers/Contoso.md
+        <span class="score">0.95</span>
+      </div>
+      <div class="result-snippet">
+        <mark>Action items</mark>: Migrate staging env by March 15, finalize SOW…
+      </div>
+    </div>
+    <div class="result-card" id="r2">
+      <div class="result-path">
+        📄 Meetings/2026-02-20-Contoso.md
+        <span class="score">0.82</span>
+      </div>
+      <div class="result-snippet">
+        Follow-up: <mark>action item</mark> assigned to Bob — review architecture…
+      </div>
+    </div>
+    <div class="result-card" id="r3">
+      <div class="result-path">
+        📄 § Action Items (section only)
+        <span class="score">section</span>
+      </div>
+      <div class="result-snippet">
+        - [ ] Migrate staging → prod by 3/15<br>
+        - [ ] Finalize SOW with Dave<br>
+        - [x] Send architecture doc ✓
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="savings-bar" id="savings">
+  <div class="savings-item">
+    <span class="label">Without OIL:</span>
+    <span class="value bad">~3,200 tokens</span>
+  </div>
+  <span class="savings-arrow">→</span>
+  <div class="savings-item">
+    <span class="label">With OIL:</span>
+    <span class="value good">~180 tokens</span>
+  </div>
+  <span class="savings-arrow">·</span>
+  <div class="savings-item">
+    <span class="value good">94% fewer tokens</span>
+  </div>
+</div>
+
+<script>
+const timeline = [
+  { t: 400,  fn: () => show('bubble1') },
+  { t: 1200, fn: () => show('call1') },
+  { t: 1600, fn: () => activate('oilCore') },
+  { t: 1900, fn: () => show('layer1') },
+  { t: 2200, fn: () => show('layer2') },
+  { t: 2500, fn: () => show('layer3') },
+  { t: 3000, fn: () => show('r1') },
+  { t: 3400, fn: () => show('r2') },
+  { t: 4000, fn: () => show('call2') },
+  { t: 4600, fn: () => show('r3') },
+  { t: 5200, fn: () => show('savings') },
+  { t: 11000, fn: () => reset() },
+];
+
+function show(id) {
+  document.getElementById(id).classList.add('visible');
+}
+function activate(id) {
+  document.getElementById(id).classList.add('active');
+}
+function reset() {
+  document.querySelectorAll('.visible').forEach(el => el.classList.remove('visible'));
+  document.getElementById('oilCore').classList.remove('active');
+  runTimeline();
+}
+
+function runTimeline() {
+  timeline.forEach(({ t, fn }) => setTimeout(fn, t));
+}
+
+runTimeline();
+</script>
+</body>
+</html>

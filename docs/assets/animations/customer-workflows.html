@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OIL — Customer Workflows</title>
+<style>
+:root {
+  --bg: #f8f9fa;
+  --card: #ffffff;
+  --text: #1a1a1a;
+  --text2: #505050;
+  --muted: #9e9e9e;
+  --accent: #0078d4;
+  --accent2: #8764b8;
+  --green: #107c10;
+  --red: #d13438;
+  --orange: #f7630c;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+  --radius: 10px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  width: 800px; height: 450px; overflow: hidden;
+  background: var(--bg); font-family: var(--font);
+  display: flex; flex-direction: column;
+  position: relative;
+}
+body::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(0,0,0,0.015) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0,0,0,0.015) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 28px 0; position: relative; z-index: 1;
+}
+.header-icon {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--orange), #ca5010);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 14px; font-weight: 700;
+}
+.header h1 { font-size: 16px; font-weight: 600; color: var(--text); }
+.header .badge {
+  margin-left: auto; background: color-mix(in srgb, var(--orange) 10%, transparent);
+  color: var(--orange); font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 100px; letter-spacing: 0.04em;
+}
+
+.main {
+  flex: 1; display: flex; gap: 16px;
+  padding: 14px 28px 18px; position: relative; z-index: 1;
+}
+
+/* --- Left: Single call --- */
+.call-panel {
+  width: 200px; display: flex; flex-direction: column; gap: 12px;
+}
+.single-call {
+  background: #1e1e1e; border-radius: 8px; padding: 12px 14px;
+  font-family: var(--mono); font-size: 11px; color: #d4d4d4;
+  line-height: 1.7; opacity: 0; transform: translateY(8px);
+}
+.single-call.visible { animation: slideIn 0.4s ease forwards; }
+.single-call .fn { color: #dcdcaa; }
+.single-call .str { color: #ce9178; }
+.single-call .key { color: #9cdcfe; }
+.single-call .comment { color: #6a9955; font-size: 10px; }
+
+.call-note {
+  font-size: 11px; color: var(--muted); line-height: 1.5;
+  opacity: 0;
+}
+.call-note.visible { animation: fadeIn 0.4s ease forwards; }
+.call-note strong { color: var(--text2); }
+
+/* --- Center: Fan-out visualization --- */
+.fanout-panel {
+  width: 170px; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px;
+  position: relative;
+}
+.oil-hub {
+  width: 48px; height: 48px; border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 14px;
+  box-shadow: 0 4px 16px rgba(0,120,212,0.2);
+  margin-bottom: 8px;
+}
+.oil-hub.active { animation: pulseGlow 1.5s ease infinite; }
+
+.source-note {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--card); border-radius: 6px; padding: 5px 10px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid rgba(0,0,0,0.04);
+  font-size: 10px; color: var(--text2);
+  opacity: 0; transform: scale(0.9);
+  white-space: nowrap;
+}
+.source-note.visible { animation: popIn 0.3s ease forwards; }
+.source-icon { font-size: 12px; }
+
+/* --- Right: Assembled output --- */
+.output-panel {
+  flex: 1; display: flex; flex-direction: column; gap: 6px;
+}
+.output-section {
+  background: var(--card); border-radius: 8px; padding: 8px 12px;
+  box-shadow: var(--shadow); border: 1px solid rgba(0,0,0,0.04);
+  opacity: 0; transform: translateX(12px);
+}
+.output-section.visible { animation: slideInRight 0.35s ease forwards; }
+
+.out-header {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+}
+.out-icon {
+  width: 18px; height: 18px; border-radius: 5px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px;
+}
+.out-icon.team { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.out-icon.meetings { background: color-mix(in srgb, var(--accent2) 12%, transparent); color: var(--accent2); }
+.out-icon.opps { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
+.out-icon.actions { background: color-mix(in srgb, var(--orange) 12%, transparent); color: var(--orange); }
+.out-icon.crm { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
+.out-title { font-size: 11px; font-weight: 600; color: var(--text); }
+.out-detail {
+  font-size: 10px; color: var(--text2); line-height: 1.5;
+  font-family: var(--mono);
+}
+.out-detail .key { color: var(--accent); }
+.out-detail .val { color: var(--text); }
+
+/* --- Animations --- */
+@keyframes slideIn { to { opacity: 1; transform: translateY(0); } }
+@keyframes slideInRight { to { opacity: 1; transform: translateX(0); } }
+@keyframes popIn { to { opacity: 1; transform: scale(1); } }
+@keyframes fadeIn { to { opacity: 1; } }
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 4px 16px rgba(0,120,212,0.2); }
+  50% { box-shadow: 0 4px 24px rgba(0,120,212,0.35), 0 0 36px rgba(0,120,212,0.08); }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🏢</div>
+  <h1>Customer Workflows — Domain Assembly</h1>
+  <span class="badge">3 TOOLS · HIGH-LEVEL</span>
+</div>
+
+<div class="main">
+  <!-- Left: Single call -->
+  <div class="call-panel">
+    <div class="single-call" id="call">
+      <span class="comment">// One call replaces 6+ manual reads</span><br>
+      <span class="fn">get_customer_context</span>(<br>
+      &nbsp;&nbsp;<span class="key">customer</span>: <span class="str">"Contoso"</span><br>
+      )
+    </div>
+    <div class="call-note" id="note1">
+      <strong>Single tool call</strong> assembles a full customer snapshot from across the vault.
+    </div>
+    <div class="call-note" id="note2">
+      Also works with <strong>TPID</strong>: accepts <code style="font-family:var(--mono);font-size:10px;background:rgba(0,0,0,0.05);padding:1px 4px;border-radius:3px;">tpid: "12345"</code>
+    </div>
+  </div>
+
+  <!-- Center: Fan-out -->
+  <div class="fanout-panel">
+    <div class="oil-hub" id="hub">OIL</div>
+    <div class="source-note" id="src1"><span class="source-icon">📄</span> Customers/Contoso.md</div>
+    <div class="source-note" id="src2"><span class="source-icon">📅</span> Meetings/2026-02-20…</div>
+    <div class="source-note" id="src3"><span class="source-icon">📅</span> Meetings/2026-02-15…</div>
+    <div class="source-note" id="src4"><span class="source-icon">👤</span> People/Alice Smith.md</div>
+    <div class="source-note" id="src5"><span class="source-icon">👤</span> People/Bob Chen.md</div>
+    <div class="source-note" id="src6"><span class="source-icon">🔗</span> Projects/azure-migration</div>
+  </div>
+
+  <!-- Right: Assembled output -->
+  <div class="output-panel">
+    <div class="output-section" id="o1">
+      <div class="out-header">
+        <div class="out-icon team">👥</div>
+        <div class="out-title">Team Composition</div>
+      </div>
+      <div class="out-detail">
+        <span class="key">contacts</span>: Alice Smith (PM), Bob Chen (Eng Lead)<br>
+        <span class="key">internal</span>: Dave Wilson (CSA)
+      </div>
+    </div>
+    <div class="output-section" id="o2">
+      <div class="out-header">
+        <div class="out-icon opps">💰</div>
+        <div class="out-title">Opportunities</div>
+      </div>
+      <div class="out-detail">
+        <span class="key">name</span>: Azure Migration Phase 2<br>
+        <span class="key">guid</span>: <span class="val">a1b2c3d4-...</span> · <span class="key">status</span>: Active
+      </div>
+    </div>
+    <div class="output-section" id="o3">
+      <div class="out-header">
+        <div class="out-icon meetings">📅</div>
+        <div class="out-title">Recent Meetings (2)</div>
+      </div>
+      <div class="out-detail">
+        <span class="val">2026-02-20</span> Migration Review — action items: 3<br>
+        <span class="val">2026-02-15</span> AI Kickoff — action items: 1
+      </div>
+    </div>
+    <div class="output-section" id="o4">
+      <div class="out-header">
+        <div class="out-icon actions">📋</div>
+        <div class="out-title">Open Action Items</div>
+      </div>
+      <div class="out-detail">
+        ☐ Migrate staging → prod by 3/15<br>
+        ☐ Finalize SOW with Dave Wilson
+      </div>
+    </div>
+    <div class="output-section" id="o5">
+      <div class="out-header">
+        <div class="out-icon crm">🔗</div>
+        <div class="out-title">CRM Identifiers</div>
+      </div>
+      <div class="out-detail">
+        <span class="key">tpid</span>: 12345 · <span class="key">accountid</span>: ACC-789
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const timeline = [
+  // Call appears
+  { t: 400,  fn: () => show('call') },
+  // OIL activates
+  { t: 1200, fn: () => document.getElementById('hub').classList.add('active') },
+  // Sources fan out
+  { t: 1500, fn: () => show('src1') },
+  { t: 1700, fn: () => show('src2') },
+  { t: 1900, fn: () => show('src3') },
+  { t: 2100, fn: () => show('src4') },
+  { t: 2300, fn: () => show('src5') },
+  { t: 2500, fn: () => show('src6') },
+  // Output assembles
+  { t: 3200, fn: () => show('o1') },
+  { t: 3600, fn: () => show('o2') },
+  { t: 4000, fn: () => show('o3') },
+  { t: 4400, fn: () => show('o4') },
+  { t: 4800, fn: () => show('o5') },
+  // Notes
+  { t: 5400, fn: () => show('note1') },
+  { t: 6000, fn: () => show('note2') },
+  // Reset
+  { t: 12000, fn: () => reset() },
+];
+
+function show(id) { document.getElementById(id).classList.add('visible'); }
+
+function reset() {
+  document.querySelectorAll('.visible').forEach(el => el.classList.remove('visible'));
+  document.getElementById('hub').classList.remove('active');
+  runTimeline();
+}
+
+function runTimeline() {
+  timeline.forEach(({ t, fn }) => setTimeout(fn, t));
+}
+
+runTimeline();
+</script>
+</body>
+</html>

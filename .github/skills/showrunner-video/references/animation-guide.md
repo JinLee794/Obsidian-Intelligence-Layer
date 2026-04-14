@@ -164,5 +164,7 @@ Recommended pairings by scene category. Use these as defaults; only override for
 | `text-reveal` | textEffect + slow | `{ "textEffect": "word-reveal", "easing": "slow" }` |
 | `quote-highlight` | slow + delay | `{ "easing": "slow", "delay": 0.3 }` |
 | `code-terminal` | none needed | Built-in typing animation |
+| `tool-call` | stagger + spring | `{ "stagger": 0.08, "easing": "spring" }` |
+| `logic-flow` | none needed | Built-in topological animation |
 | `section-header` | optional textEffect | `{ "textEffect": "word-reveal" }` |
 | `closing` | spring + exit | `{ "easing": "spring", "exitAnimation": "fade" }` |

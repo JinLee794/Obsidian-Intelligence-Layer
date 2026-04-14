@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OIL — Audit &amp; Observability</title>
+<style>
+:root {
+  --bg: #f8f9fa;
+  --card: #ffffff;
+  --text: #1a1a1a;
+  --text2: #505050;
+  --muted: #9e9e9e;
+  --accent: #0078d4;
+  --accent2: #8764b8;
+  --green: #107c10;
+  --red: #d13438;
+  --orange: #f7630c;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+  --radius: 10px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  width: 800px; height: 450px; overflow: hidden;
+  background: var(--bg); font-family: var(--font);
+  display: flex; flex-direction: column;
+  position: relative;
+}
+body::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(0,0,0,0.015) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(0,0,0,0.015) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 28px 0; position: relative; z-index: 1;
+}
+.header-icon {
+  width: 28px; height: 28px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent2), #6b4fa0);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 14px;
+}
+.header h1 { font-size: 16px; font-weight: 600; color: var(--text); }
+.header .badge {
+  margin-left: auto; background: color-mix(in srgb, var(--accent2) 10%, transparent);
+  color: var(--accent2); font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 100px; letter-spacing: 0.04em;
+}
+
+.main {
+  flex: 1; display: flex; gap: 24px;
+  padding: 16px 28px 20px; position: relative; z-index: 1;
+}
+
+/* --- Left: Writes happening --- */
+.writes-panel {
+  width: 280px; display: flex; flex-direction: column; gap: 8px;
+}
+.writes-label {
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px;
+}
+.write-event {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--card); border-radius: 8px; padding: 10px 12px;
+  box-shadow: var(--shadow); border: 1px solid rgba(0,0,0,0.04);
+  opacity: 0; transform: translateY(6px);
+}
+.write-event.visible { animation: slideIn 0.35s ease forwards; }
+
+.write-time {
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  white-space: nowrap; padding-top: 1px;
+}
+.write-body { flex: 1; }
+.write-op {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 600; padding: 2px 6px;
+  border-radius: 4px; margin-bottom: 4px;
+}
+.write-op.append {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green);
+}
+.write-op.replace {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+.write-op.create {
+  background: color-mix(in srgb, var(--accent2) 12%, transparent);
+  color: var(--accent2);
+}
+.write-path {
+  font-family: var(--mono); font-size: 10px; color: var(--text2);
+}
+.write-detail {
+  font-size: 10px; color: var(--muted); margin-top: 2px;
+}
+
+/* --- Center: Arrow --- */
+.arrow-panel {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 4px;
+  opacity: 0;
+}
+.arrow-panel.visible { animation: fadeIn 0.4s ease forwards; }
+.arrow-line {
+  width: 2px; height: 40px; background: rgba(0,0,0,0.08);
+}
+.arrow-icon {
+  font-size: 20px; color: var(--accent2);
+}
+.arrow-text {
+  font-size: 9px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: 0.08em; writing-mode: vertical-rl;
+  text-orientation: mixed; transform: rotate(180deg);
+}
+
+/* --- Right: Log output --- */
+.log-panel {
+  flex: 1; display: flex; flex-direction: column; gap: 8px;
+}
+.log-call {
+  background: #1e1e1e; border-radius: 8px; padding: 10px 14px;
+  font-family: var(--mono); font-size: 11px; color: #d4d4d4;
+  line-height: 1.7; opacity: 0; transform: translateY(6px);
+}
+.log-call.visible { animation: slideIn 0.35s ease forwards; }
+.log-call .fn { color: #dcdcaa; }
+.log-call .str { color: #ce9178; }
+.log-call .key { color: #9cdcfe; }
+.log-call .comment { color: #6a9955; }
+
+.log-label {
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px;
+}
+
+.log-output {
+  background: var(--card); border-radius: 8px;
+  box-shadow: var(--shadow); border: 1px solid rgba(0,0,0,0.04);
+  overflow: hidden; flex: 1;
+  opacity: 0; transform: translateY(6px);
+}
+.log-output.visible { animation: slideIn 0.35s ease forwards; }
+
+.log-header {
+  background: #f0f0f0; padding: 6px 12px;
+  display: flex; align-items: center; gap: 6px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.log-header-dot { width: 8px; height: 8px; border-radius: 50%; }
+.log-header-title {
+  font-family: var(--mono); font-size: 10px; color: var(--text2);
+}
+
+.log-entries { padding: 8px 12px; }
+.log-entry {
+  display: flex; gap: 8px; padding: 4px 0;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+  opacity: 0;
+}
+.log-entry:last-child { border-bottom: none; }
+.log-entry.visible { animation: fadeIn 0.3s ease forwards; }
+
+.log-ts { font-family: var(--mono); font-size: 9px; color: var(--muted); white-space: nowrap; padding-top: 1px; }
+.log-action {
+  font-size: 10px; color: var(--text2); line-height: 1.4;
+}
+.log-action code {
+  font-family: var(--mono); font-size: 9px;
+  background: rgba(0,0,0,0.04); padding: 1px 4px; border-radius: 3px;
+}
+
+/* Summary bar */
+.summary-bar {
+  display: flex; gap: 16px; align-items: center;
+  padding: 8px 12px; background: color-mix(in srgb, var(--accent2) 5%, var(--card));
+  border-radius: 8px; border: 1px solid color-mix(in srgb, var(--accent2) 15%, transparent);
+  opacity: 0;
+}
+.summary-bar.visible { animation: fadeIn 0.4s ease forwards; }
+.summary-stat {
+  font-size: 11px; color: var(--text2);
+}
+.summary-stat strong {
+  font-family: var(--mono); color: var(--accent2);
+}
+
+@keyframes slideIn { to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeIn { to { opacity: 1; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">📋</div>
+  <h1>Audit &amp; Observability</h1>
+  <span class="badge">1 TOOL · READ-ONLY</span>
+</div>
+
+<div class="main">
+  <!-- Left: Write events happening -->
+  <div class="writes-panel">
+    <div class="writes-label">Agent writes during session</div>
+
+    <div class="write-event" id="w1">
+      <div class="write-time">09:14:22</div>
+      <div class="write-body">
+        <div class="write-op append">✎ APPEND</div>
+        <div class="write-path">Customers/Contoso.md</div>
+        <div class="write-detail">→ ## Agent Insights (142 chars)</div>
+      </div>
+    </div>
+
+    <div class="write-event" id="w2">
+      <div class="write-time">09:16:05</div>
+      <div class="write-body">
+        <div class="write-op create">+ CREATE</div>
+        <div class="write-path">Meetings/2026-04-13-Contoso.md</div>
+        <div class="write-detail">→ New meeting note (380 chars)</div>
+      </div>
+    </div>
+
+    <div class="write-event" id="w3">
+      <div class="write-time">09:18:31</div>
+      <div class="write-body">
+        <div class="write-op append">✎ APPEND</div>
+        <div class="write-path">Customers/Contoso.md</div>
+        <div class="write-detail">→ ## Action Items (95 chars)</div>
+      </div>
+    </div>
+
+    <div class="write-event" id="w4">
+      <div class="write-time">09:22:10</div>
+      <div class="write-body">
+        <div class="write-op replace">↻ REPLACE</div>
+        <div class="write-path">Weekly/2026-W15.md</div>
+        <div class="write-detail">→ Full rewrite (1,204 chars)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Center: Arrow -->
+  <div class="arrow-panel" id="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-icon">→</div>
+    <div class="arrow-text">AUDIT LOG</div>
+    <div class="arrow-line"></div>
+  </div>
+
+  <!-- Right: Log retrieval -->
+  <div class="log-panel">
+    <div class="log-call" id="logCall">
+      <span class="fn">get_agent_log</span>(<span class="str">"2026-04-13"</span>)<br>
+      <span class="comment">// Returns today's write audit trail</span>
+    </div>
+
+    <div class="log-output" id="logOutput">
+      <div class="log-header">
+        <div class="log-header-dot" style="background:var(--green)"></div>
+        <div class="log-header-title">_agent-log/2026-04-13.md</div>
+      </div>
+      <div class="log-entries">
+        <div class="log-entry" id="l1">
+          <div class="log-ts">09:14:22</div>
+          <div class="log-action">
+            <code>atomic_append</code> → Customers/Contoso.md<br>
+            § Agent Insights · 142 chars
+          </div>
+        </div>
+        <div class="log-entry" id="l2">
+          <div class="log-ts">09:16:05</div>
+          <div class="log-action">
+            <code>create_note</code> → Meetings/2026-04-13-Contoso.md<br>
+            New note · 380 chars
+          </div>
+        </div>
+        <div class="log-entry" id="l3">
+          <div class="log-ts">09:18:31</div>
+          <div class="log-action">
+            <code>atomic_append</code> → Customers/Contoso.md<br>
+            § Action Items · 95 chars
+          </div>
+        </div>
+        <div class="log-entry" id="l4">
+          <div class="log-ts">09:22:10</div>
+          <div class="log-action">
+            <code>atomic_replace</code> → Weekly/2026-W15.md<br>
+            Full rewrite · 1,204 chars
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="summary-bar" id="summary">
+      <div class="summary-stat">Writes: <strong>4</strong></div>
+      <div class="summary-stat">Appends: <strong>2</strong></div>
+      <div class="summary-stat">Creates: <strong>1</strong></div>
+      <div class="summary-stat">Replaces: <strong>1</strong></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const timeline = [
+  // Write events appear
+  { t: 400,  fn: () => show('w1') },
+  { t: 1000, fn: () => show('w2') },
+  { t: 1600, fn: () => show('w3') },
+  { t: 2200, fn: () => show('w4') },
+  // Arrow appears
+  { t: 2800, fn: () => show('arrow') },
+  // Log call
+  { t: 3200, fn: () => show('logCall') },
+  { t: 3800, fn: () => show('logOutput') },
+  // Log entries appear one by one
+  { t: 4200, fn: () => show('l1') },
+  { t: 4500, fn: () => show('l2') },
+  { t: 4800, fn: () => show('l3') },
+  { t: 5100, fn: () => show('l4') },
+  // Summary
+  { t: 5600, fn: () => show('summary') },
+  // Reset
+  { t: 12000, fn: () => reset() },
+];
+
+function show(id) { document.getElementById(id).classList.add('visible'); }
+
+function reset() {
+  document.querySelectorAll('.visible').forEach(el => el.classList.remove('visible'));
+  runTimeline();
+}
+
+function runTimeline() {
+  timeline.forEach(({ t, fn }) => setTimeout(fn, t));
+}
+
+runTimeline();
+</script>
+</body>
+</html>

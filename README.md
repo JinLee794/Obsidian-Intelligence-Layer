@@ -120,6 +120,10 @@ OIL exposes **13 tools** across four categories.
 
 All read-only. No confirmation needed.
 
+<p align="center">
+  <img src="docs/assets/oil-search-inspect.gif" alt="Search & Inspect tools — ranked snippets, section reads, graph traversal" width="800" />
+</p>
+
 | Tool | What It Does |
 |---|---|
 | `search_vault` | Unified search across lexical and fuzzy tiers, with optional folder and tag filters. Returns ranked results with excerpts. |
@@ -133,6 +137,10 @@ All read-only. No confirmation needed.
 
 All write tools require `expected_mtime` (from `get_note_metadata`) or check for file existence. If the file has changed since you last read it, the write is rejected immediately.
 
+<p align="center">
+  <img src="docs/assets/oil-safe-writes.gif" alt="Safe Writes — mtime concurrency check flow" width="800" />
+</p>
+
 | Tool | What It Does |
 |---|---|
 | `atomic_append` | Append content under a specific heading. Requires `expected_mtime`. Rejected if the file changed since you read it. Returns new `mtime_ms`. |
@@ -143,6 +151,10 @@ All write tools require `expected_mtime` (from `get_note_metadata`) or check for
 
 High-level tools that encode business logic the LLM would otherwise need to reconstruct from scratch on every request.
 
+<p align="center">
+  <img src="docs/assets/oil-customer-workflows.gif" alt="Customer Workflows — single call assembles full customer snapshot" width="800" />
+</p>
+
 | Tool | What It Does |
 |---|---|
 | `get_customer_context` | Assembles a full customer snapshot: frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, and open action items. Accepts a customer name or TPID. |
@@ -150,6 +162,10 @@ High-level tools that encode business logic the LLM would otherwise need to reco
 | `check_vault_health` | Scans the vault for stale Agent Insights (>30 days), opportunities or milestones missing IDs, notes without a `## Team` section, and orphaned meeting notes. Returns a prioritized issue list. |
 
 ### Audit & Observability (1 tool)
+
+<p align="center">
+  <img src="docs/assets/oil-audit-log.gif" alt="Audit & Observability — every write logged with timestamp and detail" width="800" />
+</p>
 
 | Tool | What It Does |
 |---|---|
