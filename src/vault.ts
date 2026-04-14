@@ -556,11 +556,13 @@ export async function readOpportunityNotes(
   if (entityNotes.length > 0) {
     return entityNotes.map((note) => ({
       name: note.title,
-      guid: typeof note.frontmatter.guid === "string"
-        ? note.frontmatter.guid
-        : typeof note.frontmatter.opportunityid === "string"
-          ? note.frontmatter.opportunityid
-          : undefined,
+      guid: typeof note.frontmatter.opportunityId === "string"
+        ? note.frontmatter.opportunityId
+        : typeof note.frontmatter.guid === "string"
+          ? note.frontmatter.guid
+          : typeof note.frontmatter.opportunityid === "string"
+            ? note.frontmatter.opportunityid
+            : undefined,
       status: typeof note.frontmatter.status === "string"
         ? note.frontmatter.status
         : undefined,
@@ -605,22 +607,28 @@ export async function readMilestoneNotes(
   if (entityNotes.length > 0) {
     return entityNotes.map((note) => ({
       name: note.title,
-      id: typeof note.frontmatter.milestoneid === "string"
-        ? note.frontmatter.milestoneid
-        : typeof note.frontmatter.id === "string"
-          ? note.frontmatter.id
-          : undefined,
-      number: typeof note.frontmatter.number === "string"
-        ? note.frontmatter.number
-        : typeof note.frontmatter.milestone_number === "string"
-          ? note.frontmatter.milestone_number
-          : undefined,
+      id: typeof note.frontmatter.milestoneId === "string"
+        ? note.frontmatter.milestoneId
+        : typeof note.frontmatter.milestoneid === "string"
+          ? note.frontmatter.milestoneid
+          : typeof note.frontmatter.id === "string"
+            ? note.frontmatter.id
+            : undefined,
+      number: typeof note.frontmatter.milestoneNumber === "string"
+        ? note.frontmatter.milestoneNumber
+        : typeof note.frontmatter.number === "string"
+          ? note.frontmatter.number
+          : typeof note.frontmatter.milestone_number === "string"
+            ? note.frontmatter.milestone_number
+            : undefined,
       status: typeof note.frontmatter.status === "string"
         ? note.frontmatter.status
         : undefined,
-      milestonedate: typeof note.frontmatter.milestonedate === "string"
-        ? note.frontmatter.milestonedate
-        : undefined,
+      milestonedate: typeof note.frontmatter.milestoneDate === "string"
+        ? note.frontmatter.milestoneDate
+        : typeof note.frontmatter.milestonedate === "string"
+          ? note.frontmatter.milestonedate
+          : undefined,
       owner: typeof note.frontmatter.owner === "string"
         ? note.frontmatter.owner
         : undefined,

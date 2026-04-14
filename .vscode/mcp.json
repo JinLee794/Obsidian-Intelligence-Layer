@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "showrunner": {
+      "command": "npx",
+      "args": ["-y", "@jinlee794/showrunner-mcp"],
+      "env": {
+        "npm_config_@jinlee794:registry": "https://npm.pkg.github.com"
+      }
+    },
+    "oil": {
+        "command": "node",
+        "args": ["dist/index.js"],
+        "env": {
+          "OBSIDIAN_VAULT_PATH": "${env:OBSIDIAN_VAULT_PATH}"
+        }
+    }
+  }
+}

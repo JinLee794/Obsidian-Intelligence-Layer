@@ -113,8 +113,12 @@ export function registerDomainTools(
         }
       }
 
-      // Parse structured sections
-      const teamSection = parsed.sections.get("Team") ?? "";
+      // Parse structured sections (try common heading variants)
+      const teamSection = parsed.sections.get("Team")
+        ?? parsed.sections.get("Microsoft Team")
+        ?? parsed.sections.get("Key Stakeholders")
+        ?? parsed.sections.get("Stakeholders")
+        ?? "";
       const connectSection = parsed.sections.get("Connect Hooks") ?? "";
 
       // Read entities — prefers sub-notes, falls back to section parsing

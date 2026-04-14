@@ -62,20 +62,38 @@ export async function extractPrefetchIds(
       }
     }
 
-    // Extract IDs from frontmatter
+    // Extract IDs from frontmatter (supports top-level and nested MSX structure)
+    const msxObj =
+      typeof parsed.frontmatter.MSX === "object" && parsed.frontmatter.MSX !== null
+        ? (parsed.frontmatter.MSX as Record<string, unknown>)
+        : null;
     const tpid =
       typeof parsed.frontmatter.tpid === "string"
         ? parsed.frontmatter.tpid
-        : undefined;
+        : typeof msxObj?.tpid === "string"
+          ? msxObj.tpid
+          : undefined;
     const accountid =
       typeof parsed.frontmatter.accountid === "string"
         ? parsed.frontmatter.accountid
-        : undefined;
+        : typeof parsed.frontmatter.accountId === "string"
+          ? parsed.frontmatter.accountId
+          : typeof msxObj?.accountId === "string"
+            ? msxObj.accountId
+            : typeof msxObj?.accountid === "string"
+              ? msxObj.accountid
+              : undefined;
 
     // Read entities — prefers sub-notes, falls back to section parsing
     const opps = await readOpportunityNotes(vaultPath, config, customer);
     const milestones = await readMilestoneNotes(vaultPath, config, customer);
-    const team = parseTeam(parsed.sections.get("Team") ?? "");
+    const team = parseTeam(
+      parsed.sections.get("Team")
+      ?? parsed.sections.get("Microsoft Team")
+      ?? parsed.sections.get("Key Stakeholders")
+      ?? parsed.sections.get("Stakeholders")
+      ?? "",
+    );
 
     results.push({
       customer,

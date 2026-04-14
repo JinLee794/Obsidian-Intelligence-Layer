@@ -229,7 +229,10 @@ export function registerWriteTools(
         await executeWrite(vaultPath, path, content, "create");
         cache.invalidateNote(path);
 
-        const after = await getMtime(vaultPath, path);
+        // Wait for mtime to stabilize — Obsidian may touch new files
+        // within ~1-2s (indexing, metadata injection). Returning before
+        // it settles would give the agent a stale mtime.
+        const after = await getStableMtime(vaultPath, path);
         return {
           content: [
             {
@@ -311,6 +314,38 @@ async function getMtime(vaultPath: string, path: string): Promise<number> {
   const fullPath = securePath(vaultPath, path);
   const fileStats = await stat(fullPath);
   return fileStats.mtimeMs;
+}
+
+/**
+ * Wait for the file mtime to stabilize (stop changing).
+ * Obsidian's file watcher can touch newly created/written files within ~1-2s
+ * (indexing, metadata injection). If we return the mtime before it settles,
+ * the agent's next atomic write will fail with "Stale write rejected".
+ *
+ * Strategy: wait `settleDelayMs` (default 1s) to let Obsidian's watcher fire,
+ * then poll in `intervalMs` steps until two consecutive reads match or
+ * `maxWaitMs` is exhausted.
+ */
+async function getStableMtime(
+  vaultPath: string,
+  path: string,
+  maxWaitMs = 4000,
+  settleDelayMs = 1000,
+  intervalMs = 300,
+): Promise<number> {
+  // Let Obsidian's file-watcher debounce fire before we start checking
+  await new Promise((r) => setTimeout(r, settleDelayMs));
+
+  let prev = await getMtime(vaultPath, path);
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const cur = await getMtime(vaultPath, path);
+    if (mtimeMatches(cur, prev)) return cur;
+    prev = cur;
+  }
+  return prev;
 }
 
 function mtimeMatches(current: number, expected: number): boolean {

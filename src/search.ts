@@ -133,14 +133,24 @@ export function fuzzySearch(
   const raw = fuse.search(query, { limit: limit * 2 });
 
   const results: SearchResult[] = [];
+  // Normalize scores: fuse.js returns 0 = perfect match, threshold = worst.
+  // Map to [0.1, 1.0] range so results always have differentiable scores.
+  const maxFuseScore = raw.length > 0
+    ? Math.max(...raw.map((r) => r.score ?? 0), 0.01)
+    : 1;
+
   for (const match of raw) {
     if (!passesFilters(match.item.path, graph, filters)) continue;
+
+    const fuseScore = match.score ?? 0;
+    // Invert and normalize: best match → 1.0, worst in result set → ~0.1
+    const normalizedScore = 1 - (fuseScore / maxFuseScore) * 0.9;
 
     results.push({
       path: match.item.path,
       title: match.item.title,
       excerpt: match.item.tags.join(", "),
-      score: 1 - (match.score ?? 0),
+      score: normalizedScore,
       matchType: "fuzzy",
     });
 

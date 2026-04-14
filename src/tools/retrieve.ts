@@ -94,15 +94,20 @@ function contentSearch(
     const lower = node.bodySnippet.toLowerCase();
 
     let totalHits = 0;
+    let matchedTerms = 0;
     for (const term of terms) {
+      let termHits = 0;
       let idx = lower.indexOf(term);
       while (idx >= 0) {
-        totalHits++;
+        termHits++;
         idx = lower.indexOf(term, idx + term.length);
       }
+      if (termHits > 0) matchedTerms++;
+      totalHits += termHits;
     }
 
-    if (totalHits > 0) {
+    // Require at least half the query terms to match to reduce false positives
+    if (totalHits > 0 && matchedTerms >= Math.ceil(terms.length / 2)) {
       scored.push({
         path: ref.path,
         title: ref.title,
@@ -178,6 +183,9 @@ export function registerRetrieveTools(
       },
     },
     async ({ query, tier, limit, filter_folder, filter_tags }) => {
+      if (!query || !query.trim()) {
+        return validationError("search_vault: query must be a non-empty string");
+      }
       if (filter_folder) {
         const folderErr = validateVaultPath(filter_folder);
         if (folderErr) return validationError(`search_vault: filter_folder — ${folderErr}`);
@@ -413,6 +421,9 @@ export function registerRetrieveTools(
       },
     },
     async ({ query, limit }) => {
+      if (!query || !query.trim()) {
+        return validationError("semantic_search: query must be a non-empty string");
+      }
       const boundedLimit = limit ?? 10;
 
       // Fuzzy search + in-memory content search for broad recall
