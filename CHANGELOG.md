@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-04-13
+
+### Docs
+
+- Add animated HTML previews and GIFs for customer workflows, safe writes, search & inspect, and audit log
+- Add GIF capture script (`capture-gifs.mjs`) for generating docs assets
+- Update README with new showcase GIF references
+- Migrate Showrunner skill to `showrunner-video`, add scene-types reference
+
 ## [0.5.0] - 2026-04-13
 
 ### Features
