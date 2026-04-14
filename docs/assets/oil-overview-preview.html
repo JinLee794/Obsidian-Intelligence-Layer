@@ -780,8 +780,8 @@ body {
     <div class="preview-scene" data-scene="3" data-duration="3"><div class="scene section-header bg-grid">
   <div class="section-header__orb"></div>
   <div class="section-header__accent accent-line"></div>
-  <h1 class="section-header__heading">Built for Sales Teams</h1>
-  <p class="section-header__subheading">Opinionated tools for account management workflows</p>
+  <h1 class="section-header__heading">Quick Setup</h1>
+  <p class="section-header__subheading">3 commands and one config file</p>
   <div class="section-header__line"></div>
 </div>
 
@@ -791,324 +791,317 @@ body {
     background: linear-gradient(160deg, var(--bg-primary) 0%, var(--bg-secondary) 50%, var(--bg-primary) 100%);
     gap: calc(var(--spacing-unit) * 2);
   }
-
   .section-header__orb {
-    position: absolute;
-    width: 350px;
-    height: 350px;
-    border-radius: 50%;
-    background: var(--accent);
-    opacity: 0.05;
-    filter: blur(80px);
-    pointer-events: none;
-    z-index: 0;
+    position: absolute; width: 350px; height: 350px; border-radius: 50%;
+    background: var(--accent); opacity: 0.05; filter: blur(80px); pointer-events: none; z-index: 0;
   }
-
-  .section-header__accent {
-    width: 80px;
-    height: 4px;
-    margin-bottom: calc(var(--spacing-unit) * 2);
-    background: var(--accent-gradient);
-  }
-
-  .section-header__image {
-    max-width: 160px;
-    max-height: 72px;
-    object-fit: contain;
-    margin-bottom: calc(var(--spacing-unit) * 2);
-  }
-
+  .section-header__accent { width: 80px; height: 4px; margin-bottom: calc(var(--spacing-unit) * 2); background: var(--accent-gradient); }
   .section-header__heading {
-    font-family: var(--font-heading);
-    font-size: 3.2rem;
-    font-weight: 700;
-    background: var(--accent-gradient);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    line-height: 1.12;
-    max-width: 80%;
-    letter-spacing: -0.02em;
+    font-family: var(--font-heading); font-size: 3.2rem; font-weight: 700;
+    background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    line-height: 1.12; max-width: 80%; letter-spacing: -0.02em;
   }
-
-  .section-header__subheading {
-    font-size: 1.3rem;
-    color: var(--text-secondary);
-    font-weight: 400;
-    max-width: 65%;
-    margin-top: calc(var(--spacing-unit) * 1);
-    line-height: 1.45;
-  }
-
-  .section-header__line {
-    width: 160px;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    opacity: 0.3;
-    margin-top: calc(var(--spacing-unit) * 2);
-  }
+  .section-header__subheading { font-size: 1.3rem; color: var(--text-secondary); font-weight: 400; max-width: 65%; margin-top: calc(var(--spacing-unit) * 1); line-height: 1.45; }
+  .section-header__line { width: 160px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); opacity: 0.3; margin-top: calc(var(--spacing-unit) * 2); }
 </style>
-
 <script>
   window.__buildTimeline = function() {
     var tl = gsap.timeline({ paused: true });
-    var anim = window.__anim || {};
-    var ease = window.__getEase ? window.__getEase('back.out(1.4)') : 'back.out(1.4)';
-
-    tl.from('.section-header__orb', {
-      scale: 0.2,
-      opacity: 0,
-      duration: 0.8,
-      ease: 'power2.out'
-    }, 0);
-
-    if (document.querySelector('.section-header__image')) {
-      tl.from('.section-header__image', {
-        scale: 0.8,
-        opacity: 0,
-        duration: 0.5,
-        ease: 'back.out(1.4)'
-      }, 0.15);
-    } else {
-      tl.from('.section-header__accent', {
-        scaleX: 0,
-        transformOrigin: 'center center',
-        duration: 0.4,
-        ease: 'power3.out'
-      }, 0.15);
-    }
-
-    // Heading — use text effect if specified
-    var headingEl = document.querySelector('.section-header__heading');
-    if (headingEl && anim.textEffect && window.__textEffect) {
-      tl.add(window.__textEffect(headingEl, anim.textEffect, { ease: ease }), '-=0.15');
-    } else {
-      tl.from('.section-header__heading', {
-        y: 35,
-        opacity: 0,
-        duration: 0.6,
-        ease: ease
-      }, '-=0.15');
-    }
-
-    tl.from('.section-header__subheading', {
-      y: 20,
-      opacity: 0,
-      duration: 0.45,
-      ease: 'power2.out'
-    }, '-=0.25')
-    .from('.section-header__line', {
-      scaleX: 0,
-      transformOrigin: 'center center',
-      duration: 0.4,
-      ease: 'power3.out'
-    }, '-=0.2');
-
-    var holdDuration = Math.max(0.5, tl.duration() * 0.4);
-    tl.to({}, { duration: holdDuration });
-
+    tl.from('.section-header__orb', { scale: 0.2, opacity: 0, duration: 0.8, ease: 'power2.out' }, 0);
+    tl.from('.section-header__accent', { scaleX: 0, transformOrigin: 'center center', duration: 0.4, ease: 'power3.out' }, 0.15);
+    tl.from('.section-header__heading', { y: 35, opacity: 0, duration: 0.6, ease: 'back.out(1.4)' }, '-=0.15');
+    tl.from('.section-header__subheading', { y: 20, opacity: 0, duration: 0.45, ease: 'power2.out' }, '-=0.25');
+    tl.from('.section-header__line', { scaleX: 0, transformOrigin: 'center center', duration: 0.4, ease: 'power3.out' }, '-=0.2');
+    tl.to({}, { duration: Math.max(0.5, tl.duration() * 0.4) });
     if (window.__buildExit) tl.add(window.__buildExit());
-
     return tl;
   };
 </script>
 </div>
-    <div class="preview-scene" data-scene="4" data-duration="7"><div class="scene bullet-list">
-  <h2 class="bullet-list__title">What Your Agent Can Do</h2>
-  <ul class="bullet-list__items">
-    <li class="bullet-list__item bullet-list__item--highlight">
-      <span class="bullet-list__bullet">
-        👤
-      </span>
-      <div class="bullet-list__content">
-        <span class="bullet-list__text">Get Customer Context</span>
-        <span class="bullet-list__sub">Full account snapshot — team, meetings, opportunities, action items</span>
-      </div>
-    </li>
-    <li class="bullet-list__item ">
-      <span class="bullet-list__bullet">
-        🔍
-      </span>
-      <div class="bullet-list__content">
-        <span class="bullet-list__text">Search Your Vault</span>
-        <span class="bullet-list__sub">Ranked results with snippets, not raw file dumps</span>
-      </div>
-    </li>
-    <li class="bullet-list__item ">
-      <span class="bullet-list__bullet">
-        🔗
-      </span>
-      <div class="bullet-list__content">
-        <span class="bullet-list__text">Prep for CRM Sync</span>
-        <span class="bullet-list__sub">Extract opportunity GUIDs, TPIDs, and account IDs automatically</span>
-      </div>
-    </li>
-    <li class="bullet-list__item ">
-      <span class="bullet-list__bullet">
-        🩺
-      </span>
-      <div class="bullet-list__content">
-        <span class="bullet-list__text">Check Vault Health</span>
-        <span class="bullet-list__sub">Surface stale insights, missing IDs, and orphaned meetings</span>
-      </div>
-    </li>
-  </ul>
+    <div class="preview-scene" data-scene="4" data-duration="7"><div class="scene terminal-scene">
+  <h2 class="scene-title terminal-scene__title">Install &amp; Run</h2>
+  <div class="terminal-scene__window">
+    <div class="terminal-scene__titlebar">
+      <span class="terminal-scene__dot terminal-scene__dot--red"></span>
+      <span class="terminal-scene__dot terminal-scene__dot--yellow"></span>
+      <span class="terminal-scene__dot terminal-scene__dot--green"></span>
+      <span class="terminal-scene__titlebar-text">Terminal</span>
+    </div>
+    <div class="terminal-scene__body">
+      <div class="terminal-scene__line terminal-scene__line--comment"># Clone and build</div>
+      <div class="terminal-scene__line terminal-scene__line--prompt"><span class="terminal-scene__prompt-char">$</span> git clone &lt;repo-url&gt; &amp;&amp; cd obsidian-intelligence-layer</div>
+      <div class="terminal-scene__line terminal-scene__line--prompt"><span class="terminal-scene__prompt-char">$</span> npm install &amp;&amp; npm run build</div>
+      <div class="terminal-scene__line terminal-scene__line--blank">&nbsp;</div>
+      <div class="terminal-scene__line terminal-scene__line--comment"># Run — just point to your vault</div>
+      <div class="terminal-scene__line terminal-scene__line--prompt terminal-scene__line--highlight"><span class="terminal-scene__prompt-char">$</span> OBSIDIAN_VAULT_PATH=<span class="terminal-scene__path">/path/to/your/vault</span> node dist/index.js</div>
+      <div class="terminal-scene__line terminal-scene__line--success">✓ OIL server ready — 13 tools registered</div>
+    </div>
+  </div>
 </div>
 
 <style>
-  .bullet-list {
-    padding: calc(var(--spacing-unit) * 8) calc(var(--spacing-unit) * 12);
+  .terminal-scene {
+    padding: calc(var(--spacing-unit) * 6) calc(var(--spacing-unit) * 10);
+    flex-direction: column; align-items: flex-start; gap: calc(var(--spacing-unit) * 3);
+  }
+  .terminal-scene__window {
+    width: 100%; border-radius: var(--border-radius-lg); overflow: hidden;
+    box-shadow: var(--shadow-elevated); border: 1px solid rgba(0,0,0,0.15);
+  }
+  .terminal-scene__titlebar {
+    background: #2d2d2d; padding: 10px 16px; display: flex; align-items: center; gap: 8px;
+  }
+  .terminal-scene__dot { width: 12px; height: 12px; border-radius: 50%; }
+  .terminal-scene__dot--red { background: #ff5f57; }
+  .terminal-scene__dot--yellow { background: #febc2e; }
+  .terminal-scene__dot--green { background: #28c840; }
+  .terminal-scene__titlebar-text { color: #999; font-size: 0.8rem; font-family: var(--font-mono); margin-left: auto; margin-right: auto; }
+  .terminal-scene__body {
+    background: #1e1e1e; padding: calc(var(--spacing-unit) * 3) calc(var(--spacing-unit) * 3);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .terminal-scene__line { font-family: var(--font-mono); font-size: 1.05rem; line-height: 1.6; color: #d4d4d4; }
+  .terminal-scene__line--comment { color: #6a9955; }
+  .terminal-scene__line--prompt .terminal-scene__prompt-char { color: #569cd6; margin-right: 8px; }
+  .terminal-scene__line--blank { height: 8px; }
+  .terminal-scene__line--success { color: #4ec9b0; font-weight: 600; }
+  .terminal-scene__line--highlight {
+    background: rgba(0, 120, 212, 0.12); border-left: 3px solid var(--accent);
+    padding: 4px 8px; margin-left: -12px; border-radius: 0 4px 4px 0;
+  }
+  .terminal-scene__path { color: #ce9178; }
+</style>
+<script>
+  window.__buildTimeline = function() {
+    var tl = gsap.timeline({ paused: true });
+    tl.from('.terminal-scene__title', { y: 30, opacity: 0, duration: 0.4, ease: 'back.out(1.7)' });
+    tl.from('.terminal-scene__window', { y: 30, opacity: 0, scale: 0.95, duration: 0.5, ease: 'back.out(1.3)' }, '-=0.15');
+    tl.from('.terminal-scene__titlebar', { opacity: 0, duration: 0.3, ease: 'power2.out' }, '-=0.2');
+    var lines = document.querySelectorAll('.terminal-scene__line');
+    tl.from(lines, { opacity: 0, x: -10, duration: 0.3, stagger: 0.12, ease: 'power2.out' }, '-=0.1');
+    tl.from('.terminal-scene__line--success', { scale: 1.05, duration: 0.3, ease: 'power2.out' }, '-=0.1');
+    tl.to({}, { duration: Math.max(0.8, tl.duration() * 0.5) });
+    if (window.__buildExit) tl.add(window.__buildExit());
+    return tl;
+  };
+</script>
+</div>
+    <div class="preview-scene" data-scene="5" data-duration="7"><div class="scene terminal-scene terminal-scene--json">
+  <h2 class="scene-title terminal-scene__title">.vscode/mcp.json</h2>
+  <div class="terminal-scene__window">
+    <div class="terminal-scene__titlebar">
+      <span class="terminal-scene__dot terminal-scene__dot--red"></span>
+      <span class="terminal-scene__dot terminal-scene__dot--yellow"></span>
+      <span class="terminal-scene__dot terminal-scene__dot--green"></span>
+      <span class="terminal-scene__titlebar-text">mcp.json — VS Code MCP Configuration</span>
+    </div>
+    <div class="terminal-scene__body">
+      <div class="terminal-scene__line terminal-scene__line--json"><span class="json-brace">{</span></div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;<span class="json-key">"servers"</span>: {</div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;&nbsp;&nbsp;<span class="json-key">"oil"</span>: {</div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="json-key">"type"</span>: <span class="json-str">"stdio"</span>,</div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="json-key">"command"</span>: <span class="json-str">"node"</span>,</div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="json-key">"args"</span>: [<span class="json-str">"dist/index.js"</span>],</div>
+      <div class="terminal-scene__line terminal-scene__line--json terminal-scene__line--highlight">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="json-key">"env"</span>: {</div>
+      <div class="terminal-scene__line terminal-scene__line--json terminal-scene__line--highlight">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="json-key">"OBSIDIAN_VAULT_PATH"</span>: <span class="json-str terminal-scene__path">"/path/to/your/vault"</span></div>
+      <div class="terminal-scene__line terminal-scene__line--json terminal-scene__line--highlight">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}</div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;&nbsp;&nbsp;}</div>
+      <div class="terminal-scene__line terminal-scene__line--json">&nbsp;&nbsp;}</div>
+      <div class="terminal-scene__line terminal-scene__line--json"><span class="json-brace">}</span></div>
+    </div>
+  </div>
+  <div class="terminal-scene__callout">
+    <span class="terminal-scene__callout-icon">💡</span>
+    <span><strong>OBSIDIAN_VAULT_PATH</strong> is the only required config — point it to your vault folder</span>
+  </div>
+</div>
+
+<style>
+  .terminal-scene--json .json-brace { color: #d4d4d4; }
+  .terminal-scene--json .json-key { color: #9cdcfe; }
+  .terminal-scene--json .json-str { color: #ce9178; }
+  .terminal-scene__callout {
+    display: flex; align-items: center; gap: calc(var(--spacing-unit) * 1.5);
+    padding: calc(var(--spacing-unit) * 2) calc(var(--spacing-unit) * 3);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-secondary));
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    border-radius: var(--border-radius); font-size: 1rem; color: var(--text-primary);
+    width: 100%;
+  }
+  .terminal-scene__callout-icon { font-size: 1.3rem; }
+  .terminal-scene__callout strong { color: var(--accent); font-family: var(--font-mono); }
+</style>
+<script>
+  window.__buildTimeline = function() {
+    var tl = gsap.timeline({ paused: true });
+    tl.from('.terminal-scene--json .terminal-scene__title', { y: 30, opacity: 0, duration: 0.4, ease: 'back.out(1.7)' });
+    tl.from('.terminal-scene--json .terminal-scene__window', { y: 30, opacity: 0, scale: 0.95, duration: 0.5, ease: 'back.out(1.3)' }, '-=0.15');
+    var jsonLines = document.querySelectorAll('.terminal-scene--json .terminal-scene__line');
+    tl.from(jsonLines, { opacity: 0, x: -10, duration: 0.25, stagger: 0.08, ease: 'power2.out' }, '-=0.1');
+    // Pulse the highlighted env lines
+    var highlights = document.querySelectorAll('.terminal-scene--json .terminal-scene__line--highlight');
+    tl.to(highlights, { background: 'rgba(0, 120, 212, 0.2)', duration: 0.3, ease: 'power2.inOut', yoyo: true, repeat: 1 }, '-=0.2');
+    tl.from('.terminal-scene__callout', { y: 15, opacity: 0, duration: 0.4, ease: 'power2.out' }, '-=0.3');
+    tl.to({}, { duration: Math.max(0.8, tl.duration() * 0.5) });
+    if (window.__buildExit) tl.add(window.__buildExit());
+    return tl;
+  };
+</script>
+</div>
+    <div class="preview-scene" data-scene="6" data-duration="7"><div class="scene search-showcase">
+  <h2 class="scene-title search-showcase__title">Powerful Search, Minimal Tokens</h2>
+  <p class="search-showcase__subtitle">Every query returns ranked snippets — never raw file dumps</p>
+  <div class="search-showcase__cards">
+    <div class="search-showcase__card">
+      <div class="search-showcase__icon">🔍</div>
+      <div class="search-showcase__name">search_vault</div>
+      <div class="search-showcase__desc">Lexical + fuzzy matching with folder and tag filters. Primary search tool.</div>
+      <div class="search-showcase__example">
+        <code>search_vault("contoso migration", folder: "Customers/")</code>
+      </div>
+    </div>
+    <div class="search-showcase__card search-showcase__card--highlight">
+      <div class="search-showcase__icon">💬</div>
+      <div class="search-showcase__name">semantic_search</div>
+      <div class="search-showcase__desc">Natural-language queries against note titles and body content.</div>
+      <div class="search-showcase__example">
+        <code>semantic_search("who owns the Azure migration?")</code>
+      </div>
+    </div>
+    <div class="search-showcase__card">
+      <div class="search-showcase__icon">🏷️</div>
+      <div class="search-showcase__name">query_frontmatter</div>
+      <div class="search-showcase__desc">Structured key-value lookups resolved from memory — zero disk I/O.</div>
+      <div class="search-showcase__example">
+        <code>query_frontmatter("tpid", "12345")</code>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .search-showcase {
+    padding: calc(var(--spacing-unit) * 6) calc(var(--spacing-unit) * 10);
     flex-direction: column;
-    align-items: flex-start;
-    gap: calc(var(--spacing-unit) * 2);
+    align-items: center;
+    gap: calc(var(--spacing-unit) * 3);
   }
 
-  .bullet-list__title {
-    font-family: var(--font-heading);
-    font-size: 2.4rem;
+  .search-showcase__title {
+    text-align: center;
+  }
+
+  .search-showcase__subtitle {
+    font-size: 1.15rem;
+    color: var(--text-secondary);
+    text-align: center;
+    max-width: 600px;
+    line-height: 1.5;
+  }
+
+  .search-showcase__cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: calc(var(--spacing-unit) * 3);
+    width: 100%;
+    margin-top: calc(var(--spacing-unit) * 2);
+  }
+
+  .search-showcase__card {
+    background: var(--glass-bg, var(--bg-secondary));
+    backdrop-filter: blur(var(--glass-blur, 16px));
+    border-radius: var(--border-radius);
+    padding: calc(var(--spacing-unit) * 3);
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--spacing-unit) * 1.5);
+    border: 1px solid var(--glass-border, rgba(0,0,0,0.06));
+    box-shadow: var(--shadow-card);
+  }
+
+  .search-showcase__card--highlight {
+    border-top: 3px solid var(--accent);
+    box-shadow: var(--shadow-card), 0 0 20px var(--accent-glow);
+  }
+
+  .search-showcase__icon {
+    font-size: 2rem;
+  }
+
+  .search-showcase__name {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
     font-weight: 700;
     background: var(--accent-gradient);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    margin-bottom: calc(var(--spacing-unit) * 1);
   }
 
-  .bullet-list__subtitle {
-    font-size: 1.1rem;
+  .search-showcase__desc {
+    font-size: 0.95rem;
     color: var(--text-secondary);
-    margin-bottom: calc(var(--spacing-unit) * 2);
+    line-height: 1.45;
+    flex: 1;
   }
 
-  .bullet-list__items {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--spacing-unit) * 2.5);
+  .search-showcase__example {
+    background: #1e1e1e;
+    border-radius: var(--border-radius-sm);
+    padding: calc(var(--spacing-unit) * 1.5);
+    margin-top: auto;
   }
 
-  .bullet-list__item {
-    display: flex;
-    align-items: flex-start;
-    gap: calc(var(--spacing-unit) * 2.5);
-    padding: calc(var(--spacing-unit) * 2.5) calc(var(--spacing-unit) * 3);
-    background: var(--glass-bg, var(--bg-secondary));
-    backdrop-filter: blur(var(--glass-blur, 16px));
-    border-radius: var(--border-radius);
-    border: 1px solid var(--glass-border, rgba(255,255,255,0.06));
-    box-shadow: var(--shadow-card);
-  }
-
-  .bullet-list__item--highlight {
-    border-left: 3px solid var(--accent);
-  }
-
-  .bullet-list__bullet {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    margin-top: 2px;
-  }
-
-  .bullet-list__dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--accent-gradient);
-  }
-
-  .bullet-list__content {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .bullet-list__text {
-    font-size: 1.2rem;
-    color: var(--text-primary);
-    font-weight: 500;
+  .search-showcase__example code {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: #9cdcfe;
     line-height: 1.4;
-  }
-
-  .bullet-list__sub {
-    font-size: 0.9rem;
-    color: var(--text-muted);
-    line-height: 1.4;
+    word-break: break-all;
   }
 </style>
 
 <script>
   window.__buildTimeline = function() {
     var tl = gsap.timeline({ paused: true });
-    var anim = window.__anim || {};
-    var stagger = window.__getStagger ? window.__getStagger(0.15) : 0.15;
-    var ease = window.__getEase ? window.__getEase('back.out(1.2)') : 'back.out(1.2)';
-    var dir = window.__getDirectionFrom ? window.__getDirectionFrom(30) : { y: 30 };
 
-    // Title entrance
-    var title = document.querySelector('.bullet-list__title');
-    if (title) {
-      if (anim.textEffect && window.__textEffect) {
-        tl.add(window.__textEffect(title, anim.textEffect));
-      } else {
-        tl.from(title, Object.assign({}, dir, {
-          opacity: 0,
-          duration: 0.5,
-          ease: ease
-        }));
-      }
-    }
+    tl.from('.search-showcase__title', {
+      y: 30, opacity: 0, duration: 0.4, ease: 'back.out(1.7)'
+    });
 
-    var subtitle = document.querySelector('.bullet-list__subtitle');
-    if (subtitle) {
-      tl.from(subtitle, { opacity: 0, y: 15, duration: 0.3, ease: 'power2.out' }, '-=0.2');
-    }
+    tl.from('.search-showcase__subtitle', {
+      y: 20, opacity: 0, duration: 0.35, ease: 'power2.out'
+    }, '-=0.15');
 
-    // Items stagger in — use generous durations so animation fills the scene
-    var items = document.querySelectorAll('.bullet-list__item');
-    var itemDuration = Math.max(0.6, 0.8 / (anim.speed || 1));
-    var entranceDist = dir.x ? { x: (dir.x > 0 ? 60 : -60) } : { y: (dir.y || 40) > 0 ? 60 : -60 };
-    tl.from(items, Object.assign({}, entranceDist, {
-      opacity: 0,
-      scale: 0.92,
-      duration: itemDuration,
-      stagger: stagger,
-      ease: ease
-    }), '-=0.1');
+    tl.from('.search-showcase__card', {
+      y: 50, opacity: 0, scale: 0.9,
+      duration: 0.5, stagger: 0.15, ease: 'back.out(1.3)'
+    }, '-=0.1');
 
-    // Bullets pop
-    tl.from('.bullet-list__dot', {
-      scale: 0,
-      duration: 0.35,
-      stagger: stagger * 0.8,
-      ease: 'back.out(2.5)'
+    tl.from('.search-showcase__icon', {
+      scale: 0, opacity: 0,
+      duration: 0.35, stagger: 0.1, ease: 'back.out(2.5)'
     }, '-=0.4');
 
-    // Highlight bars sweep
-    tl.from('.bullet-list__item--highlight', {
-      borderLeftWidth: 0,
-      duration: 0.4,
-      stagger: 0.12,
-      ease: 'power3.out'
+    tl.from('.search-showcase__name', {
+      x: -20, opacity: 0,
+      duration: 0.35, stagger: 0.1, ease: 'power2.out'
     }, '-=0.3');
 
-    // Hold — proportional to entrance so scrubbing looks balanced
+    tl.from('.search-showcase__example', {
+      scaleY: 0, opacity: 0, transformOrigin: 'top center',
+      duration: 0.4, stagger: 0.12, ease: 'power3.out'
+    }, '-=0.2');
+
     var holdDuration = Math.max(0.8, tl.duration() * 0.6);
     tl.to({}, { duration: holdDuration });
     if (window.__buildExit) tl.add(window.__buildExit());
-
     return tl;
   };
 </script>
 </div>
-    <div class="preview-scene" data-scene="5" data-duration="7"><div class="scene pipeline-funnel">
-  <h2 class="scene-title pipeline-funnel__title">Pipeline Overview</h2>
+    <div class="preview-scene" data-scene="7" data-duration="7"><div class="scene pipeline-funnel">
+  <h2 class="scene-title pipeline-funnel__title">How OIL Saves Tokens</h2>
   <div class="pipeline-funnel__stages">
     <div class="pipeline-funnel__stage ">
       <div class="pipeline-funnel__label">Vault Notes</div>
@@ -1135,7 +1128,7 @@ body {
     <div class="pipeline-funnel__stage pipeline-funnel__stage--highlight">
       <div class="pipeline-funnel__label">Section Read</div>
       <div class="pipeline-funnel__bar-track">
-        <div class="pipeline-funnel__bar" data-width="0"></div>
+        <div class="pipeline-funnel__bar" data-width="2"></div>
         <div class="pipeline-funnel__bar-shimmer"></div>
       </div>
       <div class="pipeline-funnel__meta">
@@ -1146,7 +1139,7 @@ body {
     <div class="pipeline-funnel__stage ">
       <div class="pipeline-funnel__label">Agent Context</div>
       <div class="pipeline-funnel__bar-track">
-        <div class="pipeline-funnel__bar" data-width="0"></div>
+        <div class="pipeline-funnel__bar" data-width="1"></div>
         <div class="pipeline-funnel__bar-shimmer"></div>
       </div>
       <div class="pipeline-funnel__meta">
@@ -1331,7 +1324,7 @@ body {
   };
 </script>
 </div>
-    <div class="preview-scene" data-scene="6" data-duration="6"><div class="scene kpi-scorecard">
+    <div class="preview-scene" data-scene="8" data-duration="6"><div class="scene kpi-scorecard">
   <div class="kpi-scorecard__grid">
     <div class="kpi-scorecard__card">
       <div class="kpi-scorecard__card-glow"></div>
@@ -1351,9 +1344,10 @@ body {
     </div>
     <div class="kpi-scorecard__card">
       <div class="kpi-scorecard__card-glow"></div>
-      <div class="kpi-scorecard__label">Write Safety</div>
+      <div class="kpi-scorecard__label">Token Savings</div>
       <div class="kpi-scorecard__value-row">
-        <div class="kpi-scorecard__value" data-target="mtime">0</div>
+        <div class="kpi-scorecard__value" data-target="95">0</div>
+        <span class="kpi-scorecard__unit">%</span>
       </div>
       <div class="kpi-scorecard__trend kpi-scorecard__trend--up">
         <span class="kpi-scorecard__trend-icon">
@@ -1383,17 +1377,17 @@ body {
     </div>
     <div class="kpi-scorecard__card">
       <div class="kpi-scorecard__card-glow"></div>
-      <div class="kpi-scorecard__label">Approval Needed</div>
+      <div class="kpi-scorecard__label">Config Files</div>
       <div class="kpi-scorecard__value-row">
-        <div class="kpi-scorecard__value" data-target="None">0</div>
+        <div class="kpi-scorecard__value" data-target="0">0</div>
       </div>
-      <div class="kpi-scorecard__trend kpi-scorecard__trend--flat">
+      <div class="kpi-scorecard__trend kpi-scorecard__trend--up">
         <span class="kpi-scorecard__trend-icon">
+          &#9650;
           
           
-          &#9654;
         </span>
-        <span class="kpi-scorecard__trend-label">flat</span>
+        <span class="kpi-scorecard__trend-label">optional</span>
       </div>
       <div class="kpi-scorecard__accent-bar"></div>
     </div>
@@ -1592,7 +1586,7 @@ body {
   };
 </script>
 </div>
-    <div class="preview-scene" data-scene="7" data-duration="5"><div class="scene closing bg-grid">
+    <div class="preview-scene" data-scene="9" data-duration="5"><div class="scene closing bg-grid">
   <div class="closing__orb closing__orb--1"></div>
   <div class="closing__orb closing__orb--2"></div>
   <h1 class="closing__tagline">Give your AI agent a second brain.</h1>
@@ -1746,16 +1740,16 @@ body {
     <button id="nextBtn">Next ▶</button>
     <div class="preview-scrub"><input type="range" id="scrub" min="0" max="1000" value="0"></div>
     <div class="preview-info">
-      <span id="sceneInfo">Scene 1/8</span> |
-      <span id="timeInfo">0.0s / 45.0s</span>
+      <span id="sceneInfo">Scene 1/10</span> |
+      <span id="timeInfo">0.0s / 59.0s</span>
     </div>
   </div>
   <script>
     (function() {
       var scenes = document.querySelectorAll('.preview-scene');
       var timelines = [];
-      var durations = [5,5,7,3,7,7,6,5];
-      var totalDuration = 45;
+      var durations = [5,5,7,3,7,7,7,7,6,5];
+      var totalDuration = 59;
       var playing = false;
       var globalTime = 0;
       var lastTimestamp = null;
