@@ -499,6 +499,7 @@ export class GraphIndex {
       path: n.path,
       title: n.title,
       tags: n.tags,
+      ref: n.path,
     }));
   }
 
@@ -520,7 +521,7 @@ export class GraphIndex {
     const results: NoteRef[] = [];
     for (const [path, node] of this.nodes) {
       if (path.startsWith(folder)) {
-        results.push({ path: node.path, title: node.title, tags: node.tags });
+        results.push({ path: node.path, title: node.title, tags: node.tags, ref: node.path });
       }
     }
     return results;
@@ -581,6 +582,7 @@ export class GraphIndex {
       path: node.path,
       title: node.title,
       tags: node.tags,
+      ref: node.path,
     }));
   }
 
@@ -633,6 +635,6 @@ export class GraphIndex {
   private toNoteRef(path: string): NoteRef | null {
     const node = this.nodes.get(path);
     if (!node) return null;
-    return { path: node.path, title: node.title, tags: node.tags };
+    return { path: node.path, title: node.title, tags: node.tags, ref: node.path };
   }
 }

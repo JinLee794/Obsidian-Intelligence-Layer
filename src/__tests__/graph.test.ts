@@ -191,6 +191,33 @@ describe("GraphIndex — queries", () => {
     expect(paths).toContain("Meetings/2026-03-01 - Contoso Sync.md");
   });
 
+  it("NoteRef results include stable ref field", () => {
+    const backlinks = graph.getBacklinks("Customers/Contoso.md");
+    for (const note of backlinks) {
+      expect(note.ref).toBe(note.path);
+    }
+
+    const forward = graph.getForwardLinks("Customers/Contoso.md");
+    for (const note of forward) {
+      expect(note.ref).toBe(note.path);
+    }
+
+    const folder = graph.getNotesByFolder("Customers/");
+    for (const note of folder) {
+      expect(note.ref).toBe(note.path);
+    }
+
+    const related = graph.getRelatedNotes("Customers/Contoso.md", 1);
+    for (const note of related) {
+      expect(note.ref).toBe(note.path);
+    }
+
+    const stats = graph.getStats();
+    for (const note of stats.mostLinkedNotes) {
+      expect(note.ref).toBe(note.path);
+    }
+  });
+
   it("getForwardLinks returns notes linked FROM a note", () => {
     const forward = graph.getForwardLinks("Customers/Contoso.md");
     const paths = forward.map((n) => n.path);

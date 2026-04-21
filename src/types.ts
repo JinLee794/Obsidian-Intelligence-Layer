@@ -10,6 +10,8 @@ export interface NoteRef {
   title: string;
   tags: string[];
   excerpt?: string;
+  ref?: string;
+  version?: number;
 }
 
 export interface NoteFrontmatter {

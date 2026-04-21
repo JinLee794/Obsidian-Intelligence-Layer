@@ -10,6 +10,12 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig, NoteRef } from "../types.js";
+import {
+  errorCodeFromUnknown,
+  errorResponse,
+  jsonResponse,
+  noteRef,
+} from "../tool-responses.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { readNote, securePath } from "../vault.js";
 import { fuzzySearch, searchVault } from "../search.js";
@@ -222,9 +228,12 @@ export function registerRetrieveTools(
         }
       }
 
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
-      };
+      return jsonResponse(
+        results.map((result) => ({
+          ...result,
+          ref: noteRef(result.path),
+        })),
+      );
     },
   );
 
@@ -241,7 +250,17 @@ export function registerRetrieveTools(
     },
     async ({ path }) => {
       const pathErr = validateVaultPath(path);
-      if (pathErr) return validationError(`get_note_metadata: ${pathErr}`);
+      if (pathErr) {
+        return validationError(
+          `get_note_metadata: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Customers/Contoso.md without ../ segments or absolute prefixes, then retry get_note_metadata.",
+          },
+        );
+      }
 
       try {
         const parsed = await readNote(vaultPath, path);
@@ -249,29 +268,24 @@ export function registerRetrieveTools(
 
         const result = {
           path: parsed.path,
+          ref: noteRef(parsed.path),
           title: parsed.title,
           frontmatter: parsed.frontmatter,
           created_at: fileStats.birthtime.toISOString(),
           modified_at: fileStats.mtime.toISOString(),
           mtime_ms: fileStats.mtimeMs,
+          version: fileStats.mtimeMs,
           word_count: getWordCount(parsed.content),
           headings: [...parsed.sections.keys()],
         };
 
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-        };
+        return jsonResponse(result);
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: `Failed to read note metadata: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-            },
-          ],
-        };
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Failed to read note metadata: ${err instanceof Error ? err.message : String(err)}`,
+          { path, ref: noteRef(path) },
+        );
       }
     },
   );
@@ -290,53 +304,56 @@ export function registerRetrieveTools(
     },
     async ({ path, heading }) => {
       const pathErr = validateVaultPath(path);
-      if (pathErr) return validationError(`read_note_section: ${pathErr}`);
+      if (pathErr) {
+        return validationError(
+          `read_note_section: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Customers/Contoso.md without ../ segments or absolute prefixes, then retry read_note_section.",
+          },
+        );
+      }
 
       try {
         const parsed = await readNote(vaultPath, path);
         const section = parsed.sections.get(heading);
 
         if (section === undefined) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: `Section \"${heading}\" not found in ${path}`,
-                  available_headings: [...parsed.sections.keys()],
-                }),
-              },
-            ],
-          };
+          return errorResponse(
+            "NOT_FOUND",
+            `Section \"${heading}\" not found in ${path}`,
+            {
+              path,
+              ref: noteRef(path),
+              available_headings: [...parsed.sections.keys()],
+            },
+            {
+              retryable: true,
+              suggested_tools: ["read_note_section"],
+              next_step:
+                "Choose a heading from available_headings and retry read_note_section with that exact heading text.",
+            },
+          );
         }
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  path,
-                  heading,
-                  content: section,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
+        const fileStats = await stat(securePath(vaultPath, path));
+
+        return jsonResponse({
+          path,
+          ref: noteRef(path, heading),
+          heading,
+          content: section,
+          mtime_ms: fileStats.mtimeMs,
+          version: fileStats.mtimeMs,
+        });
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: `Failed to read section: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-            },
-          ],
-        };
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Failed to read section: ${err instanceof Error ? err.message : String(err)}`,
+          { path, ref: noteRef(path, heading) },
+        );
       }
     },
   );
@@ -364,18 +381,13 @@ export function registerRetrieveTools(
           .map((entry) => entry.path),
       )].slice(0, 20);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              { key, value_fragment, count: paths.length, paths },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        key,
+        value_fragment,
+        count: paths.length,
+        paths,
+        matches: paths.map((path) => ({ path, ref: noteRef(path) })),
+      });
     },
   );
 
@@ -393,18 +405,26 @@ export function registerRetrieveTools(
     },
     async ({ path, max_hops }) => {
       const pathErr = validateVaultPath(path);
-      if (pathErr) return validationError(`get_related_entities: ${pathErr}`);
+      if (pathErr) {
+        return validationError(
+          `get_related_entities: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Customers/Contoso.md without ../ segments or absolute prefixes, then retry get_related_entities.",
+          },
+        );
+      }
 
       const related = graph.getRelatedNotes(path, max_hops ?? 2);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ path, max_hops: max_hops ?? 2, related }, null, 2),
-          },
-        ],
-      };
+      return jsonResponse({
+        path,
+        ref: noteRef(path),
+        max_hops: max_hops ?? 2,
+        related,
+      });
     },
   );
 
@@ -443,17 +463,16 @@ export function registerRetrieveTools(
       const results = merged.slice(0, boundedLimit).map((r) => {
         const node = graph.getNode(r.path);
         const snippet = buildSnippet(node?.bodySnippet ?? "", query);
-        return { path: r.path, title: r.title, snippet: snippet.slice(0, 220), score: r.score };
+        return {
+          path: r.path,
+          ref: noteRef(r.path),
+          title: r.title,
+          snippet: snippet.slice(0, 220),
+          score: r.score,
+        };
       });
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ count: results.length, results }, null, 2),
-          },
-        ],
-      };
+      return jsonResponse({ count: results.length, results });
     },
   );
 }

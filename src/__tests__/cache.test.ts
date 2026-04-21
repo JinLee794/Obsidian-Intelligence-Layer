@@ -191,3 +191,51 @@ describe("SessionCache — pending writes", () => {
     expect(cache.getPendingWrite("w1")).toEqual(write);
   });
 });
+
+describe("SessionCache — getStats", () => {
+  it("reports zero counts on empty cache", () => {
+    const cache = new SessionCache();
+    const stats = cache.getStats();
+    expect(stats.cachedNotes).toBe(0);
+    expect(stats.cachedTraversals).toBe(0);
+    expect(stats.recentlyAccessed).toBe(0);
+    expect(stats.pendingWrites).toBe(0);
+  });
+
+  it("reports correct counts after populating", () => {
+    const cache = new SessionCache();
+    cache.putNote("a.md", makeParsedNote("a.md"));
+    cache.putNote("b.md", makeParsedNote("b.md"));
+    cache.addPendingWrite({
+      id: "w1",
+      operation: "write_note",
+      path: "c.md",
+      diff: "diff",
+      createdAt: new Date(),
+    });
+
+    const stats = cache.getStats();
+    expect(stats.cachedNotes).toBe(2);
+    expect(stats.recentlyAccessed).toBe(2);
+    expect(stats.pendingWrites).toBe(1);
+  });
+
+  it("reflects clear() correctly", () => {
+    const cache = new SessionCache();
+    cache.putNote("a.md", makeParsedNote("a.md"));
+    cache.addPendingWrite({
+      id: "w1",
+      operation: "write_note",
+      path: "c.md",
+      diff: "diff",
+      createdAt: new Date(),
+    });
+
+    cache.clear();
+    const stats = cache.getStats();
+    expect(stats.cachedNotes).toBe(0);
+    expect(stats.recentlyAccessed).toBe(0);
+    // Pending writes survive clear()
+    expect(stats.pendingWrites).toBe(1);
+  });
+});

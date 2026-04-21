@@ -8,6 +8,12 @@
  * Pattern mirrors mcp/msx/src/validation.js.
  */
 
+import {
+  errorResponse,
+  type ToolErrorCode,
+  type ToolErrorGuidance,
+} from "./tool-responses.js";
+
 const GUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -79,8 +85,10 @@ export function validateCustomerName(name: string): string | null {
 }
 
 /** Build a standard MCP error response (content array with error text). */
-export function validationError(message: string) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify({ error: message }) }],
-  };
+export function validationError(
+  message: string,
+  code: ToolErrorCode = "INVALID_INPUT",
+  guidance?: ToolErrorGuidance,
+) {
+  return errorResponse(code, message, {}, guidance);
 }

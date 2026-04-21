@@ -13,17 +13,20 @@
  * a 10-tool surface: low schema overhead, high accuracy on critical paths.
  */
 
+import { stat } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig, CustomerContext, NoteRef, ActionItem } from "../types.js";
+import { errorResponse, jsonResponse, noteRef } from "../tool-responses.js";
 import { validateCustomerName, validationError } from "../validation.js";
 import {
   readNote,
   parseTeam,
   parseActionItems,
   resolveCustomerPath,
+  securePath,
   readOpportunityNotes,
   readMilestoneNotes,
   readInsightsPartitioned,
@@ -65,26 +68,35 @@ export function registerDomainTools(
           .boolean()
           .optional()
           .describe("Include open action items across linked notes (default: true)"),
+        view: z
+          .enum(["brief", "full", "write"])
+          .optional()
+          .describe("Response profile: brief for compact context, full for default detail, write for deterministic write targets"),
         assignee: z
           .string()
           .optional()
           .describe("Filter open items to a specific person"),
       },
     },
-    async ({ customer, lookback_days, include_similar, include_open_items, assignee }) => {
+    async ({ customer, lookback_days, include_similar, include_open_items, assignee, view }) => {
+      const requestedView = view ?? "full";
+
       // Auto-resolve TPID to customer name
       let resolvedCustomer = customer;
       if (looksLikeTpid(customer)) {
         const found = resolveCustomerByTpid(graph, config, customer);
         if (!found) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: `No customer found for TPID "${customer}". Check the TPID or use the customer name directly.` }),
-              },
-            ],
-          };
+          return errorResponse(
+            "NOT_FOUND",
+            `No customer found for TPID "${customer}". Check the TPID or use the customer name directly.`,
+            { customer },
+            {
+              retryable: true,
+              suggested_tools: ["query_frontmatter", "get_customer_context"],
+              next_step:
+                "Retry get_customer_context with the customer name, or call query_frontmatter with key 'tpid' and a shorter value_fragment to inspect known TPIDs.",
+            },
+          );
         }
         resolvedCustomer = found;
       }
@@ -93,7 +105,17 @@ export function registerDomainTools(
       if (custErr) return validationError(`get_customer_context: ${custErr}`);
 
       const lookback = lookback_days ?? 90;
-      const customerFile = await resolveCustomerPath(vaultPath, config, resolvedCustomer);
+      let customerFile: string;
+      let customerStats: Awaited<ReturnType<typeof stat>>;
+
+      try {
+        customerFile = await resolveCustomerPath(vaultPath, config, resolvedCustomer);
+        customerStats = await stat(securePath(vaultPath, customerFile));
+      } catch {
+        return errorResponse("NOT_FOUND", `Customer file not found for ${resolvedCustomer}`, {
+          customer: resolvedCustomer,
+        });
+      }
 
       // Read customer note (with cache)
       let parsed = cache.getNote(customerFile);
@@ -102,14 +124,11 @@ export function registerDomainTools(
           parsed = await readNote(vaultPath, customerFile);
           cache.putNote(customerFile, parsed);
         } catch {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ error: `Customer file not found: ${customerFile}` }),
-              },
-            ],
-          };
+          return errorResponse("NOT_FOUND", `Customer file not found: ${customerFile}`, {
+            customer: resolvedCustomer,
+            customer_path: customerFile,
+            customer_ref: noteRef(customerFile),
+          });
         }
       }
 
@@ -122,12 +141,12 @@ export function registerDomainTools(
       const connectSection = parsed.sections.get("Connect Hooks") ?? "";
 
       // Read entities — prefers sub-notes, falls back to section parsing
-      const opportunities = await readOpportunityNotes(vaultPath, config, customer);
-      const milestones = await readMilestoneNotes(vaultPath, config, customer);
+      const opportunities = await readOpportunityNotes(vaultPath, config, resolvedCustomer);
+      const milestones = await readMilestoneNotes(vaultPath, config, resolvedCustomer);
       const team = parseTeam(teamSection);
 
       // Agent Insights — partitioned sub-notes first, fallback to monolithic section
-      const insightsResult = await readInsightsPartitioned(vaultPath, config, customer);
+      const insightsResult = await readInsightsPartitioned(vaultPath, config, resolvedCustomer);
       let agentInsights: string[];
       if (insightsResult.partitioned) {
         agentInsights = insightsResult.entries;
@@ -140,16 +159,16 @@ export function registerDomainTools(
       }
 
       // Linked people: find People notes that reference this customer (graph-indexed)
-      const linkedPeople = findLinkedPeople(graph, config, customer);
+      const linkedPeople = findLinkedPeople(graph, config, resolvedCustomer);
 
       // Recent meetings — prefer frontmatter index (O(1)), fall back to graph scan
       const fmMeetings = readMeetingsFromFrontmatter(parsed.frontmatter, lookback);
-      const recentMeetings = fmMeetings ?? findRecentMeetings(graph, config, customer, lookback);
+      const recentMeetings = fmMeetings ?? findRecentMeetings(graph, config, resolvedCustomer, lookback);
 
       // Open action items (default: included)
       let openItems: ActionItem[] = [];
       if (include_open_items !== false) {
-        openItems = await findOpenItems(vaultPath, graph, config, customer, cache);
+        openItems = await findOpenItems(vaultPath, graph, config, resolvedCustomer, cache);
         if (assignee) {
           openItems = openItems.filter(
             (i) => i.assignee && i.assignee.toLowerCase() === assignee.toLowerCase(),
@@ -182,9 +201,54 @@ export function registerDomainTools(
         similarCustomers,
       };
 
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      const envelope = {
+        customer: resolvedCustomer,
+        customer_path: customerFile,
+        customer_ref: noteRef(customerFile),
+        customer_mtime_ms: customerStats.mtimeMs,
+        customer_version: customerStats.mtimeMs,
+        view: requestedView,
       };
+
+      if (requestedView === "brief") {
+        return jsonResponse({
+          ...envelope,
+          frontmatter: result.frontmatter,
+          opportunities: result.opportunities,
+          milestones: result.milestones,
+          team: result.team,
+          linkedPeople: result.linkedPeople,
+          recentMeetings: result.recentMeetings,
+          openItems: result.openItems,
+          summary: {
+            agent_insight_count: result.agentInsights.length,
+            connect_hooks_present: Boolean(result.connectHooks),
+            similar_customer_count: result.similarCustomers.length,
+          },
+        });
+      }
+
+      if (requestedView === "write") {
+        return jsonResponse({
+          ...envelope,
+          ...result,
+          write_targets: {
+            customer_note: customerFile,
+            customer_ref: noteRef(customerFile),
+            meetings_root: config.schema.meetingsRoot,
+            headings: {
+              agent_insights: "Agent Insights",
+              connect_hooks: "Connect Hooks",
+              team: "Team",
+            },
+          },
+        });
+      }
+
+      return jsonResponse({
+        ...envelope,
+        ...result,
+      });
     },
   );
 
@@ -210,30 +274,35 @@ export function registerDomainTools(
       const prefetchData = await extractPrefetchIds(vaultPath, graph, config, cache, customers);
 
       // Shape for copilot: include OData filter hints
-      const shaped = prefetchData.map((p) => ({
-        ...p,
-        odata_hints: {
-          opportunity_filter: p.opportunityGuids.length
-            ? p.opportunityGuids
-                .map((g: string) => `_msp_opportunityid_value eq '${g}'`)
-                .join(" or ")
-            : null,
-          account_filter: p.tpid ? `_msp_accountid_value eq '${p.tpid}'` : null,
-        },
-      }));
+      const shaped = await Promise.all(
+        prefetchData.map(async (p) => {
+          let customerPath: string | null = null;
+          try {
+            customerPath = await resolveCustomerPath(vaultPath, config, p.customer);
+          } catch {
+            customerPath = null;
+          }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              { prefetch: shaped, _note: "Use odata_hints directly in crm_query $filter expressions." },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
+          return {
+            ...p,
+            customer_path: customerPath,
+            customer_ref: customerPath ? noteRef(customerPath) : null,
+            odata_hints: {
+              opportunity_filter: p.opportunityGuids.length
+                ? p.opportunityGuids
+                    .map((g: string) => `_msp_opportunityid_value eq '${g}'`)
+                    .join(" or ")
+                : null,
+              account_filter: p.tpid ? `_msp_accountid_value eq '${p.tpid}'` : null,
+            },
+          };
+        }),
+      );
+
+      return jsonResponse({
+        prefetch: shaped,
+        _note: "Use odata_hints directly in crm_query $filter expressions.",
+      });
     },
   );
 
@@ -289,25 +358,15 @@ export function registerDomainTools(
         );
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              {
-                report,
-                issues,
-                summary:
-                  issues.length > 0
-                    ? `${issues.length} issue(s) found across ${report.totalCustomers} customers`
-                    : `All ${report.totalCustomers} customers healthy`,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
+      return jsonResponse({
+        report,
+        issues,
+        orphaned_meeting_refs: report.orphanedMeetings.map((path) => noteRef(path)),
+        summary:
+          issues.length > 0
+            ? `${issues.length} issue(s) found across ${report.totalCustomers} customers`
+            : `All ${report.totalCustomers} customers healthy`,
+      });
     },
   );
 }

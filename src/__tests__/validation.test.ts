@@ -97,6 +97,9 @@ describe("validationError", () => {
     const result = validationError("test error");
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe("text");
-    expect(JSON.parse(result.content[0].text)).toEqual({ error: "test error" });
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      error: "test error",
+      error_code: "INVALID_INPUT",
+    });
   });
 });

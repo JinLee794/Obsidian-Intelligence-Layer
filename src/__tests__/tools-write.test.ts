@@ -11,25 +11,7 @@ import type { OilConfig } from "../types.js";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-// ─── Mock McpServer ───────────────────────────────────────────────────────────
-
-type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
-
-class MockMcpServer {
-  tools = new Map<string, { config: unknown; handler: ToolHandler }>();
-
-  registerTool(name: string, config: unknown, handler: ToolHandler): void {
-    this.tools.set(name, { config, handler });
-  }
-
-  async callToolJson(name: string, args: Record<string, unknown>) {
-    const tool = this.tools.get(name);
-    if (!tool) throw new Error(`Tool not registered: ${name}`);
-    const result = await tool.handler(args);
-    return JSON.parse(result.content[0].text);
-  }
-}
+import { MockMcpServer } from "./harness.js";
 
 let tempDir: string;
 let vaultRoot: string;
@@ -88,6 +70,8 @@ describe("write v2 — atomic_append", () => {
     });
 
     expect(result.status).toBe("executed");
+    expect(result.ref).toBe("Customers/Contoso/Contoso.md#Agent Insights");
+    expect(result.version).toBe(result.mtime_ms);
 
     const content = await readFile(join(vaultRoot, "Customers/Contoso/Contoso.md"), "utf-8");
     expect(content).toContain("New validated insight");
@@ -110,6 +94,74 @@ describe("write v2 — atomic_append", () => {
     });
 
     expect(result.error).toContain("Stale write rejected");
+    expect(result.error_code).toBe("CONFLICT");
+    expect(result.agent_guidance.suggested_tools).toContain("get_note_metadata");
+  });
+
+  it("serializes concurrent appends on the same path", async () => {
+    await writeFile(
+      join(vaultRoot, "Customers/Contoso/Contoso.md"),
+      `---
+tags: [customer]
+---
+
+# Contoso
+
+## Agent Insights
+
+- Initial insight
+
+## Team
+
+- Alice
+`,
+      "utf-8",
+    );
+    const stats = await readCurrentMtime(vaultRoot, config);
+
+    const [first, second] = await Promise.all([
+      server.callToolJson("atomic_append", {
+        path: "Customers/Contoso/Contoso.md",
+        heading: "Agent Insights",
+        content: "- Concurrent A",
+        expected_mtime: stats,
+      }),
+      server.callToolJson("atomic_append", {
+        path: "Customers/Contoso/Contoso.md",
+        heading: "Agent Insights",
+        content: "- Concurrent B",
+        expected_mtime: stats,
+      }),
+    ]);
+
+    const results = [first, second];
+    expect(results.filter((result) => result.status === "executed")).toHaveLength(1);
+    expect(results.filter((result) => result.error_code === "CONFLICT")).toHaveLength(1);
+
+    const content = await readFile(join(vaultRoot, "Customers/Contoso/Contoso.md"), "utf-8");
+    const appendedCount = Number(content.includes("Concurrent A")) + Number(content.includes("Concurrent B"));
+    expect(appendedCount).toBe(1);
+  });
+
+  it("serializes concurrent create_note calls on the same path", async () => {
+    const [first, second] = await Promise.all([
+      server.callToolJson("create_note", {
+        path: "Daily/2026-03-21.md",
+        content: "# 2026-03-21\n\n- First create\n",
+      }),
+      server.callToolJson("create_note", {
+        path: "Daily/2026-03-21.md",
+        content: "# 2026-03-21\n\n- Second create\n",
+      }),
+    ]);
+
+    const results = [first, second];
+    expect(results.filter((result) => result.status === "created")).toHaveLength(1);
+    expect(results.filter((result) => result.error_code === "CONFLICT")).toHaveLength(1);
+
+    const content = await readFile(join(vaultRoot, "Daily/2026-03-21.md"), "utf-8");
+    const createdCount = Number(content.includes("First create")) + Number(content.includes("Second create"));
+    expect(createdCount).toBe(1);
   });
 });
 
@@ -134,6 +186,8 @@ describe("write v2 — atomic_replace", () => {
     });
 
     expect(result.status).toBe("executed");
+    expect(result.ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.version).toBe(result.mtime_ms);
 
     const content = await readFile(join(vaultRoot, "Customers/Contoso/Contoso.md"), "utf-8");
     expect(content).toContain("# Replaced");
@@ -155,6 +209,8 @@ describe("write v2 — atomic_replace", () => {
     });
 
     expect(result.error).toContain("Stale write rejected");
+    expect(result.error_code).toBe("CONFLICT");
+    expect(result.agent_guidance.suggested_tools).toContain("get_note_metadata");
   });
 });
 
@@ -201,7 +257,9 @@ describe("write v2 — create_note", () => {
 
     expect(result.status).toBe("created");
     expect(result.path).toBe("Daily/2026-03-19.md");
+    expect(result.ref).toBe("Daily/2026-03-19.md");
     expect(result.mtime_ms).toBeGreaterThan(0);
+    expect(result.version).toBe(result.mtime_ms);
 
     const content = await readFile(join(vaultRoot, "Daily/2026-03-19.md"), "utf-8");
     expect(content).toContain("# 2026-03-19");
@@ -215,6 +273,8 @@ describe("write v2 — create_note", () => {
     });
 
     expect(result.error).toContain("already exists");
+    expect(result.error_code).toBe("CONFLICT");
+    expect(result.agent_guidance.suggested_tools).toContain("atomic_replace");
   });
 
   it("rejects path traversal attempts", async () => {
@@ -224,6 +284,25 @@ describe("write v2 — create_note", () => {
     });
 
     expect(result.error).toBeDefined();
+    expect(result.error_code).toBe("INVALID_INPUT");
+    expect(result.agent_guidance.next_step).toContain("vault-relative path");
+  });
+
+  it("writes a retrievable audit entry for create_note", async () => {
+    const result = await server.callToolJson("create_note", {
+      path: "Daily/2026-03-20.md",
+      content: "# 2026-03-20\n",
+    });
+
+    expect(result.status).toBe("created");
+
+    const date = new Date().toISOString().slice(0, 10);
+    const log = await server.callToolJson("get_agent_log", { date });
+
+    expect(log.path).toBe(`_agent-log/${date}.md`);
+    expect(log.ref).toBe(`_agent-log/${date}.md`);
+    expect(log.log).toContain("create_note");
+    expect(log.log).toContain("Daily/2026-03-20.md");
   });
 });
 

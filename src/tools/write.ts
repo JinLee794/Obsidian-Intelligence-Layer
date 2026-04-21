@@ -10,6 +10,12 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig } from "../types.js";
+import {
+  errorCodeFromUnknown,
+  errorResponse,
+  jsonResponse,
+  noteRef,
+} from "../tool-responses.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { securePath, noteExists } from "../vault.js";
 import { appendToSection, executeWrite, logWrite } from "../gate.js";
@@ -42,70 +48,83 @@ export function registerWriteTools(
     },
     async ({ path, heading, content, expected_mtime }) => {
       const pathErr = validateVaultPath(path);
-      if (pathErr) return validationError(`atomic_append: ${pathErr}`);
+      if (pathErr) {
+        return validationError(
+          `atomic_append: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Customers/Contoso.md without ../ segments or absolute prefixes, then retry atomic_append.",
+          },
+        );
+      }
       if (!Number.isFinite(expected_mtime)) {
-        return validationError("atomic_append: expected_mtime must be a finite number");
+        return validationError(
+          "atomic_append: expected_mtime must be a finite number",
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            suggested_tools: ["get_note_metadata"],
+            next_step:
+              "Call get_note_metadata on the target note and retry atomic_append with its mtime_ms as expected_mtime.",
+          },
+        );
       }
 
       try {
-        const before = await getMtime(vaultPath, path);
-        if (!mtimeMatches(before, expected_mtime)) {
-          return {
-            content: [
+        return await withWriteLock(path, async () => {
+          const before = await getMtime(vaultPath, path);
+          if (!mtimeMatches(before, expected_mtime)) {
+            return errorResponse(
+              "CONFLICT",
+              "Stale write rejected: expected_mtime does not match current file state",
               {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: "Stale write rejected: expected_mtime does not match current file state",
-                  expected_mtime,
-                  current_mtime: before,
-                }),
+                path,
+                ref: noteRef(path, heading),
+                expected_mtime,
+                current_mtime: before,
               },
-            ],
-          };
-        }
+              {
+                retryable: true,
+                suggested_tools: ["get_note_metadata"],
+                next_step:
+                  "Call get_note_metadata on the same path to fetch the latest mtime_ms, then retry atomic_append with that fresh value.",
+              },
+            );
+          }
 
-        await appendToSection(vaultPath, path, heading, content, "append");
-        cache.invalidateNote(path);
+          await appendToSection(vaultPath, path, heading, content, "append");
+          cache.invalidateNote(path);
 
-        const after = await getMtime(vaultPath, path);
+          const after = await getMtime(vaultPath, path);
 
-        // Audit log (fire-and-forget)
-        logWrite(vaultPath, config, {
-          tier: "auto",
-          operation: "atomic_append",
-          path,
-          detail: `append to §${heading} (mtime ${before} → ${after})`,
-        }).catch(() => {});
+          // Audit log (fire-and-forget)
+          try {
+            await logWrite(vaultPath, config, {
+              tier: "auto",
+              operation: "atomic_append",
+              path,
+              detail: `append to §${heading} (mtime ${before} → ${after})`,
+            });
+          } catch {}
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  status: "executed",
-                  path,
-                  heading,
-                  previous_mtime: before,
-                  mtime_ms: after,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
+          return jsonResponse({
+            status: "executed",
+            path,
+            ref: noteRef(path, heading),
+            heading,
+            previous_mtime: before,
+            mtime_ms: after,
+            version: after,
+          });
+        });
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: `Failed to append: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-            },
-          ],
-        };
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Failed to append: ${err instanceof Error ? err.message : String(err)}`,
+          { path, ref: noteRef(path, heading) },
+        );
       }
     },
   );
@@ -127,69 +146,82 @@ export function registerWriteTools(
     },
     async ({ path, content, expected_mtime }) => {
       const pathErr = validateVaultPath(path);
-      if (pathErr) return validationError(`atomic_replace: ${pathErr}`);
+      if (pathErr) {
+        return validationError(
+          `atomic_replace: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Customers/Contoso.md without ../ segments or absolute prefixes, then retry atomic_replace.",
+          },
+        );
+      }
       if (!Number.isFinite(expected_mtime)) {
-        return validationError("atomic_replace: expected_mtime must be a finite number");
+        return validationError(
+          "atomic_replace: expected_mtime must be a finite number",
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            suggested_tools: ["get_note_metadata"],
+            next_step:
+              "Call get_note_metadata on the target note and retry atomic_replace with its mtime_ms as expected_mtime.",
+          },
+        );
       }
 
       try {
-        const before = await getMtime(vaultPath, path);
-        if (!mtimeMatches(before, expected_mtime)) {
-          return {
-            content: [
+        return await withWriteLock(path, async () => {
+          const before = await getMtime(vaultPath, path);
+          if (!mtimeMatches(before, expected_mtime)) {
+            return errorResponse(
+              "CONFLICT",
+              "Stale write rejected: expected_mtime does not match current file state",
               {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: "Stale write rejected: expected_mtime does not match current file state",
-                  expected_mtime,
-                  current_mtime: before,
-                }),
+                path,
+                ref: noteRef(path),
+                expected_mtime,
+                current_mtime: before,
               },
-            ],
-          };
-        }
+              {
+                retryable: true,
+                suggested_tools: ["get_note_metadata"],
+                next_step:
+                  "Call get_note_metadata on the same path to fetch the latest mtime_ms, then retry atomic_replace with that fresh value.",
+              },
+            );
+          }
 
-        await executeWrite(vaultPath, path, content, "overwrite");
-        cache.invalidateNote(path);
+          await executeWrite(vaultPath, path, content, "overwrite");
+          cache.invalidateNote(path);
 
-        const after = await getMtime(vaultPath, path);
+          const after = await getMtime(vaultPath, path);
 
-        // Audit log (fire-and-forget)
-        logWrite(vaultPath, config, {
-          tier: "auto",
-          operation: "atomic_replace",
-          path,
-          detail: `full replace (mtime ${before} → ${after})`,
-        }).catch(() => {});
+          // Audit log (fire-and-forget)
+          try {
+            await logWrite(vaultPath, config, {
+              tier: "auto",
+              operation: "atomic_replace",
+              path,
+              detail: `full replace (mtime ${before} → ${after})`,
+            });
+          } catch {}
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  status: "executed",
-                  path,
-                  previous_mtime: before,
-                  mtime_ms: after,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
+          return jsonResponse({
+            status: "executed",
+            path,
+            ref: noteRef(path),
+            previous_mtime: before,
+            mtime_ms: after,
+            version: after,
+          });
+        });
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: `Failed to replace: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-            },
-          ],
-        };
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Failed to replace: ${err instanceof Error ? err.message : String(err)}`,
+          { path, ref: noteRef(path) },
+        );
       }
     },
   );
@@ -208,58 +240,65 @@ export function registerWriteTools(
     },
     async ({ path, content }) => {
       const pathErr = validateVaultPath(path);
-      if (pathErr) return validationError(`create_note: ${pathErr}`);
+      if (pathErr) {
+        return validationError(
+          `create_note: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Daily/2026-03-19.md without ../ segments or absolute prefixes, then retry create_note.",
+          },
+        );
+      }
 
       try {
-        const exists = await noteExists(vaultPath, path);
-        if (exists) {
-          return {
-            content: [
+        return await withWriteLock(path, async () => {
+          const exists = await noteExists(vaultPath, path);
+          if (exists) {
+            return errorResponse(
+              "CONFLICT",
+              "Note already exists — use atomic_replace to update it",
+              { path, ref: noteRef(path) },
               {
-                type: "text" as const,
-                text: JSON.stringify({
-                  error: "Note already exists — use atomic_replace to update it",
-                  path,
-                }),
+                retryable: false,
+                suggested_tools: ["get_note_metadata", "atomic_replace"],
+                next_step:
+                  "If you intended to update this note, call get_note_metadata for the current mtime_ms and then use atomic_replace instead of create_note.",
               },
-            ],
-          };
-        }
+            );
+          }
 
-        await executeWrite(vaultPath, path, content, "create");
-        cache.invalidateNote(path);
+          await executeWrite(vaultPath, path, content, "create");
+          cache.invalidateNote(path);
 
-        // Wait for mtime to stabilize — Obsidian may touch new files
-        // within ~1-2s (indexing, metadata injection). Returning before
-        // it settles would give the agent a stale mtime.
-        const after = await getStableMtime(vaultPath, path);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify(
-                {
-                  status: "created",
-                  path,
-                  mtime_ms: after,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
+          try {
+            await logWrite(vaultPath, config, {
+              tier: "auto",
+              operation: "create_note",
+              path,
+              detail: "created new note",
+            });
+          } catch {}
+
+          // Wait for mtime to stabilize — Obsidian may touch new files
+          // within ~1-2s (indexing, metadata injection). Returning before
+          // it settles would give the agent a stale mtime.
+          const after = await getStableMtime(vaultPath, path);
+          return jsonResponse({
+            status: "created",
+            path,
+            ref: noteRef(path),
+            mtime_ms: after,
+            version: after,
+          });
+        });
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: `Failed to create: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-            },
-          ],
-        };
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Failed to create: ${err instanceof Error ? err.message : String(err)}`,
+          { path, ref: noteRef(path) },
+        );
       }
     },
   );
@@ -288,23 +327,20 @@ export function registerWriteTools(
       try {
         const fullPath = securePath(vaultPath, logPath);
         const content = await readFile(fullPath, "utf-8");
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ date: dateStr, path: logPath, log: content }, null, 2),
-            },
-          ],
-        };
+        return jsonResponse({
+          date: dateStr,
+          path: logPath,
+          ref: noteRef(logPath),
+          log: content,
+        });
       } catch {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ date: dateStr, path: logPath, log: null, message: "No log entries for this date." }),
-            },
-          ],
-        };
+        return jsonResponse({
+          date: dateStr,
+          path: logPath,
+          ref: noteRef(logPath),
+          log: null,
+          message: "No log entries for this date.",
+        });
       }
     },
   );
@@ -351,4 +387,29 @@ async function getStableMtime(
 function mtimeMatches(current: number, expected: number): boolean {
   // File systems can vary by sub-millisecond precision.
   return Math.abs(current - expected) <= 1;
+}
+
+const writeLocks = new Map<string, Promise<void>>();
+
+async function withWriteLock<T>(path: string, work: () => Promise<T>): Promise<T> {
+  const key = path.replace(/\\/g, "/");
+  const prior = writeLocks.get(key) ?? Promise.resolve();
+
+  let release: (() => void) | undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = prior.then(() => current);
+
+  writeLocks.set(key, queued);
+  await prior;
+
+  try {
+    return await work();
+  } finally {
+    release?.();
+    if (writeLocks.get(key) === queued) {
+      writeLocks.delete(key);
+    }
+  }
 }

@@ -143,4 +143,18 @@ export class SessionCache {
     this.recentlyAccessed.length = 0;
     // Pending writes are NOT cleared — they persist until confirmed/rejected.
   }
+
+  getStats(): {
+    cachedNotes: number;
+    cachedTraversals: number;
+    recentlyAccessed: number;
+    pendingWrites: number;
+  } {
+    return {
+      cachedNotes: this.noteCache.size,
+      cachedTraversals: this.traversalCache.size,
+      recentlyAccessed: this.recentlyAccessed.length,
+      pendingWrites: this.pendingWrites.length,
+    };
+  }
 }

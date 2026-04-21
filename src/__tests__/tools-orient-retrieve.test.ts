@@ -11,25 +11,7 @@ import type { OilConfig } from "../types.js";
 import { mkdtemp, rm, mkdir, writeFile, readFile, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-// ─── Mock McpServer ───────────────────────────────────────────────────────────
-
-type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
-
-class MockMcpServer {
-  tools = new Map<string, { config: unknown; handler: ToolHandler }>();
-
-  registerTool(name: string, config: unknown, handler: ToolHandler): void {
-    this.tools.set(name, { config, handler });
-  }
-
-  async callToolJson(name: string, args: Record<string, unknown>) {
-    const tool = this.tools.get(name);
-    if (!tool) throw new Error(`Tool not registered: ${name}`);
-    const result = await tool.handler(args);
-    return JSON.parse(result.content[0].text);
-  }
-}
+import { MockMcpServer } from "./harness.js";
 
 // ─── Test Setup ───────────────────────────────────────────────────────────────
 
@@ -106,6 +88,8 @@ describe("retrieve v2 — get_note_metadata", () => {
     expect(typeof result.word_count).toBe("number");
     expect(result.headings).toContain("CRM Updates");
     expect(typeof result.mtime_ms).toBe("number");
+    expect(result.ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.version).toBe(result.mtime_ms);
   });
 
   it("resolves TPID to customer name automatically", async () => {
@@ -125,8 +109,52 @@ describe("retrieve v2 — get_note_metadata", () => {
     });
 
     expect(result.error).toBeTruthy();
+    expect(result.error_code).toBe("NOT_FOUND");
     expect(result.error).toContain("TPID");
     expect(result.error).toContain("99999999");
+  });
+
+  it("supports a write-oriented customer context view", async () => {
+    const result = await server.callToolJson("get_customer_context", {
+      customer: "Contoso",
+      view: "write",
+    });
+
+    expect(result.view).toBe("write");
+    expect(result.customer_ref).toBe("Customers/Contoso/Contoso.md");
+    expect(typeof result.customer_mtime_ms).toBe("number");
+    expect(result.write_targets.customer_note).toBe("Customers/Contoso/Contoso.md");
+    expect(result.write_targets.headings.agent_insights).toBe("Agent Insights");
+  });
+
+  it("supports a brief customer context view", async () => {
+    const result = await server.callToolJson("get_customer_context", {
+      customer: "Contoso",
+      view: "brief",
+    });
+
+    expect(result.view).toBe("brief");
+    expect(result.customer_ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.frontmatter).toBeDefined();
+    expect(result.summary).toBeDefined();
+    expect(typeof result.summary.agent_insight_count).toBe("number");
+    // Brief view should not include full agentInsights array
+    expect(result.agentInsights).toBeUndefined();
+  });
+
+  it("full view includes envelope metadata", async () => {
+    const result = await server.callToolJson("get_customer_context", {
+      customer: "Contoso",
+    });
+
+    expect(result.view).toBe("full");
+    expect(result.customer).toBe("Contoso");
+    expect(result.customer_ref).toBe("Customers/Contoso/Contoso.md");
+    expect(typeof result.customer_mtime_ms).toBe("number");
+    expect(result.customer_version).toBe(result.customer_mtime_ms);
+    // Full view includes the inline data
+    expect(result.frontmatter).toBeDefined();
+    expect(Array.isArray(result.opportunities)).toBe(true);
   });
 });
 
@@ -150,6 +178,8 @@ describe("retrieve v2 — read_note_section", () => {
     expect(result.heading).toBe("CRM Updates");
     expect(result.content).toContain("migration SOW");
     expect(result.content).not.toContain("Alice Smith");
+    expect(result.ref).toBe("Customers/Contoso/Contoso.md#CRM Updates");
+    expect(typeof result.mtime_ms).toBe("number");
   });
 
   it("returns available headings when section is missing", async () => {
@@ -159,6 +189,7 @@ describe("retrieve v2 — read_note_section", () => {
     });
 
     expect(result.error).toContain("not found");
+    expect(result.error_code).toBe("NOT_FOUND");
     expect(result.available_headings).toContain("CRM Updates");
   });
 });
@@ -183,6 +214,7 @@ describe("retrieve v2 — get_related_entities", () => {
     expect(Array.isArray(result.related)).toBe(true);
     expect(result.related.length).toBeGreaterThan(0);
     expect(result.related[0].content).toBeUndefined();
+    expect(result.related[0].ref).toBe(result.related[0].path);
   });
 });
 
@@ -206,6 +238,16 @@ describe("retrieve v2 — semantic_search", () => {
     expect(result.count).toBeGreaterThan(0);
     expect(result.results[0].snippet).toBeTruthy();
     expect(result.results[0].snippet.length).toBeLessThanOrEqual(230);
+    expect(result.results[0].ref).toBe(result.results[0].path);
+  });
+
+  it("rejects empty query with INVALID_INPUT", async () => {
+    const result = await server.callToolJson("semantic_search", {
+      query: "  ",
+    });
+
+    expect(result.error).toBeDefined();
+    expect(result.error_code).toBe("INVALID_INPUT");
   });
 });
 
@@ -227,6 +269,17 @@ describe("retrieve v2 — query_frontmatter", () => {
     });
 
     expect(result.paths).toContain("Customers/Contoso/Contoso.md");
+    expect(result.matches[0].ref).toBe("Customers/Contoso/Contoso.md");
+  });
+
+  it("returns ref on search_vault results", async () => {
+    const result = await server.callToolJson("search_vault", {
+      query: "Contoso",
+      limit: 3,
+    });
+
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0].ref).toBe(result[0].path);
   });
 
   it("reflects index on new tool registration", async () => {

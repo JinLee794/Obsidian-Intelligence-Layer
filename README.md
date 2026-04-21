@@ -108,13 +108,21 @@ The server communicates over **stdio**. You don't hit it with curl — an MCP cl
 
 > **Note:** Use absolute paths in `args` since there's no workspace-relative root. The top-level key is `mcpServers` (not `servers` like the workspace config).
 
-Once configured, the agent can call any of OIL's 13 tools by name.
+Once configured, the agent can call any of OIL's 14 live tools by name.
 
 ---
 
 ## Tools Reference
 
-OIL exposes **13 tools** across four categories.
+OIL exposes **14 live tools** across five categories.
+
+### Core Visibility (1 tool) — Tiny runtime summary
+
+Use this first when a client needs fast runtime state without paying the cost of a detailed audit read.
+
+| Tool | What It Does |
+|---|---|
+| `get_health` | Returns server identity, live tool-surface counts, index freshness, cache stats, watcher state, and whether audit logs are available. This is the summary visibility tool; use `get_agent_log` only when you need detailed write history. |
 
 ### Search & Inspect (6 tools) — Token-efficient reads
 
@@ -157,7 +165,7 @@ High-level tools that encode business logic the LLM would otherwise need to reco
 
 | Tool | What It Does |
 |---|---|
-| `get_customer_context` | Assembles a full customer snapshot: frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, and open action items. Accepts a customer name or TPID. |
+| `get_customer_context` | Assembles a full customer snapshot: frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, and open action items. Accepts a customer name or TPID, plus `view=brief|full|write` for compact reads or deterministic write scaffolding. |
 | `prepare_crm_prefetch` | Extracts vault-stored CRM identifiers (opportunity GUIDs, TPIDs, account IDs) for one or more customers. Returns structured data with OData filter hints ready for CRM query construction. |
 | `check_vault_health` | Scans the vault for stale Agent Insights (>30 days), opportunities or milestones missing IDs, notes without a `## Team` section, and orphaned meeting notes. Returns a prioritized issue list. |
 
@@ -169,7 +177,7 @@ High-level tools that encode business logic the LLM would otherwise need to reco
 
 | Tool | What It Does |
 |---|---|
-| `get_agent_log` | Read the agent write audit log for a given date (default: today). Every `atomic_append` and `atomic_replace` call is logged here with timestamp, path, and operation detail. |
+| `get_agent_log` | Read the agent write audit log for a given date (default: today). Every `atomic_append`, `atomic_replace`, and `create_note` call is logged here with timestamp, path, and operation detail. |
 
 ### Write Safety Pattern
 
@@ -259,7 +267,10 @@ src/
 ├── search.ts         # Fuzzy search (fuse.js) + in-memory content search
 ├── hygiene.ts        # Vault freshness scanning, staleness detection, health scoring
 ├── correlate.ts      # Entity matching — cross-references external IDs with vault notes
+├── tool-responses.ts # Shared MCP JSON response helpers — structured errors, refs, version hints
+├── version.ts        # Server identity — name/version shared by runtime and tools
 └── tools/
+  ├── core.ts       # 1 tool — get_health
     ├── retrieve.ts   # 6 tools — search, semantic search, query, metadata, section reads, related
     ├── write.ts      # 4 tools — atomic_append, atomic_replace, create_note, get_agent_log
     ├── domain.ts     # 3 tools — get_customer_context, prepare_crm_prefetch, check_vault_health
@@ -456,7 +467,7 @@ All defaults are used. Customers in `Customers/`, people in `People/`, meetings 
 
 ### How do I see what the agent wrote to my vault?
 
-Use `get_agent_log` — it returns the write audit log for today (or any specified date in `YYYY-MM-DD` format). Every `atomic_append` and `atomic_replace` call is logged with timestamp, path, and operation detail.
+Use `get_health` first if you only need a quick status check. Use `get_agent_log` when you need the detailed write audit for today (or any specified date in `YYYY-MM-DD` format). Every `atomic_append`, `atomic_replace`, and `create_note` call is logged with timestamp, path, and operation detail.
 
 ### Can I undo agent writes?
 

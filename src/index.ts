@@ -10,12 +10,11 @@ import { loadConfig } from "./config.js";
 import { GraphIndex } from "./graph.js";
 import { SessionCache } from "./cache.js";
 import { VaultWatcher } from "./watcher.js";
+import { registerCoreTools } from "./tools/core.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
 import { registerDomainTools } from "./tools/domain.js";
-
-const SERVER_NAME = "obsidian-intelligence-layer";
-const SERVER_VERSION = "0.3.1";
+import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 
 async function main(): Promise<void> {
   // ── Resolve vault path ─────────────────────────────────────────────────
@@ -83,6 +82,9 @@ async function main(): Promise<void> {
     name: SERVER_NAME,
     version: SERVER_VERSION,
   });
+
+  // Core visibility tool
+  registerCoreTools(server, vaultPath, graph, cache, watcher, config);
 
   // Optimized retrieve/search tools
   registerRetrieveTools(server, vaultPath, graph, cache, config);

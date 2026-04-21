@@ -11,25 +11,7 @@ import type { OilConfig } from "../types.js";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-// ─── Mock McpServer ───────────────────────────────────────────────────────────
-
-type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[] }>;
-
-class MockMcpServer {
-  tools = new Map<string, { config: unknown; handler: ToolHandler }>();
-
-  registerTool(name: string, config: unknown, handler: ToolHandler): void {
-    this.tools.set(name, { config, handler });
-  }
-
-  async callToolJson(name: string, args: Record<string, unknown>) {
-    const tool = this.tools.get(name);
-    if (!tool) throw new Error(`Tool not registered: ${name}`);
-    const result = await tool.handler(args);
-    return JSON.parse(result.content[0].text);
-  }
-}
+import { MockMcpServer } from "./harness.js";
 
 // ─── Test Setup ───────────────────────────────────────────────────────────────
 

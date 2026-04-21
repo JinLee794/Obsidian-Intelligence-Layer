@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] - 2026-04-21
+
+### Fixes
+
+- Adjust padding and dimensions in safe writes animation for improved layout
+
 ## [0.5.1] - 2026-04-13
 
 ### Docs

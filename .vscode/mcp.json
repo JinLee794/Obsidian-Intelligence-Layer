@@ -10,9 +10,7 @@
     "oil": {
         "command": "node",
         "args": ["dist/index.js"],
-        "env": {
-          "OBSIDIAN_VAULT_PATH": "${env:OBSIDIAN_VAULT_PATH}"
-        }
+        "envFile": "${workspaceFolder}/.env"
     }
   }
 }

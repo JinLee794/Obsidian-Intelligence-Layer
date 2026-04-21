@@ -70,6 +70,18 @@ export class VaultWatcher {
     this.pendingUpdates.clear();
   }
 
+  getStatus(): {
+    backend: "chokidar";
+    active: boolean;
+    pendingUpdates: number;
+  } {
+    return {
+      backend: "chokidar",
+      active: this.watcher !== null,
+      pendingUpdates: this.pendingUpdates.size,
+    };
+  }
+
   /**
    * Handle a file change event with debouncing.
    */
