@@ -220,7 +220,7 @@ ${pickN(PERSON_NAMES, Math.floor(rand() * 3) + 1).map((p) => `- [[${p}]]`).join(
 - [ ] Follow up on ${pick(TOPICS).toLowerCase()} — @${pick(PERSON_NAMES)}
 `;
 
-    const path = `Meetings/${dateStr}-${customer}-${topic.replace(/\s+/g, "-").slice(0, 20)}.md`;
+    const path = `Meetings/${dateStr}-${String(i).padStart(6, "0")}-${customer}-${topic.replace(/\s+/g, "-").slice(0, 20)}.md`;
     await writeFile(join(outputDir, path), content, "utf-8");
     generated++;
   }
@@ -252,7 +252,7 @@ ${topic} initiative targeting Q2 2026 completion.
 - [ ] Phase 3: Validation
 `;
 
-    await writeFile(join(outputDir, `Projects/${slug}.md`), content, "utf-8");
+    await writeFile(join(outputDir, `Projects/${String(i).padStart(6, "0")}-${slug}.md`), content, "utf-8");
     generated++;
   }
 
@@ -280,7 +280,7 @@ ${pickN(customerPaths, Math.min(3, customerPaths.length)).map((c) => `- [[${c.re
 - ${pick(["No major risks", "Escalation pending for Northwind", "Budget review needed"])}
 `;
 
-    await writeFile(join(outputDir, `Weekly/2026-W${weekNum}.md`), content, "utf-8");
+    await writeFile(join(outputDir, `Weekly/2026-W${weekNum}-${String(i).padStart(6, "0")}.md`), content, "utf-8");
     generated++;
   }
 
@@ -306,7 +306,7 @@ date: "${dateStr}"
 - ${pick(TOPICS)} discussion with ${pick(PERSON_NAMES)}.
 `;
 
-    await writeFile(join(outputDir, `Daily/${dateStr}.md`), content, "utf-8");
+    await writeFile(join(outputDir, `Daily/${dateStr}-${String(i).padStart(6, "0")}.md`), content, "utf-8");
     generated++;
   }
 

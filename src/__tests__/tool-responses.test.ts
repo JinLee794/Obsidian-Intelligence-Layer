@@ -4,6 +4,7 @@
 import { describe, it, expect } from "vitest";
 import {
   jsonResponse,
+  boundedJsonResponse,
   errorResponse,
   noteRef,
   enrichNoteRef,
@@ -23,6 +24,27 @@ describe("jsonResponse", () => {
   it("pretty-prints JSON with indentation", () => {
     const result = jsonResponse({ a: 1 });
     expect(result.content[0].text).toContain("\n");
+  });
+});
+
+describe("boundedJsonResponse", () => {
+  it("leaves an in-budget payload unchanged", () => {
+    const parsed = JSON.parse(boundedJsonResponse({ items: ["a", "b"] }, 1_000).content[0].text);
+    expect(parsed).toEqual({ items: ["a", "b"] });
+  });
+
+  it("truncates oversized nested data and emits an explicit warning", () => {
+    const payload = {
+      items: Array.from({ length: 100 }, (_, index) => ({
+        index,
+        text: "x".repeat(1_000),
+      })),
+    };
+    const response = boundedJsonResponse(payload, 2_000);
+    const parsed = JSON.parse(response.content[0].text);
+    expect(response.content[0].text.length).toBeLessThanOrEqual(2_000);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.warnings).toContain("RESULTS_TRUNCATED");
   });
 });
 

@@ -1,234 +1,360 @@
-/**
- * OIL — Search Engine
- * Tier 1: Lexical (substring match). Tier 2: Fuzzy (fuse.js).
- * Default behaviour: lexical first, fuzzy fallback when lexical returns < limit.
- */
-
 import Fuse from "fuse.js";
 import type { GraphIndex } from "./graph.js";
-import type { SearchResult, OilConfig } from "./types.js";
-
-// ─── Search Index Entry ───────────────────────────────────────────────────────
+import type { GraphNode, OilConfig, SearchResult } from "./types.js";
+import { flattenFrontmatter, scalarSearchValues, searchableFrontmatterText } from "./catalog.js";
 
 interface SearchEntry {
   path: string;
   title: string;
+  aliases: string[];
   tags: string[];
+  description: string;
   headings: string[];
-  bodySnippet: string;
+  frontmatterText: string;
+  linkText: string;
+  normalized: {
+    path: string;
+    title: string;
+    aliases: string[];
+    tags: string[];
+    description: string;
+    headings: string[];
+    linkText: string;
+    frontmatter: Array<{ rawKey: string; key: string; values: Array<{ raw: string; lower: string }> }>;
+  };
 }
 
-// ─── Fuse Index Cache ─────────────────────────────────────────────────────────
+export interface SearchFilters {
+  folder?: string;
+  tags?: string[];
+  frontmatter?: Record<string, unknown>;
+  type?: string;
+}
 
-let fuseIndex: Fuse<SearchEntry> | null = null;
-let indexedNodeCount = 0;
+export interface SearchCandidateSet {
+  results: SearchResult[];
+  totalCandidates: number;
+  indicesConsulted: string[];
+  candidateGenerationCapped: boolean;
+}
 
-/**
- * Build or return the cached fuse.js search index.
- * Rebuilds when the graph node count changes.
- */
-function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
-  if (fuseIndex && graph.nodeCount === indexedNodeCount) {
-    return fuseIndex;
-  }
+let searchCaches = new WeakMap<GraphIndex, {
+  generation: string;
+  entries: SearchEntry[];
+  fuse: Fuse<SearchEntry>;
+}>();
 
-  const entries: SearchEntry[] = [];
-  // Iterate all notes via getNotesByFolder("") — matches all
-  const allRefs = graph.getNotesByFolder("");
-  for (const ref of allRefs) {
+function getOrBuildSearchCache(graph: GraphIndex) {
+  const cached = searchCaches.get(graph);
+  if (cached?.generation === graph.generation) return cached;
+
+  const entries: SearchEntry[] = graph.getNotesByFolder("").flatMap((ref) => {
     const node = graph.getNode(ref.path);
-    if (!node) continue;
-
-    entries.push({
+    if (!node) return [];
+    const frontmatter = flattenFrontmatter(node.path, node.frontmatter).map((entry) => ({
+      rawKey: entry.rawKey,
+      key: entry.rawKey.toLowerCase(),
+      values: scalarSearchValues(entry.value).map((value) => ({ raw: value, lower: value.toLowerCase() })),
+    }));
+    const linkText = node.links.flatMap((edge) => [edge.target, edge.label ?? ""]).join(" ");
+    return [{
       path: node.path,
       title: node.title,
+      aliases: node.aliases,
       tags: node.tags,
+      description: node.description,
       headings: node.headings,
-      bodySnippet: node.bodySnippet ?? "",
-    });
-  }
+      frontmatterText: searchableFrontmatterText(node.frontmatter),
+      linkText,
+      normalized: {
+        path: node.path.toLowerCase(),
+        title: node.title.toLowerCase(),
+        aliases: node.aliases.map((alias) => alias.toLowerCase()),
+        tags: node.tags.map((tag) => tag.toLowerCase()),
+        description: node.description.toLowerCase(),
+        headings: node.headings.map((heading) => heading.toLowerCase()),
+        linkText: linkText.toLowerCase(),
+        frontmatter,
+      },
+    }];
+  });
 
-  fuseIndex = new Fuse(entries, {
+  const fuse = new Fuse(entries, {
     keys: [
-      { name: "title", weight: 3 },
+      { name: "title", weight: 4 },
+      { name: "path", weight: 3.5 },
+      { name: "aliases", weight: 3.25 },
+      { name: "frontmatterText", weight: 2.5 },
       { name: "tags", weight: 2 },
-      { name: "headings", weight: 1 },
-      { name: "bodySnippet", weight: 0.5 },
+      { name: "description", weight: 1.5 },
+      { name: "headings", weight: 1.25 },
+      { name: "linkText", weight: 0.75 },
     ],
     threshold: 0.4,
     includeScore: true,
     ignoreLocation: true,
     useExtendedSearch: false,
   });
-  indexedNodeCount = graph.nodeCount;
-
-  return fuseIndex;
+  const next = { generation: graph.generation, entries, fuse };
+  searchCaches.set(graph, next);
+  return next;
 }
 
-/**
- * Invalidate the fuse index so it rebuilds on next search.
- */
 export function invalidateSearchIndex(): void {
-  fuseIndex = null;
-  indexedNodeCount = 0;
+  searchCaches = new WeakMap();
 }
 
-// ─── Search Functions ─────────────────────────────────────────────────────────
-
-/**
- * Tier 1 — Lexical search: substring match on titles and tags.
- */
 export function lexicalSearch(
   graph: GraphIndex,
   query: string,
   limit: number,
   filters?: SearchFilters,
 ): SearchResult[] {
-  const q = query.toLowerCase();
+  const q = query.trim().toLowerCase();
+  if (!q || limit <= 0) return [];
   const results: SearchResult[] = [];
 
-  const allRefs = graph.getNotesByFolder("");
-  for (const ref of allRefs) {
-    if (!passesFilters(ref.path, graph, filters)) continue;
-
-    const node = graph.getNode(ref.path);
-    const titleMatch = ref.title.toLowerCase().includes(q);
-    const tagMatch = ref.tags.some((t) => t.toLowerCase().includes(q));
-    const headingMatch = node?.headings.some((h) => h.toLowerCase().includes(q)) ?? false;
-    const bodyMatch = node?.bodySnippet?.toLowerCase().includes(q) ?? false;
-
-    if (titleMatch || tagMatch || headingMatch || bodyMatch) {
-      // Build a contextual excerpt for body matches
-      let excerpt = ref.tags.join(", ");
-      if (bodyMatch && !titleMatch && !tagMatch && !headingMatch && node?.bodySnippet) {
-        const idx = node.bodySnippet.toLowerCase().indexOf(q);
-        const start = Math.max(0, idx - 40);
-        const end = Math.min(node.bodySnippet.length, idx + q.length + 40);
-        excerpt = (start > 0 ? "…" : "") + node.bodySnippet.slice(start, end).trim() + (end < node.bodySnippet.length ? "…" : "");
-      }
-      results.push({
-        path: ref.path,
-        title: ref.title,
-        excerpt,
-        score: titleMatch ? 1.0 : headingMatch ? 0.85 : tagMatch ? 0.7 : 0.5,
-        matchType: "lexical",
-      });
-    }
+  for (const entry of getOrBuildSearchCache(graph).entries) {
+    const node = graph.getNode(entry.path);
+    if (!node || !passesFilters(node, graph, filters)) continue;
+    const match = lexicalFeatures(entry, node, q);
+    if (!match) continue;
+    results.push({
+      path: node.path,
+      title: node.title,
+      excerpt: match.excerpt,
+      score: match.score,
+      matchType: "lexical",
+      matchedOn: match.matchedOn,
+    });
   }
 
-  results.sort((a, b) => b.score - a.score);
-  return results.slice(0, limit);
+  return results
+    .sort(compareSearchResults)
+    .slice(0, Math.max(0, Math.floor(limit)));
 }
 
-/**
- * Tier 2 — Fuzzy search: fuse.js over titles, tags, headings.
- */
 export function fuzzySearch(
   graph: GraphIndex,
   query: string,
   limit: number,
   filters?: SearchFilters,
 ): SearchResult[] {
-  const fuse = getOrBuildIndex(graph);
-  const raw = fuse.search(query, { limit: limit * 2 });
-
+  if (!query.trim() || limit <= 0) return [];
+  const raw = getOrBuildSearchCache(graph).fuse.search(query, {
+    limit: Math.min(graph.nodeCount, Math.max(Math.floor(limit) * 3, Math.floor(limit))),
+  });
   const results: SearchResult[] = [];
-  // Normalize scores: fuse.js returns 0 = perfect match, threshold = worst.
-  // Map to [0.1, 1.0] range so results always have differentiable scores.
-  const maxFuseScore = raw.length > 0
-    ? Math.max(...raw.map((r) => r.score ?? 0), 0.01)
-    : 1;
 
   for (const match of raw) {
-    if (!passesFilters(match.item.path, graph, filters)) continue;
-
-    const fuseScore = match.score ?? 0;
-    // Invert and normalize: best match → 1.0, worst in result set → ~0.1
-    const normalizedScore = 1 - (fuseScore / maxFuseScore) * 0.9;
-
+    const node = graph.getNode(match.item.path);
+    if (!node || !passesFilters(node, graph, filters)) continue;
+    const fuseScore = match.score ?? 1;
     results.push({
-      path: match.item.path,
-      title: match.item.title,
-      excerpt: match.item.tags.join(", "),
-      score: normalizedScore,
+      path: node.path,
+      title: node.title,
+      excerpt: bestFuzzyExcerpt(node, query),
+      score: clampScore(1 - fuseScore),
       matchType: "fuzzy",
+      matchedOn: ["fuzzy"],
     });
-
     if (results.length >= limit) break;
   }
-
-  return results;
+  return results.sort(compareSearchResults);
 }
 
 /**
- * Unified search — cascades lexical → fuzzy by default.
- * When no explicit tier is given, tries lexical first (3ms).
- * Falls back to fuzzy (65-180ms) only when lexical returns fewer than `limit` results.
- * An explicit tier skips the cascade and runs only that tier.
+ * Generate candidates from all enabled indices and calibrate the union once.
+ * The result is deliberately unsliced so tool-level pagination can report totals.
  */
+export function searchVaultCandidates(
+  graph: GraphIndex,
+  query: string,
+  tier?: "lexical" | "fuzzy",
+  filters?: SearchFilters,
+  candidateCap = graph.nodeCount,
+): SearchCandidateSet {
+  const cap = Math.max(20, candidateCap);
+  if (tier === "lexical") {
+    const results = lexicalSearch(graph, query, cap, filters);
+    return {
+      results,
+      totalCandidates: results.length,
+      indicesConsulted: ["path", "title", "aliases", "frontmatter", "tags", "description", "headings", "body", "links"],
+      candidateGenerationCapped: results.length === cap && graph.nodeCount > cap,
+    };
+  }
+  if (tier === "fuzzy") {
+    const results = fuzzySearch(graph, query, cap, filters);
+    return {
+      results,
+      totalCandidates: results.length,
+      indicesConsulted: ["fuzzy"],
+      candidateGenerationCapped: results.length === cap && graph.nodeCount > cap,
+    };
+  }
+
+  const lexical = lexicalSearch(graph, query, cap, filters);
+  const fuzzyCap = Math.min(cap, 50);
+  const fuzzyApplicable = lexical.length < Math.min(cap, 50);
+  const fuzzy = fuzzyApplicable ? fuzzySearch(graph, query, fuzzyCap, filters) : [];
+  const fuzzyGenerationCapped = fuzzyApplicable
+    && fuzzy.length === fuzzyCap
+    && graph.nodeCount > fuzzyCap;
+  const fused = new Map<string, SearchResult>();
+  for (const result of [...lexical, ...fuzzy]) {
+    const existing = fused.get(result.path);
+    if (!existing) {
+      fused.set(result.path, { ...result, matchedOn: [...(result.matchedOn ?? [])] });
+      continue;
+    }
+    const lexicalResult = existing.matchType === "lexical"
+      ? existing
+      : result.matchType === "lexical"
+        ? result
+        : undefined;
+    const stronger = result.score > existing.score ? result : existing;
+    fused.set(result.path, {
+      ...stronger,
+      matchType: lexicalResult ? "lexical" : stronger.matchType,
+      matchedOn: [...new Set([...(existing.matchedOn ?? []), ...(result.matchedOn ?? [])])],
+    });
+  }
+
+  const results = [...fused.values()].sort(compareSearchResults).slice(0, cap);
+  return {
+    results,
+    totalCandidates: results.length,
+    indicesConsulted: [
+      "path", "title", "aliases", "frontmatter", "tags", "description", "headings", "body", "links",
+      ...(fuzzyApplicable ? ["fuzzy"] : []),
+    ],
+    candidateGenerationCapped:
+      fuzzyGenerationCapped || (results.length === cap && graph.nodeCount > cap),
+  };
+}
+
 export function searchVault(
   graph: GraphIndex,
   _config: OilConfig,
   query: string,
   tier?: "lexical" | "fuzzy",
-  limit: number = 10,
+  limit = 10,
   filters?: SearchFilters,
 ): SearchResult[] {
-  // Explicit tier — run only that tier
-  if (tier === "lexical") return lexicalSearch(graph, query, limit, filters);
-  if (tier === "fuzzy") return fuzzySearch(graph, query, limit, filters);
+  const safeLimit = Math.min(20, Math.max(0, Math.floor(limit)));
+  return searchVaultCandidates(graph, query, tier, filters, Math.max(20, safeLimit * 5))
+    .results
+    .slice(0, safeLimit);
+}
 
-  // Default: lexical first, fuzzy fallback if insufficient results
-  const lexResults = lexicalSearch(graph, query, limit, filters);
-  if (lexResults.length >= limit) return lexResults;
+function lexicalFeatures(
+  entry: SearchEntry,
+  node: GraphNode,
+  query: string,
+): { score: number; matchedOn: string[]; excerpt: string } | null {
+  let score = 0;
+  const matchedOn: string[] = [];
+  let excerpt = node.tags.join(", ") || node.description.slice(0, 220);
+  const consider = (matched: boolean, candidateScore: number, signal: string, candidateExcerpt?: string): void => {
+    if (!matched) return;
+    matchedOn.push(signal);
+    if (candidateScore > score) {
+      score = candidateScore;
+      if (candidateExcerpt !== undefined) excerpt = candidateExcerpt;
+    }
+  };
 
-  // Lexical didn't fill the limit — augment with fuzzy
-  const fuzzyResults = fuzzySearch(graph, query, limit, filters);
-  const seen = new Set(lexResults.map((r) => r.path));
-  const merged = [...lexResults];
-  for (const r of fuzzyResults) {
-    if (seen.has(r.path)) continue;
-    seen.add(r.path);
-    merged.push(r);
-    if (merged.length >= limit) break;
+  const path = entry.normalized.path;
+  const title = entry.normalized.title;
+  consider(path === query, 1, "path", node.path);
+  consider(title === query, 1, "title", node.description || node.title);
+  consider(path.includes(query) && path !== query, 0.98, "path", node.path);
+  consider(title.includes(query) && title !== query, 0.97, "title", node.description || node.title);
+
+  for (let index = 0; index < node.aliases.length; index++) {
+    const alias = node.aliases[index];
+    const lower = entry.normalized.aliases[index];
+    consider(lower === query, 0.99, "alias", alias);
+    consider(lower.includes(query) && lower !== query, 0.95, "alias", alias);
   }
-  return merged;
+
+  for (const signal of entry.normalized.frontmatter) {
+    const keyMatch = signal.key.includes(query);
+    consider(keyMatch, 0.72, `frontmatter.${signal.rawKey}`, signal.rawKey);
+    for (const value of signal.values) {
+      consider(value.lower === query, 0.99, `frontmatter.${signal.rawKey}`, `${signal.rawKey}: ${value.raw}`);
+      consider(value.lower.includes(query) && value.lower !== query, 0.9, `frontmatter.${signal.rawKey}`, `${signal.rawKey}: ${value.raw}`);
+    }
+  }
+
+  consider(entry.normalized.description.includes(query), 0.8, "description", node.description.slice(0, 220));
+  for (let index = 0; index < node.headings.length; index++) {
+    consider(entry.normalized.headings[index].includes(query), 0.85, "heading", node.headings[index]);
+  }
+  for (const tag of entry.normalized.tags) {
+    consider(tag.includes(query), 0.7, "tag", node.tags.join(", "));
+  }
+  if (entry.normalized.linkText.includes(query)) {
+    const edge = node.links.find((candidate) => `${candidate.target} ${candidate.label ?? ""}`.toLowerCase().includes(query));
+    consider(true, 0.65, "link", edge?.context ?? edge?.target);
+  }
+
+  const bodyIndex = node.bodyText.toLowerCase().indexOf(query);
+  consider(bodyIndex >= 0, 0.5, "body", bodyIndex >= 0 ? contextualSnippet(node.bodyText, bodyIndex, query.length) : undefined);
+  return score > 0 ? { score, matchedOn: [...new Set(matchedOn)], excerpt: excerpt.slice(0, 240) } : null;
 }
 
-// ─── Filters ──────────────────────────────────────────────────────────────────
-
-export interface SearchFilters {
-  folder?: string;
-  tags?: string[];
-  frontmatter?: Record<string, unknown>;
-}
-
-function passesFilters(
-  path: string,
-  graph: GraphIndex,
-  filters?: SearchFilters,
-): boolean {
+function passesFilters(node: GraphNode, graph: GraphIndex, filters?: SearchFilters): boolean {
   if (!filters) return true;
-
-  if (filters.folder && !path.startsWith(filters.folder)) {
-    return false;
-  }
-
-  if (filters.tags?.length) {
-    const node = graph.getNode(path);
-    if (!node) return false;
-    if (!filters.tags.some((t) => node.tags.includes(t))) {
-      return false;
-    }
-  }
-
+  if (filters.folder && !node.path.startsWith(filters.folder)) return false;
+  if (filters.type && node.type.toLowerCase() !== filters.type.toLowerCase()) return false;
+  if (filters.tags?.length && !filters.tags.some(
+    (tag) => node.tags.some((nodeTag) => nodeTag.toLowerCase() === tag.toLowerCase()),
+  )) return false;
   if (filters.frontmatter) {
-    const node = graph.getNode(path);
-    if (!node) return false;
-    for (const [key, value] of Object.entries(filters.frontmatter)) {
-      if (node.frontmatter[key] !== value) return false;
+    for (const [requestedKey, expected] of Object.entries(filters.frontmatter)) {
+      const resolved = graph.resolveFrontmatterField(requestedKey);
+      if (!resolved.known) return false;
+      const values = graph.getFrontmatterEntries(resolved.key)
+        .filter((entry) => entry.path === node.path)
+        .map((entry) => entry.value);
+      if (!values.some((actual) => valuesEqual(actual, expected))) return false;
     }
   }
-
   return true;
+}
+
+function valuesEqual(actual: unknown, expected: unknown): boolean {
+  if (Array.isArray(actual)) return actual.some((value) => valuesEqual(value, expected));
+  if (typeof actual === "string" && typeof expected === "string") {
+    return actual.toLowerCase() === expected.toLowerCase();
+  }
+  return actual === expected;
+}
+
+function contextualSnippet(content: string, index: number, queryLength: number): string {
+  const start = Math.max(0, index - 80);
+  const end = Math.min(content.length, index + queryLength + 140);
+  return `${start > 0 ? "…" : ""}${content.slice(start, end).replace(/\s+/g, " ").trim()}${end < content.length ? "…" : ""}`;
+}
+
+function bestFuzzyExcerpt(node: GraphNode, query: string): string {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const lower = node.bodyText.toLowerCase();
+  for (const term of terms) {
+    const index = lower.indexOf(term);
+    if (index >= 0) return contextualSnippet(node.bodyText, index, term.length).slice(0, 220);
+  }
+  return (node.description || node.tags.join(", ") || node.title).slice(0, 220);
+}
+
+function compareSearchResults(a: SearchResult, b: SearchResult): number {
+  return b.score - a.score
+    || (a.matchType === b.matchType ? 0 : a.matchType === "lexical" ? -1 : 1)
+    || a.path.localeCompare(b.path);
+}
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }

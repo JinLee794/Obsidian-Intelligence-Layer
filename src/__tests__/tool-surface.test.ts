@@ -27,11 +27,11 @@ describe("Tool surface", () => {
         "get_health",
         "get_note_metadata",
         "get_related_entities",
+        "inspect_catalog",
         "prepare_crm_prefetch",
         "query_frontmatter",
         "read_note_section",
         "search_vault",
-        "semantic_search",
       ]
     `);
   });

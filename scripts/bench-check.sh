@@ -16,7 +16,7 @@ BASELINE="bench/baseline.json"
 
 if [[ "${1:-}" == "--update" ]]; then
   echo "Generating new baseline → $BASELINE"
-  npx vitest bench --outputJson "$BASELINE"
+  npx vitest bench --run --outputJson "$BASELINE"
   echo "✓ Baseline updated. Commit $BASELINE to lock it in."
   exit 0
 fi
@@ -28,4 +28,4 @@ if [[ ! -f "$BASELINE" ]]; then
 fi
 
 echo "Comparing against baseline: $BASELINE"
-npx vitest bench --compare "$BASELINE"
+npx vitest bench --run --compare "$BASELINE"

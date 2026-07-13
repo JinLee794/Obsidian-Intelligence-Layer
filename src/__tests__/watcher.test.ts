@@ -159,6 +159,32 @@ describe("VaultWatcher — file change detection", () => {
     await new Promise((r) => setTimeout(r, 600));
   });
 
+  it("removes catalog nodes when an entire directory is deleted", async () => {
+    const removedDir = join(vaultRoot, "notes/remove-directory");
+    await mkdir(removedDir, { recursive: true });
+    await writeFile(join(removedDir, "A.md"), "# A\n", "utf-8");
+    await writeFile(join(removedDir, "B.md"), "# B\n", "utf-8");
+
+    graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    cache = new SessionCache();
+    watcher = new VaultWatcher(vaultRoot, graph, cache);
+    watcher.start();
+    await new Promise((r) => setTimeout(r, 500));
+
+    expect(graph.getNotesByFolder("notes/remove-directory/")).toHaveLength(2);
+    await rm(removedDir, { recursive: true, force: true });
+
+    const deadline = Date.now() + 5_000;
+    while (
+      Date.now() < deadline
+      && graph.getNotesByFolder("notes/remove-directory/").length > 0
+    ) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(graph.getNotesByFolder("notes/remove-directory/")).toEqual([]);
+  });
+
   it("ignores non-markdown files", async () => {
     graph = new GraphIndex(vaultRoot);
     await graph.build();

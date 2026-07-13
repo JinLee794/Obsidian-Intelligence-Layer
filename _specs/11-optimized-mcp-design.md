@@ -1,5 +1,7 @@
 # OIL Context Optimization Spec (v2)
 
+> **Implementation note (2026-07-11):** The read/write boundary remains authoritative. The search, graph, discovery, freshness, and response contracts in this document are superseded by [13-knowledge-node-catalog.md](./13-knowledge-node-catalog.md).
+
 ## 1. Problem Statement
 The current OIL design attempts to handle complex state, multi-step writes, and deep correlation on the MCP server side. This creates severe race conditions, scaling bottlenecks, and replicates orchestration logic that the LLM (Copilot) already handles naturally.
 
@@ -29,13 +31,17 @@ These tools are designed to return dense, token-efficient summaries rather than 
 
 ### B. Scalable Search Tools
 
-1. **`semantic_search(query, limit=5)`**
-   * **Optimization:** Leverages a standard external embedding API (e.g., OpenAI) or simple native OS search (ripgrep) rather than requiring a complex local daemon or a heavy 50MB runtime download. 
-   * **Returns:** Only the semantic match snippets (Context strings), not the entire file, keeping token counts strictly bounded.
+1. **`search_vault(query, limit=5)`**
+   * **Optimization:** Uses the generation-aware in-memory catalog across paths, titles, aliases, arbitrary frontmatter, tags, descriptions, headings, full-body chunks, links, and fuzzy candidates.
+   * **Returns:** Ranked snippets, match explanations, freshness metadata, and bounded continuation — never full files.
 
-2. **`query_frontmatter(key, value_fragment)`**
-   * **Optimization:** Runs a straightforward fast native regex/grep scan across the vault rather than attempting to maintain an over-engineered SQLite DB or secondary flat-file cache. Modern Node can handle thousands of text files in milliseconds.
-   * **Returns:** Max 20 file paths matching the query.
+2. **`query_frontmatter(key, value_fragment|operator/value)`**
+   * **Optimization:** Uses the catalog's persistent observed schema and typed inverted index. Existing fragment calls remain compatible.
+   * **Returns:** Max 50 refs per page with explicit unknown-field, type-mismatch, truncation, and cursor outcomes.
+
+3. **`inspect_catalog(view)`**
+   * **Optimization:** Provides bounded virtual folder, field, type, tag, recency, readiness, and warning indexes for broad orientation.
+   * **Returns:** Max 50 compact entries per page.
 
 ### C. Safe Write Tools
 
@@ -58,8 +64,8 @@ Instead of silent failures when CRM IDs rot:
 * Copilot takes that ID and calls a separate CRM MCP itself. If the CRM returns a 404, Copilot handles the error and asks the user for clarification.
 
 ## 6. Summary of Architectural Shifts
-* **Graph Index:** Removed entirely. The system uses basic file search rather than pretending to be a complex graph-database. Hops are confusing for LLMs.
-* **Semantic Search:** Returns context snippets, powered by an external API or simple OS text search, avoiding local daemons.
-* **Frontmatter Queries:** Performed natively with fast regex/grep; no caching DB or sqlite needed.
+* **Knowledge Catalog:** A compatibility-first in-memory catalog owns frontmatter, full-content chunks, links, warnings, and generation-aware persistence. It is not a graph database or external service.
+* **Unified Search:** Returns explainable context snippets without claiming embedding-backed semantics.
+* **Frontmatter Queries:** Use an observed schema and typed inverted index; no SQLite or external vector service is required at current scale.
 * **Writes:** Require an `mtime` check to prevent race conditions.
 * **Orchestration:** Completely removed. No more phases or pipelines.

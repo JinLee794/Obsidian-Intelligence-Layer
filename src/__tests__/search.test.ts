@@ -200,15 +200,8 @@ describe("fuzzySearch", () => {
     expect(results.some((r) => r.title === "Fabrikam")).toBe(true);
   });
 
-  it("finds notes by body content via fuzzy match", () => {
-    invalidateSearchIndex();
-    const results = fuzzySearch(graph, "Tony Bell", 10);
-    expect(results.some((r) => r.title === "Committed Milestone Handoff Tracker")).toBe(true);
-  });
-
-  it("finds body content with typos via fuzzy match", () => {
-    invalidateSearchIndex();
-    const results = fuzzySearch(graph, "Toni Bel", 10);
+  it("keeps complete-body matching in the unified lexical index", () => {
+    const results = searchVault(graph, config, "Tony Bell", undefined, 10);
     expect(results.some((r) => r.title === "Committed Milestone Handoff Tracker")).toBe(true);
   });
 });

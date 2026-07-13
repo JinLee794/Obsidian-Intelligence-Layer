@@ -218,7 +218,7 @@ describe("retrieve v2 — get_related_entities", () => {
   });
 });
 
-describe("retrieve v2 — semantic_search", () => {
+describe("retrieve v2 — inspect_catalog", () => {
   let server: MockMcpServer;
 
   beforeEach(async () => {
@@ -229,25 +229,24 @@ describe("retrieve v2 — semantic_search", () => {
     registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
-  it("returns bounded snippet results", async () => {
-    const result = await server.callToolJson("semantic_search", {
-      query: "migration SOW",
-      limit: 3,
+  it("returns bounded observed frontmatter fields", async () => {
+    const result = await server.callToolJson("inspect_catalog", {
+      view: "fields",
+      limit: 10,
     });
 
     expect(result.count).toBeGreaterThan(0);
-    expect(result.results[0].snippet).toBeTruthy();
-    expect(result.results[0].snippet.length).toBeLessThanOrEqual(230);
-    expect(result.results[0].ref).toBe(result.results[0].path);
+    expect(result.results.some((entry: { key?: string }) => entry.key === "tpid")).toBe(true);
+    expect(result.page.returned).toBeLessThanOrEqual(10);
+    expect(result.catalog.generation).toBeTruthy();
   });
 
-  it("rejects empty query with INVALID_INPUT", async () => {
-    const result = await server.callToolJson("semantic_search", {
-      query: "  ",
+  it("returns virtual root folders", async () => {
+    const result = await server.callToolJson("inspect_catalog", {
+      view: "folders",
     });
 
-    expect(result.error).toBeDefined();
-    expect(result.error_code).toBe("INVALID_INPUT");
+    expect(result.results.some((entry: { path?: string }) => entry.path === "Customers/")).toBe(true);
   });
 });
 
@@ -278,8 +277,8 @@ describe("retrieve v2 — query_frontmatter", () => {
       limit: 3,
     });
 
-    expect(result.length).toBeGreaterThan(0);
-    expect(result[0].ref).toBe(result[0].path);
+    expect(result.results.length).toBeGreaterThan(0);
+    expect(result.results[0].ref).toBe(result.results[0].path);
   });
 
   it("reflects index on new tool registration", async () => {

@@ -19,7 +19,7 @@ import { z } from "zod";
 import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig, CustomerContext, NoteRef, ActionItem } from "../types.js";
-import { errorResponse, jsonResponse, noteRef } from "../tool-responses.js";
+import { boundedJsonResponse, errorResponse, noteRef } from "../tool-responses.js";
 import { validateCustomerName, validationError } from "../validation.js";
 import {
   readNote,
@@ -36,6 +36,10 @@ import {
 } from "../vault.js";
 import { extractPrefetchIds } from "../correlate.js";
 import { checkVaultHealth } from "../hygiene.js";
+
+const DOMAIN_LIST_MAX = 50;
+const DOMAIN_REFS_MAX = 20;
+const DOMAIN_TEXT_MAX = 1_500;
 
 /**
  * Register the 3 high-value domain tools on the MCP server.
@@ -104,7 +108,8 @@ export function registerDomainTools(
       const custErr = validateCustomerName(resolvedCustomer);
       if (custErr) return validationError(`get_customer_context: ${custErr}`);
 
-      const lookback = lookback_days ?? 90;
+      const requestedLookback = lookback_days ?? 90;
+      const lookback = Math.min(Math.max(1, Math.floor(requestedLookback)), 3_650);
       let customerFile: string;
       let customerStats: Awaited<ReturnType<typeof stat>>;
 
@@ -188,17 +193,27 @@ export function registerDomainTools(
         });
       }
 
+      const truncation = {
+        opportunities: opportunities.length > DOMAIN_LIST_MAX,
+        milestones: milestones.length > DOMAIN_LIST_MAX,
+        team: team.length > DOMAIN_LIST_MAX,
+        agentInsights: agentInsights.length > DOMAIN_LIST_MAX,
+        linkedPeople: linkedPeople.length > DOMAIN_REFS_MAX,
+        recentMeetings: recentMeetings.length > DOMAIN_REFS_MAX,
+        openItems: openItems.length > DOMAIN_LIST_MAX,
+        similarCustomers: similarCustomers.length > DOMAIN_REFS_MAX,
+      };
       const result: CustomerContext = {
-        frontmatter: parsed.frontmatter as CustomerContext["frontmatter"],
-        opportunities,
-        milestones,
-        team,
-        agentInsights,
-        connectHooks: connectSection || null,
-        linkedPeople,
-        recentMeetings,
-        openItems,
-        similarCustomers,
+        frontmatter: boundFrontmatter(parsed.frontmatter) as CustomerContext["frontmatter"],
+        opportunities: opportunities.slice(0, DOMAIN_LIST_MAX),
+        milestones: milestones.slice(0, DOMAIN_LIST_MAX),
+        team: team.slice(0, DOMAIN_LIST_MAX),
+        agentInsights: agentInsights.slice(0, DOMAIN_LIST_MAX),
+        connectHooks: connectSection ? connectSection.slice(0, DOMAIN_TEXT_MAX) : null,
+        linkedPeople: linkedPeople.slice(0, DOMAIN_REFS_MAX),
+        recentMeetings: recentMeetings.slice(0, DOMAIN_REFS_MAX),
+        openItems: openItems.slice(0, DOMAIN_LIST_MAX),
+        similarCustomers: similarCustomers.slice(0, DOMAIN_REFS_MAX),
       };
 
       const envelope = {
@@ -208,10 +223,20 @@ export function registerDomainTools(
         customer_mtime_ms: customerStats.mtimeMs,
         customer_version: customerStats.mtimeMs,
         view: requestedView,
+        catalog: {
+          generation: graph.generation,
+          state: graph.indexState,
+        },
+        truncated: Object.values(truncation).some(Boolean),
+        truncation,
+        warnings: [
+          ...(requestedLookback > 3_650 ? [`LIMIT_CLAMPED:${requestedLookback}->3650`] : []),
+          ...(Object.values(truncation).some(Boolean) ? ["RESULTS_TRUNCATED"] : []),
+        ],
       };
 
       if (requestedView === "brief") {
-        return jsonResponse({
+        return boundedJsonResponse({
           ...envelope,
           frontmatter: result.frontmatter,
           opportunities: result.opportunities,
@@ -225,11 +250,11 @@ export function registerDomainTools(
             connect_hooks_present: Boolean(result.connectHooks),
             similar_customer_count: result.similarCustomers.length,
           },
-        });
+        }, 3_200);
       }
 
       if (requestedView === "write") {
-        return jsonResponse({
+        return boundedJsonResponse({
           ...envelope,
           ...result,
           write_targets: {
@@ -242,13 +267,13 @@ export function registerDomainTools(
               team: "Team",
             },
           },
-        });
+        }, 4_800);
       }
 
-      return jsonResponse({
+      return boundedJsonResponse({
         ...envelope,
         ...result,
-      });
+      }, 4_800);
     },
   );
 
@@ -266,6 +291,13 @@ export function registerDomainTools(
       },
     },
     async ({ customers }) => {
+      if (customers.length > DOMAIN_LIST_MAX) {
+        return errorResponse(
+          "LIMIT_EXCEEDED",
+          `prepare_crm_prefetch accepts at most ${DOMAIN_LIST_MAX} customers per call.`,
+          { requested: customers.length, maximum: DOMAIN_LIST_MAX },
+        );
+      }
       for (const c of customers) {
         const custErr = validateCustomerName(c);
         if (custErr) return validationError(`prepare_crm_prefetch: customer '${c}' — ${custErr}`);
@@ -299,10 +331,11 @@ export function registerDomainTools(
         }),
       );
 
-      return jsonResponse({
+      return boundedJsonResponse({
         prefetch: shaped,
         _note: "Use odata_hints directly in crm_query $filter expressions.",
-      });
+        catalog: { generation: graph.generation, state: graph.indexState },
+      }, 4_800);
     },
   );
 
@@ -321,6 +354,13 @@ export function registerDomainTools(
       },
     },
     async ({ customers }) => {
+      if (customers && customers.length > DOMAIN_LIST_MAX) {
+        return errorResponse(
+          "LIMIT_EXCEEDED",
+          `check_vault_health accepts at most ${DOMAIN_LIST_MAX} named customers per call.`,
+          { requested: customers.length, maximum: DOMAIN_LIST_MAX },
+        );
+      }
       if (customers) {
         for (const c of customers) {
           const custErr = validateCustomerName(c);
@@ -358,17 +398,46 @@ export function registerDomainTools(
         );
       }
 
-      return jsonResponse({
-        report,
-        issues,
-        orphaned_meeting_refs: report.orphanedMeetings.map((path) => noteRef(path)),
+      const boundedReport = {
+        ...report,
+        customers: report.customers.slice(0, DOMAIN_LIST_MAX),
+        orphanedMeetings: report.orphanedMeetings.slice(0, DOMAIN_LIST_MAX),
+        rosterGaps: report.rosterGaps.slice(0, DOMAIN_LIST_MAX),
+        structuralIssues: report.structuralIssues.slice(0, DOMAIN_LIST_MAX),
+      };
+      const reportTruncated = report.customers.length > DOMAIN_LIST_MAX
+        || report.orphanedMeetings.length > DOMAIN_LIST_MAX
+        || report.rosterGaps.length > DOMAIN_LIST_MAX
+        || report.structuralIssues.length > DOMAIN_LIST_MAX
+        || issues.length > 100;
+
+      return boundedJsonResponse({
+        report: boundedReport,
+        issues: issues.slice(0, 100),
+        orphaned_meeting_refs: boundedReport.orphanedMeetings.map((path) => noteRef(path)),
+        catalog_warnings: graph.getWarningCounts(),
+        catalog_issues: graph.getCatalogIssues().slice(0, 20),
+        catalog: { generation: graph.generation, state: graph.indexState },
+        truncated: reportTruncated,
+        warnings: reportTruncated ? ["RESULTS_TRUNCATED"] : [],
         summary:
           issues.length > 0
             ? `${issues.length} issue(s) found across ${report.totalCustomers} customers`
             : `All ${report.totalCustomers} customers healthy`,
-      });
+      }, 4_800);
     },
   );
+}
+
+function boundFrontmatter(frontmatter: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(frontmatter).sort(([a], [b]) => a.localeCompare(b))) {
+    const serialized = typeof value === "string" ? value : JSON.stringify(value);
+    const bounded = serialized.length > 500 ? `${serialized.slice(0, 497)}...` : value;
+    if (JSON.stringify({ ...result, [key]: bounded }).length > 2_000) break;
+    result[key] = bounded;
+  }
+  return result;
 }
 
 // ─── Helpers (ported from orient.ts) ────────────────────────────────────────

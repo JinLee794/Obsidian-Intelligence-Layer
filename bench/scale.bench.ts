@@ -166,8 +166,8 @@ describe("Tool layer (end-to-end)", () => {
     await server.callTool("search_vault", { query: "migration", limit: 10 });
   });
 
-  bench("semantic_search: risk", async () => {
-    await server.callTool("semantic_search", { query: "risk", limit: 5 });
+  bench("inspect_catalog: fields", async () => {
+    await server.callTool("inspect_catalog", { view: "fields", limit: 10 });
   });
 
   bench("get_note_metadata", async () => {

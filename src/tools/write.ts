@@ -19,6 +19,7 @@ import {
 import { validateVaultPath, validationError } from "../validation.js";
 import { securePath, noteExists } from "../vault.js";
 import { appendToSection, executeWrite, logWrite } from "../gate.js";
+import { decodeCursor, encodeCursor, querySignature } from "../pagination.js";
 
 /**
  * Register all Write tools on the MCP server.
@@ -26,7 +27,7 @@ import { appendToSection, executeWrite, logWrite } from "../gate.js";
 export function registerWriteTools(
   server: McpServer,
   vaultPath: string,
-  _graph: GraphIndex,
+  graph: GraphIndex,
   cache: SessionCache,
   config: OilConfig,
 ): void {
@@ -98,6 +99,7 @@ export function registerWriteTools(
           cache.invalidateNote(path);
 
           const after = await getMtime(vaultPath, path);
+          const catalogVisibility = await refreshCatalog(graph, path);
 
           // Audit log (fire-and-forget)
           try {
@@ -117,6 +119,7 @@ export function registerWriteTools(
             previous_mtime: before,
             mtime_ms: after,
             version: after,
+            ...catalogVisibility,
           });
         });
       } catch (err) {
@@ -196,6 +199,7 @@ export function registerWriteTools(
           cache.invalidateNote(path);
 
           const after = await getMtime(vaultPath, path);
+          const catalogVisibility = await refreshCatalog(graph, path);
 
           // Audit log (fire-and-forget)
           try {
@@ -214,6 +218,7 @@ export function registerWriteTools(
             previous_mtime: before,
             mtime_ms: after,
             version: after,
+            ...catalogVisibility,
           });
         });
       } catch (err) {
@@ -285,12 +290,14 @@ export function registerWriteTools(
           // within ~1-2s (indexing, metadata injection). Returning before
           // it settles would give the agent a stale mtime.
           const after = await getStableMtime(vaultPath, path);
+          const catalogVisibility = await refreshCatalog(graph, path);
           return jsonResponse({
             status: "created",
             path,
             ref: noteRef(path),
             mtime_ms: after,
             version: after,
+            ...catalogVisibility,
           });
         });
       } catch (err) {
@@ -315,9 +322,11 @@ export function registerWriteTools(
           .string()
           .optional()
           .describe("Date in YYYY-MM-DD format (default: today)"),
+        limit: z.number().optional().describe("Log entries per page (default 20, maximum 100)"),
+        cursor: z.string().optional().describe("Generation-bound continuation cursor"),
       },
     },
-    async ({ date }) => {
+    async ({ date, limit, cursor }) => {
       const dateStr = date ?? new Date().toISOString().slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
         return validationError("get_agent_log: date must be YYYY-MM-DD format");
@@ -327,11 +336,46 @@ export function registerWriteTools(
       try {
         const fullPath = securePath(vaultPath, logPath);
         const content = await readFile(fullPath, "utf-8");
+        const entries = content
+          .split(/(?=^###\s)/m)
+          .filter((entry) => /^###\s/m.test(entry));
+        const requestedLimit = limit === undefined || !Number.isFinite(limit)
+          ? 20
+          : Math.max(1, Math.floor(limit));
+        const pageLimit = Math.min(requestedLimit, 100);
+        const signature = querySignature({ date: dateStr });
+        const decoded = cursor
+          ? decodeCursor(cursor, { kind: "agent-log", generation: graph.generation, signature })
+          : null;
+        if (cursor && !decoded) {
+          return errorResponse(
+            "INVALID_CURSOR",
+            "get_agent_log: cursor is invalid or belongs to another catalog generation.",
+            { catalog_generation: graph.generation },
+          );
+        }
+        const offset = decoded?.offset ?? 0;
+        const pageEntries = entries.slice(offset, offset + pageLimit);
+        const truncated = offset + pageEntries.length < entries.length;
+        const nextCursor = truncated
+          ? encodeCursor({
+              kind: "agent-log",
+              generation: graph.generation,
+              signature,
+              offset: offset + pageEntries.length,
+            })
+          : undefined;
         return jsonResponse({
           date: dateStr,
           path: logPath,
           ref: noteRef(logPath),
-          log: content,
+          log: pageEntries.join("").trim() || null,
+          count: pageEntries.length,
+          total: entries.length,
+          truncated,
+          ...(nextCursor ? { next_cursor: nextCursor } : {}),
+          catalog_generation: graph.generation,
+          warnings: requestedLimit > 100 ? [`LIMIT_CLAMPED:${requestedLimit}->100`] : [],
         });
       } catch {
         return jsonResponse({
@@ -350,6 +394,37 @@ async function getMtime(vaultPath: string, path: string): Promise<number> {
   const fullPath = securePath(vaultPath, path);
   const fileStats = await stat(fullPath);
   return fileStats.mtimeMs;
+}
+
+async function refreshCatalog(
+  graph: GraphIndex,
+  path: string,
+): Promise<{
+  catalog_state: "current" | "pending";
+  catalog_generation: string;
+  warnings?: string[];
+}> {
+  try {
+    await graph.updateNote(path);
+    if (graph.indexState !== "current") {
+      return {
+        catalog_state: "pending",
+        catalog_generation: graph.generation,
+        warnings: [graph.indexState === "stale" ? "STALE_INDEX" : "INDEX_RECONCILING"],
+      };
+    }
+    return {
+      catalog_state: "current",
+      catalog_generation: graph.generation,
+    };
+  } catch (error) {
+    console.error(`[OIL] Write succeeded but catalog refresh is pending for ${path}:`, error);
+    return {
+      catalog_state: "pending",
+      catalog_generation: graph.generation,
+      warnings: ["INDEX_RECONCILING"],
+    };
+  }
 }
 
 /**

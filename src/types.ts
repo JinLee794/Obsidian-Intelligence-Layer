@@ -46,13 +46,120 @@ export interface MeetingFrontmatter extends NoteFrontmatter {
 
 export interface GraphNode {
   path: string;
+  nodeId: string;
   title: string;
+  titleSource: "frontmatter" | "heading" | "filename";
+  description: string;
+  descriptionSource: "frontmatter" | "derived" | "empty";
+  type: string;
+  typeSource: "frontmatter" | "inferred_folder" | "default";
+  aliases: string[];
+  explicitId?: string;
   tags: string[];
   headings: string[];
-  bodySnippet: string; // first N chars of body (frontmatter-stripped) for search
+  /** Compatibility preview. Full search uses bodyText/chunks. */
+  bodySnippet: string;
+  bodyText: string;
+  chunks: ContentChunk[];
+  wordCount: number;
   frontmatter: NoteFrontmatter;
   outLinks: Set<string>; // paths this note links to
   inLinks: Set<string>; // paths that link to this note
+  links: RelationshipEdge[];
+  warnings: CatalogWarningCode[];
+  warningDetails: CatalogWarning[];
+  readiness: ReadinessFacet[];
+  sourceMtimeMs: number;
+  sourceSize: number;
+  contentHash: string;
+  frontmatterParsed: boolean;
+}
+
+export interface ContentChunk {
+  id: string;
+  heading?: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
+export type CatalogWarningCode =
+  | "FRONTMATTER_PARSE_ERROR"
+  | "MIXED_VALUE_TYPES"
+  | "KEY_VARIANTS"
+  | "DUPLICATE_ID"
+  | "AMBIGUOUS_LINK"
+  | "BROKEN_LINK"
+  | "DERIVED_DESCRIPTION"
+  | "DERIVED_TYPE"
+  | "RESULTS_TRUNCATED"
+  | "INDEX_RECONCILING";
+
+export interface CatalogWarning {
+  code: CatalogWarningCode;
+  message: string;
+  field?: string;
+  target?: string;
+  candidates?: string[];
+}
+
+export type ReadinessFacet =
+  | "indexed"
+  | "structured"
+  | "described"
+  | "connected"
+  | "profiled";
+
+export type LinkSyntax = "wikilink" | "markdown";
+export type LinkResolutionStatus = "resolved" | "ambiguous" | "broken" | "external";
+
+export interface RelationshipEdge {
+  source: string;
+  target: string;
+  resolvedPath?: string;
+  syntax: LinkSyntax;
+  label?: string;
+  heading?: string;
+  status: LinkResolutionStatus;
+  candidates?: string[];
+  context?: string;
+}
+
+export type FrontmatterValueKind =
+  | "string"
+  | "date"
+  | "number"
+  | "boolean"
+  | "array"
+  | "object"
+  | "null";
+
+export interface FrontmatterIndexEntry {
+  path: string;
+  rawKey: string;
+  key: string;
+  value: unknown;
+  kind: FrontmatterValueKind;
+}
+
+export interface ObservedFieldSchema {
+  key: string;
+  variants: string[];
+  aliases: string[];
+  nodeCount: number;
+  coverage: number;
+  types: Partial<Record<FrontmatterValueKind, number>>;
+  folders: Record<string, number>;
+  examples: unknown[];
+  warnings: CatalogWarningCode[];
+}
+
+export type CatalogIndexState = "current" | "reconciling" | "stale" | "failed";
+
+export interface CatalogIssue {
+  path: string;
+  code: "UNREADABLE_FILE" | "FRONTMATTER_PARSE_ERROR";
+  message: string;
 }
 
 export interface GraphStats {
@@ -177,6 +284,7 @@ export interface SearchResult {
   excerpt: string;
   score: number;
   matchType: "lexical" | "fuzzy";
+  matchedOn?: string[];
 }
 
 // ─── Config Types ─────────────────────────────────────────────────────────────
@@ -210,6 +318,11 @@ export interface FrontmatterSchemaConfig {
   projectField: string;
   tpidField: string;
   accountidField: string;
+  titleField: string;
+  descriptionField: string;
+  typeField: string;
+  timestampField: string;
+  idField: string;
 }
 
 export interface SearchConfig {

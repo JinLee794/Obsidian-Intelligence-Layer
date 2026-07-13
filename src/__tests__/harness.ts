@@ -83,9 +83,10 @@ export interface TestHarness {
  */
 export async function setupHarness(
   vaultPath: string = FIXTURE_VAULT,
+  configOverride?: OilConfig,
 ): Promise<TestHarness> {
-  const config = await loadConfig(vaultPath);
-  const graph = new GraphIndex(vaultPath);
+  const config = configOverride ?? await loadConfig(vaultPath);
+  const graph = new GraphIndex(vaultPath, config);
   await graph.build();
   const cache = new SessionCache();
   const server = new MockMcpServer();

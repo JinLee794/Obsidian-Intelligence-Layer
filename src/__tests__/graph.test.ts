@@ -3,9 +3,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { GraphIndex } from "../graph.js";
-import { mkdtemp, rm, mkdir, writeFile, readFile, unlink } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, unlink, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DEFAULT_CONFIG } from "../config.js";
 
 let tempDir: string;
 let vaultRoot: string;
@@ -326,6 +327,32 @@ describe("GraphIndex — incremental update", () => {
     const contoso = graph.getNode("Customers/Contoso.md");
     expect(contoso!.outLinks.has("People/Bob Jones.md")).toBe(false);
   });
+
+  it("serializes concurrent updates without losing either note", async () => {
+    const contosoPath = join(vaultRoot, "Customers/Contoso.md");
+    const fabrikamPath = join(vaultRoot, "Customers/Fabrikam.md");
+    const [contosoOriginal, fabrikamOriginal] = await Promise.all([
+      readFile(contosoPath, "utf-8"),
+      readFile(fabrikamPath, "utf-8"),
+    ]);
+    await Promise.all([
+      writeFile(contosoPath, `${contosoOriginal}\nconcurrent-contoso-marker\n`, "utf-8"),
+      writeFile(fabrikamPath, `${fabrikamOriginal}\nconcurrent-fabrikam-marker\n`, "utf-8"),
+    ]);
+
+    await Promise.all([
+      graph.updateNote("Customers/Contoso.md"),
+      graph.updateNote("Customers/Fabrikam.md"),
+    ]);
+
+    expect(graph.getNode("Customers/Contoso.md")?.bodyText).toContain("concurrent-contoso-marker");
+    expect(graph.getNode("Customers/Fabrikam.md")?.bodyText).toContain("concurrent-fabrikam-marker");
+
+    await Promise.all([
+      writeFile(contosoPath, contosoOriginal, "utf-8"),
+      writeFile(fabrikamPath, fabrikamOriginal, "utf-8"),
+    ]);
+  });
 });
 
 describe("GraphIndex — persistence", () => {
@@ -352,5 +379,58 @@ describe("GraphIndex — persistence", () => {
     const graph = new GraphIndex(vaultRoot);
     const loaded = await graph.loadFromDisk("_nonexistent.json");
     expect(loaded).toBe(false);
+  });
+
+  it("invalidates a persisted catalog when relevant configuration changes", async () => {
+    const graph1 = new GraphIndex(vaultRoot, DEFAULT_CONFIG);
+    await graph1.build();
+    await graph1.saveToDisk("_oil-graph.json");
+
+    const changedConfig = structuredClone(DEFAULT_CONFIG);
+    changedConfig.frontmatterSchema.statusField = "lifecycle_state";
+    const graph2 = new GraphIndex(vaultRoot, changedConfig);
+    expect(await graph2.loadFromDisk("_oil-graph.json")).toBe(false);
+
+    await unlink(join(vaultRoot, "_oil-graph.json"));
+  });
+
+  it("produces equivalent records after unchanged persisted reconciliation", async () => {
+    const graph1 = new GraphIndex(vaultRoot, DEFAULT_CONFIG);
+    await graph1.build();
+    await graph1.saveToDisk("_oil-graph.json");
+
+    const graph2 = new GraphIndex(vaultRoot, DEFAULT_CONFIG);
+    expect(await graph2.buildIncremental("_oil-graph.json")).toBe(0);
+    expect(graph2.indexState).toBe("current");
+    expect(graph2.getNotesByFolder("").map((note) => note.path)).toEqual(
+      graph1.getNotesByFolder("").map((note) => note.path),
+    );
+    expect(graph2.getObservedSchema()).toEqual(graph1.getObservedSchema());
+
+    await unlink(join(vaultRoot, "_oil-graph.json"));
+  });
+
+  it("retains a loaded generation as stale when reconciliation fails", async () => {
+    const isolatedRoot = await mkdtemp(join(tmpdir(), "oil-stale-reconcile-"));
+    const isolatedVault = join(isolatedRoot, "vault");
+    const movedVault = join(isolatedRoot, "vault-unavailable");
+    await mkdir(isolatedVault, { recursive: true });
+    await writeFile(join(isolatedVault, "Note.md"), "# Note\n", "utf-8");
+
+    const graph1 = new GraphIndex(isolatedVault, DEFAULT_CONFIG);
+    await graph1.build();
+    await graph1.saveToDisk("_oil-graph.json");
+    const graph2 = new GraphIndex(isolatedVault, DEFAULT_CONFIG);
+    expect(await graph2.loadFromDisk("_oil-graph.json")).toBe(true);
+
+    await rename(isolatedVault, movedVault);
+    try {
+      await expect(graph2.buildIncremental("_oil-graph.json")).rejects.toBeDefined();
+      expect(graph2.indexState).toBe("stale");
+      expect(graph2.nodeCount).toBe(1);
+    } finally {
+      await rename(movedVault, isolatedVault);
+      await rm(isolatedRoot, { recursive: true, force: true });
+    }
   });
 });

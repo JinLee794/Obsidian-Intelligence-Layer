@@ -1,640 +1,964 @@
-/**
- * OIL — Graph index engine
- * Wikilink parser, backlink computation, tag index, N-hop traversal.
- * Built at startup, updated incrementally via file watcher.
- * Persisted to _oil-graph.json for fast restart.
- */
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join } from "node:path";
+import type {
+  CatalogIndexState,
+  CatalogIssue,
+  CatalogWarningCode,
+  FrontmatterIndexEntry,
+  GraphNode,
+  GraphStats,
+  NoteRef,
+  ObservedFieldSchema,
+  OilConfig,
+  RelationshipEdge,
+  TagCount,
+} from "./types.js";
+import { DEFAULT_CONFIG } from "./config.js";
+import {
+  CATALOG_FORMAT_VERSION,
+  EXTRACTOR_VERSION,
+  chunkMarkdown,
+  configFingerprint,
+  flattenFrontmatter,
+  folderOf,
+  linkPathCandidates,
+  normalizeFieldKey,
+  normalizeVaultPath,
+  parseCatalogNode,
+  sha256,
+} from "./catalog.js";
+import { listAllNotes } from "./vault.js";
 
-import { readFile, writeFile, stat } from "node:fs/promises";
-import { join, basename, extname } from "node:path";
-import matter from "gray-matter";
-import type { GraphNode, GraphStats, NoteRef, TagCount } from "./types.js";
-import { listAllNotes, extractWikilinks, isAllowedFile } from "./vault.js";
-
-// ─── Persisted Graph Format ───────────────────────────────────────────────────
-
-interface PersistedGraphNode {
+interface PersistedCatalogNode {
   path: string;
+  nodeId: string;
   title: string;
+  titleSource: GraphNode["titleSource"];
+  description: string;
+  descriptionSource: GraphNode["descriptionSource"];
+  type: string;
+  typeSource: GraphNode["typeSource"];
+  aliases: string[];
+  explicitId?: string;
   tags: string[];
   headings: string[];
-  bodySnippet?: string;
+  bodySnippet: string;
+  bodyText: string;
+  wordCount: number;
   frontmatter: Record<string, unknown>;
-  rawOutLinks: string[];
-  lastModified: number;
+  rawLinks: RelationshipEdge[];
+  warnings: CatalogWarningCode[];
+  warningDetails: GraphNode["warningDetails"];
+  readiness: GraphNode["readiness"];
+  sourceMtimeMs: number;
+  sourceSize: number;
+  contentHash: string;
+  frontmatterParsed: boolean;
 }
 
-interface PersistedGraph {
-  version: 1 | 2;
+interface PersistedCatalog {
+  version: 3;
   builtAt: string;
-  nodes: PersistedGraphNode[];
+  generation: string;
+  extractionProfile: {
+    extractorVersion: string;
+    configFingerprint: string;
+  };
+  issues: CatalogIssue[];
+  nodes: PersistedCatalogNode[];
 }
 
-// ─── Graph Index ──────────────────────────────────────────────────────────────
+interface CatalogSnapshot {
+  nodes: Map<string, GraphNode>;
+  tagIndex: Map<string, Set<string>>;
+  titleIndex: Map<string, Set<string>>;
+  rawLinks: Map<string, RelationshipEdge[]>;
+  fileMtimes: Map<string, number>;
+  frontmatterIndex: Map<string, FrontmatterIndexEntry[]>;
+  observedSchema: Map<string, ObservedFieldSchema>;
+  issues: CatalogIssue[];
+  generation: string;
+  builtAt: Date;
+}
+
+const EMPTY_GENERATION = "gen_empty";
 
 export class GraphIndex {
-  /** path → GraphNode */
-  private nodes = new Map<string, GraphNode>();
-  /** tag → set of note paths */
-  private tagIndex = new Map<string, Set<string>>();
-  /** title (lowercase) → path — for resolving wikilinks by title */
-  private titleIndex = new Map<string, string>();
-  /** path → raw wikilink targets (before resolution) — kept for persistence */
-  private rawOutLinks = new Map<string, string[]>();
-  /** path → file mtime (ms) — for incremental rebuild */
-  private fileMtimes = new Map<string, number>();
-
-  private vaultPath: string;
-  private _lastIndexed: Date = new Date();
+  private snapshot: CatalogSnapshot = emptySnapshot();
+  private readonly vaultPath: string;
+  private readonly config: OilConfig;
+  private _state: CatalogIndexState = "stale";
   private _building = false;
+  private _persistedSnapshotValid = false;
+  private _reconciledAt: Date | null = null;
+  private generationSequence = 0;
+  private mutationTail: Promise<void> = Promise.resolve();
 
-  constructor(vaultPath: string) {
+  constructor(vaultPath: string, config: OilConfig = DEFAULT_CONFIG) {
     this.vaultPath = vaultPath;
+    this.config = config;
   }
 
   get lastIndexed(): Date {
-    return this._lastIndexed;
+    return this.snapshot.builtAt;
+  }
+
+  get reconciledAt(): Date | null {
+    return this._reconciledAt;
   }
 
   get nodeCount(): number {
-    return this.nodes.size;
+    return this.snapshot.nodes.size;
   }
 
-  /** True while a build or incremental update is in progress. */
   get building(): boolean {
     return this._building;
   }
 
-  // ─── Full Index Build ───────────────────────────────────────────────────
+  get generation(): string {
+    return this.snapshot.generation;
+  }
 
-  /**
-   * Build the complete graph index by parsing all markdown files.
-   */
+  get indexState(): CatalogIndexState {
+    return this._state;
+  }
+
+  get persistedSnapshotValid(): boolean {
+    return this._persistedSnapshotValid;
+  }
+
+  get extractionProfile(): { extractorVersion: string; configFingerprint: string } {
+    return {
+      extractorVersion: EXTRACTOR_VERSION,
+      configFingerprint: configFingerprint(this.config),
+    };
+  }
+
   async build(): Promise<void> {
     this._building = true;
-    this.nodes.clear();
-    this.tagIndex.clear();
-    this.titleIndex.clear();
-    this.rawOutLinks.clear();
-    this.fileMtimes.clear();
-
-    const notePaths = await listAllNotes(this.vaultPath);
-
-    // Phase 1: Parse all notes, collect outlinks and metadata
-    for (const notePath of notePaths) {
-      await this.indexNote(notePath);
-    }
-
-    // Phase 2: Resolve wikilinks → paths and compute backlinks
-    this.resolveLinks();
-
-    this._lastIndexed = new Date();
-    this._building = false;
-  }
-
-  /**
-   * Parse a single note and add it to the index.
-   */
-  private async indexNote(notePath: string): Promise<void> {
+    this._state = "reconciling";
     try {
-      const fullPath = join(this.vaultPath, notePath);
-      const raw = await readFile(fullPath, "utf-8");
-      const { data: frontmatter, content } = matter(raw);
+      const notePaths = (await listAllNotes(this.vaultPath)).sort();
+      const nodes = new Map<string, GraphNode>();
+      const rawLinks = new Map<string, RelationshipEdge[]>();
+      const issues: CatalogIssue[] = [];
 
-      // Track mtime for incremental rebuild
-      try {
-        const fileStat = await stat(fullPath);
-        this.fileMtimes.set(notePath, fileStat.mtimeMs);
-      } catch {
-        // Use current time if stat fails
-        this.fileMtimes.set(notePath, Date.now());
+      for (const notePath of notePaths) {
+        await this.readSourceNode(notePath, nodes, rawLinks, issues);
       }
 
-      const title = this.extractTitle(notePath, content);
-      const wikilinks = extractWikilinks(content);
-      const tags = this.extractTags(frontmatter, content);
-      const headings = this.extractHeadings(content);
-      const bodySnippet = content.slice(0, 10_000);
-
-      // Store raw wikilink targets for persistence
-      this.rawOutLinks.set(notePath, wikilinks);
-
-      const node: GraphNode = {
-        path: notePath,
-        title,
-        tags,
-        headings,
-        bodySnippet,
-        frontmatter: frontmatter as Record<string, unknown>,
-        outLinks: new Set(wikilinks), // Temporarily stores link targets (names)
-        inLinks: new Set(),
-      };
-
-      this.nodes.set(notePath, node);
-
-      // Index by title for wikilink resolution
-      this.titleIndex.set(title.toLowerCase(), notePath);
-      // Also index by filename without extension
-      const fileName = basename(notePath, extname(notePath));
-      this.titleIndex.set(fileName.toLowerCase(), notePath);
-
-      // Build tag index
-      for (const tag of tags) {
-        let paths = this.tagIndex.get(tag);
-        if (!paths) {
-          paths = new Set();
-          this.tagIndex.set(tag, paths);
-        }
-        paths.add(notePath);
-      }
-    } catch {
-      // Skip files that can't be parsed
+      this.publish(nodes, rawLinks, issues);
+      this._persistedSnapshotValid = false;
+      this._reconciledAt = new Date();
+      this._state = "current";
+    } catch (error) {
+      this._state = "failed";
+      throw error;
+    } finally {
+      this._building = false;
     }
   }
 
-  /**
-   * Resolve wikilink targets from names to paths, and compute backlinks.
-   */
-  private resolveLinks(): void {
-    for (const [path, node] of this.nodes) {
-      const resolvedLinks = new Set<string>();
-
-      for (const linkTarget of node.outLinks) {
-        const resolved = this.resolveWikilink(linkTarget);
-        if (resolved) {
-          resolvedLinks.add(resolved);
-          // Add backlink on the target node
-          const targetNode = this.nodes.get(resolved);
-          if (targetNode) {
-            targetNode.inLinks.add(path);
-          }
-        }
-      }
-
-      node.outLinks = resolvedLinks;
-    }
-  }
-
-  /**
-   * Resolve a wikilink target to a note path.
-   * Tries: exact path match → title match → filename match.
-   */
-  private resolveWikilink(target: string): string | undefined {
-    // Direct path match (e.g., "Customers/Contoso")
-    const withExt = target.endsWith(".md") ? target : `${target}.md`;
-    if (this.nodes.has(withExt)) return withExt;
-
-    // Title/filename match
-    return this.titleIndex.get(target.toLowerCase());
-  }
-
-  // ─── Incremental Updates ────────────────────────────────────────────────
-
-  /**
-   * Re-index a single note after it changes on disk.
-   */
   async updateNote(notePath: string): Promise<void> {
-    // Remove old data
-    this.removeNote(notePath);
-    // Re-index
-    await this.indexNote(notePath);
-    // Full link re-resolution (could be optimised for single-note updates)
-    this.resolveAllBacklinks();
+    return this.withMutation(() => this.updateNoteUnlocked(notePath));
   }
 
-  /**
-   * Remove a note from the index.
-   */
-  removeNote(notePath: string): void {
-    const node = this.nodes.get(notePath);
-    if (!node) return;
-
-    // Remove from tag index
-    for (const tag of node.tags) {
-      this.tagIndex.get(tag)?.delete(notePath);
-    }
-
-    // Remove backlinks pointing to this note
-    for (const targetPath of node.outLinks) {
-      this.nodes.get(targetPath)?.inLinks.delete(notePath);
-    }
-
-    // Remove incoming link references from source nodes
-    for (const sourcePath of node.inLinks) {
-      this.nodes.get(sourcePath)?.outLinks.delete(notePath);
-    }
-
-    this.nodes.delete(notePath);
-    this.rawOutLinks.delete(notePath);
-    this.fileMtimes.delete(notePath);
-    // Clean title index
-    const title = node.title.toLowerCase();
-    if (this.titleIndex.get(title) === notePath) {
-      this.titleIndex.delete(title);
-    }
-    const fileName = basename(notePath, extname(notePath)).toLowerCase();
-    if (this.titleIndex.get(fileName) === notePath) {
-      this.titleIndex.delete(fileName);
-    }
-  }
-
-  /**
-   * Recompute all backlinks from scratch (used after incremental updates).
-   */
-  private resolveAllBacklinks(): void {
-    // Clear all backlinks
-    for (const node of this.nodes.values()) {
-      node.inLinks.clear();
-    }
-    // Recompute
-    this.resolveLinks();
-  }
-
-  // ─── Persistence ─────────────────────────────────────────────────────
-
-  /**
-   * Save the graph index to disk for fast restart.
-   */
-  async saveToDisk(graphIndexFile: string): Promise<void> {
-    const persistedNodes: PersistedGraphNode[] = [];
-    for (const [path, node] of this.nodes) {
-      persistedNodes.push({
-        path,
-        title: node.title,
-        tags: node.tags,
-        headings: node.headings,
-        bodySnippet: node.bodySnippet,
-        frontmatter: node.frontmatter,
-        rawOutLinks: this.rawOutLinks.get(path) ?? [],
-        lastModified: this.fileMtimes.get(path) ?? 0,
-      });
-    }
-
-    const data: PersistedGraph = {
-      version: 2,
-      builtAt: this._lastIndexed.toISOString(),
-      nodes: persistedNodes,
-    };
-
-    const fullPath = join(this.vaultPath, graphIndexFile);
-    await writeFile(fullPath, JSON.stringify(data), "utf-8");
-    console.error(`[OIL] Graph index saved: ${persistedNodes.length} nodes.`);
-  }
-
-  /**
-   * Load the graph index from disk. Returns true if loaded successfully.
-   */
-  async loadFromDisk(graphIndexFile: string): Promise<boolean> {
+  private async updateNoteUnlocked(notePath: string): Promise<void> {
+    const normalizedPath = normalizeVaultPath(notePath);
+    if (await this.isNoteCurrent(normalizedPath)) return;
+    const previousState = this._state;
+    this._building = true;
+    this._state = "reconciling";
     try {
-      const fullPath = join(this.vaultPath, graphIndexFile);
+      const nodes = new Map(this.snapshot.nodes);
+      const rawLinks = cloneRawLinks(this.snapshot.rawLinks);
+      const issues = this.snapshot.issues.filter((issue) => issue.path !== normalizedPath);
+      nodes.delete(normalizedPath);
+      rawLinks.delete(normalizedPath);
+      await this.readSourceNode(normalizedPath, nodes, rawLinks, issues);
+      this.publish(nodes, rawLinks, issues);
+      this._reconciledAt = new Date();
+      this._state = previousState === "stale" ? "stale" : "current";
+    } catch (error) {
+      this._state = this.snapshot.nodes.size > 0 ? "stale" : "failed";
+      throw error;
+    } finally {
+      this._building = false;
+    }
+  }
+
+  /** Queue a deletion alongside note updates from writes and the watcher. */
+  async deleteNote(notePath: string): Promise<void> {
+    await this.withMutation(async () => {
+      this.removeNote(notePath);
+    });
+  }
+
+  /** True when the on-disk source already matches the published catalog node. */
+  async isNoteCurrent(notePath: string): Promise<boolean> {
+    const normalizedPath = normalizeVaultPath(notePath);
+    const existing = this.snapshot.nodes.get(normalizedPath);
+    if (!existing) return false;
+    try {
+      const fullPath = join(this.vaultPath, normalizedPath);
+      const fileStats = await stat(fullPath);
+      if (
+        Math.abs(existing.sourceMtimeMs - fileStats.mtimeMs) > 1
+        || existing.sourceSize !== fileStats.size
+      ) return false;
       const raw = await readFile(fullPath, "utf-8");
-      const data: PersistedGraph = JSON.parse(raw);
-
-      if (data.version !== 1 && data.version !== 2) {
-        console.error("[OIL] Graph index version mismatch, will rebuild.");
-        return false;
-      }
-
-      // Validate persisted shape before trusting it
-      if (!Array.isArray(data.nodes)) {
-        console.error("[OIL] Graph index corrupt: nodes is not an array, will rebuild.");
-        return false;
-      }
-      for (const pn of data.nodes) {
-        if (typeof pn.path !== "string" || typeof pn.title !== "string" || !Array.isArray(pn.tags)) {
-          console.error("[OIL] Graph index corrupt: invalid node shape, will rebuild.");
-          return false;
-        }
-      }
-
-      this.nodes.clear();
-      this.tagIndex.clear();
-      this.titleIndex.clear();
-      this.rawOutLinks.clear();
-      this.fileMtimes.clear();
-
-      for (const pn of data.nodes) {
-        const node: GraphNode = {
-          path: pn.path,
-          title: pn.title,
-          tags: pn.tags,
-          headings: pn.headings ?? [],
-          bodySnippet: pn.bodySnippet ?? "",
-          frontmatter: pn.frontmatter,
-          outLinks: new Set(pn.rawOutLinks), // Will be resolved below
-          inLinks: new Set(),
-        };
-
-        this.nodes.set(pn.path, node);
-        this.rawOutLinks.set(pn.path, pn.rawOutLinks);
-        this.fileMtimes.set(pn.path, pn.lastModified);
-        this.titleIndex.set(pn.title.toLowerCase(), pn.path);
-        const fileName = basename(pn.path, extname(pn.path));
-        this.titleIndex.set(fileName.toLowerCase(), pn.path);
-
-        for (const tag of pn.tags) {
-          let paths = this.tagIndex.get(tag);
-          if (!paths) {
-            paths = new Set();
-            this.tagIndex.set(tag, paths);
-          }
-          paths.add(pn.path);
-        }
-      }
-
-      // Resolve wikilinks → paths and compute backlinks
-      this.resolveLinks();
-
-      this._lastIndexed = new Date(data.builtAt);
-      console.error(`[OIL] Graph index loaded from disk: ${this.nodes.size} nodes.`);
-      return true;
+      return existing.contentHash === `sha256:${sha256(raw)}`;
     } catch {
       return false;
     }
   }
 
-  /**
-   * Incremental rebuild: load from disk, then re-index only notes whose
-   * mtime has changed, plus any new notes. Removes deleted notes.
-   * Returns the number of notes that were re-indexed.
-   */
+  removeNote(notePath: string): void {
+    const normalizedPath = normalizeVaultPath(notePath);
+    if (!this.snapshot.nodes.has(normalizedPath)) return;
+    const nodes = new Map(this.snapshot.nodes);
+    const rawLinks = cloneRawLinks(this.snapshot.rawLinks);
+    nodes.delete(normalizedPath);
+    rawLinks.delete(normalizedPath);
+    const issues = this.snapshot.issues.filter((issue) => issue.path !== normalizedPath);
+    this.publish(nodes, rawLinks, issues);
+    this._reconciledAt = new Date();
+    if (this._state !== "stale") this._state = "current";
+  }
+
+  async saveToDisk(graphIndexFile: string): Promise<void> {
+    const nodes: PersistedCatalogNode[] = [...this.snapshot.nodes.values()]
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((node) => ({
+        path: node.path,
+        nodeId: node.nodeId,
+        title: node.title,
+        titleSource: node.titleSource,
+        description: node.description,
+        descriptionSource: node.descriptionSource,
+        type: node.type,
+        typeSource: node.typeSource,
+        aliases: node.aliases,
+        ...(node.explicitId ? { explicitId: node.explicitId } : {}),
+        tags: node.tags,
+        headings: node.headings,
+        bodySnippet: node.bodySnippet,
+        bodyText: node.bodyText,
+        wordCount: node.wordCount,
+        frontmatter: node.frontmatter,
+        rawLinks: this.snapshot.rawLinks.get(node.path) ?? [],
+        warnings: node.warnings,
+        warningDetails: node.warningDetails,
+        readiness: node.readiness,
+        sourceMtimeMs: node.sourceMtimeMs,
+        sourceSize: node.sourceSize,
+        contentHash: node.contentHash,
+        frontmatterParsed: node.frontmatterParsed,
+      }));
+
+    const data: PersistedCatalog = {
+      version: CATALOG_FORMAT_VERSION,
+      builtAt: this.snapshot.builtAt.toISOString(),
+      generation: this.snapshot.generation,
+      extractionProfile: this.extractionProfile,
+      issues: this.snapshot.issues,
+      nodes,
+    };
+
+    const fullPath = join(this.vaultPath, graphIndexFile);
+    const tempPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile(tempPath, JSON.stringify(data), "utf-8");
+    await rename(tempPath, fullPath);
+    this._persistedSnapshotValid = true;
+    console.error(`[OIL] Catalog snapshot saved: ${nodes.length} nodes.`);
+  }
+
+  async loadFromDisk(graphIndexFile: string): Promise<boolean> {
+    try {
+      const fullPath = join(this.vaultPath, graphIndexFile);
+      const data = JSON.parse(await readFile(fullPath, "utf-8")) as Partial<PersistedCatalog>;
+      const profile = this.extractionProfile;
+      if (
+        data.version !== CATALOG_FORMAT_VERSION
+        || !data.extractionProfile
+        || data.extractionProfile.extractorVersion !== profile.extractorVersion
+        || data.extractionProfile.configFingerprint !== profile.configFingerprint
+        || !Array.isArray(data.nodes)
+      ) {
+        this._persistedSnapshotValid = false;
+        return false;
+      }
+
+      const nodes = new Map<string, GraphNode>();
+      const rawLinks = new Map<string, RelationshipEdge[]>();
+      for (const persisted of data.nodes) {
+        if (!isPersistedNode(persisted)) {
+          this._persistedSnapshotValid = false;
+          return false;
+        }
+        const node: GraphNode = {
+          path: persisted.path,
+          nodeId: persisted.nodeId,
+          title: persisted.title,
+          titleSource: persisted.titleSource,
+          description: persisted.description,
+          descriptionSource: persisted.descriptionSource,
+          type: persisted.type,
+          typeSource: persisted.typeSource,
+          aliases: persisted.aliases ?? [],
+          ...(persisted.explicitId ? { explicitId: persisted.explicitId } : {}),
+          tags: persisted.tags,
+          headings: persisted.headings ?? [],
+          bodySnippet: persisted.bodySnippet ?? persisted.bodyText.slice(0, 10_000),
+          bodyText: persisted.bodyText,
+          chunks: chunkMarkdown(persisted.bodyText),
+          wordCount: persisted.wordCount,
+          frontmatter: persisted.frontmatter,
+          outLinks: new Set<string>(),
+          inLinks: new Set<string>(),
+          links: [],
+          warnings: persisted.warnings ?? [],
+          warningDetails: persisted.warningDetails ?? [],
+          readiness: persisted.readiness ?? ["indexed"],
+          sourceMtimeMs: persisted.sourceMtimeMs,
+          sourceSize: persisted.sourceSize,
+          contentHash: persisted.contentHash,
+          frontmatterParsed: persisted.frontmatterParsed,
+        };
+        nodes.set(node.path, node);
+        rawLinks.set(node.path, persisted.rawLinks ?? []);
+      }
+
+      this.publish(
+        nodes,
+        rawLinks,
+        data.issues ?? [],
+        data.generation ?? this.nextGeneration(),
+        data.builtAt ? new Date(data.builtAt) : new Date(),
+      );
+      this._persistedSnapshotValid = true;
+      this._state = "reconciling";
+      console.error(`[OIL] Catalog snapshot loaded: ${nodes.size} nodes; reconciliation required.`);
+      return true;
+    } catch {
+      this._persistedSnapshotValid = false;
+      return false;
+    }
+  }
+
   async buildIncremental(graphIndexFile: string): Promise<number> {
     this._building = true;
-
-    const loaded = await this.loadFromDisk(graphIndexFile);
-    if (!loaded) {
-      // No persisted index — do a full build
-      await this.build();
-      await this.saveToDisk(graphIndexFile);
-      return this.nodes.size;
-    }
-
-    const vaultNotes = new Set(await listAllNotes(this.vaultPath));
-    let reindexed = 0;
-
-    // Remove notes that no longer exist in the vault
-    for (const path of [...this.nodes.keys()]) {
-      if (!vaultNotes.has(path)) {
-        this.removeNote(path);
-        reindexed++;
-      }
-    }
-
-    // Check each vault note against persisted mtime
-    for (const notePath of vaultNotes) {
-      const fullPath = join(this.vaultPath, notePath);
-      let currentMtime: number;
-      try {
-        const fileStat = await stat(fullPath);
-        currentMtime = fileStat.mtimeMs;
-      } catch {
-        continue; // file disappeared
+    this._state = "reconciling";
+    try {
+      if (this.snapshot.nodes.size === 0) {
+        const loaded = await this.loadFromDisk(graphIndexFile);
+        if (!loaded) {
+          await this.build();
+          await this.saveToDisk(graphIndexFile);
+          return this.nodeCount;
+        }
       }
 
-      const cachedMtime = this.fileMtimes.get(notePath);
-      if (cachedMtime === undefined || Math.abs(currentMtime - cachedMtime) > 1) {
-        // Note is new or changed — re-index it
-        this.removeNote(notePath);
-        await this.indexNote(notePath);
-        reindexed++;
+      const vaultNotes = new Set((await listAllNotes(this.vaultPath)).map(normalizeVaultPath));
+      const nodes = new Map(this.snapshot.nodes);
+      const rawLinks = cloneRawLinks(this.snapshot.rawLinks);
+      const issues = [...this.snapshot.issues];
+      let reindexed = 0;
+
+      for (const path of [...nodes.keys()]) {
+        if (!vaultNotes.has(path)) {
+          nodes.delete(path);
+          rawLinks.delete(path);
+          reindexed++;
+        }
       }
-    }
 
-    if (reindexed > 0) {
-      // Re-resolve all links since graph topology may have changed
-      this.resolveAllBacklinks();
-      this._lastIndexed = new Date();
-      await this.saveToDisk(graphIndexFile);
-      console.error(`[OIL] Incremental rebuild: ${reindexed} note(s) updated.`);
-    } else {
-      console.error("[OIL] Graph index up to date — no changes detected.");
-    }
+      for (const notePath of [...vaultNotes].sort()) {
+        const fullPath = join(this.vaultPath, notePath);
+        let fileStats;
+        try {
+          fileStats = await stat(fullPath);
+        } catch {
+          continue;
+        }
+        const existing = nodes.get(notePath);
+        if (
+          !existing
+          || Math.abs(existing.sourceMtimeMs - fileStats.mtimeMs) > 1
+          || existing.sourceSize !== fileStats.size
+        ) {
+          nodes.delete(notePath);
+          rawLinks.delete(notePath);
+          removeIssuesForPath(issues, notePath);
+          await this.readSourceNode(notePath, nodes, rawLinks, issues, fileStats);
+          reindexed++;
+        }
+      }
 
-    this._building = false;
-    return reindexed;
+      if (reindexed > 0) {
+        this.publish(nodes, rawLinks, issues);
+        await this.saveToDisk(graphIndexFile);
+      }
+      this._reconciledAt = new Date();
+      this._state = "current";
+      console.error(`[OIL] Catalog reconciliation complete: ${reindexed} note(s) changed.`);
+      return reindexed;
+    } catch (error) {
+      this._state = this.snapshot.nodes.size > 0 ? "stale" : "failed";
+      throw error;
+    } finally {
+      this._building = false;
+    }
   }
 
-  // ─── Graph Queries ──────────────────────────────────────────────────────
-
-  /**
-   * Get all notes that link TO a given note (backlinks).
-   */
   getBacklinks(notePath: string): NoteRef[] {
-    const node = this.nodes.get(notePath);
+    const node = this.snapshot.nodes.get(normalizeVaultPath(notePath));
     if (!node) return [];
-    return [...node.inLinks]
-      .map((p) => this.toNoteRef(p))
-      .filter((r): r is NoteRef => r !== null);
+    return [...node.inLinks].sort().map((path) => this.toNoteRef(path)).filter(isNoteRef);
   }
 
-  /**
-   * Get all notes linked FROM a given note (forward links).
-   */
   getForwardLinks(notePath: string): NoteRef[] {
-    const node = this.nodes.get(notePath);
+    const node = this.snapshot.nodes.get(normalizeVaultPath(notePath));
     if (!node) return [];
-    return [...node.outLinks]
-      .map((p) => this.toNoteRef(p))
-      .filter((r): r is NoteRef => r !== null);
+    return [...node.outLinks].sort().map((path) => this.toNoteRef(path)).filter(isNoteRef);
   }
 
-  /**
-   * Get graph neighbours up to N hops, with optional filters.
-   */
   getRelatedNotes(
     notePath: string,
-    hops: number = 2,
-    filter?: {
-      tags?: string[];
-      folder?: string;
-      frontmatter?: Record<string, unknown>;
-    },
+    hops = 2,
+    filter?: { tags?: string[]; folder?: string; frontmatter?: Record<string, unknown> },
   ): NoteRef[] {
-    const visited = new Set<string>();
-    visited.add(notePath);
+    const origin = normalizeVaultPath(notePath);
+    const visited = new Set<string>([origin]);
+    let frontier = new Set<string>([origin]);
 
-    let frontier = new Set<string>([notePath]);
-
-    for (let hop = 0; hop < hops; hop++) {
-      const nextFrontier = new Set<string>();
+    for (let hop = 0; hop < Math.max(0, hops); hop++) {
+      const next = new Set<string>();
       for (const current of frontier) {
-        const node = this.nodes.get(current);
+        const node = this.snapshot.nodes.get(current);
         if (!node) continue;
-
         for (const linked of [...node.outLinks, ...node.inLinks]) {
           if (!visited.has(linked)) {
             visited.add(linked);
-            nextFrontier.add(linked);
+            next.add(linked);
           }
         }
       }
-      frontier = nextFrontier;
+      frontier = next;
+      if (frontier.size === 0) break;
     }
+    visited.delete(origin);
 
-    // Remove the origin note
-    visited.delete(notePath);
-
-    // Apply filters
-    let results = [...visited]
-      .map((p) => this.nodes.get(p))
-      .filter((n): n is GraphNode => n !== undefined);
-
+    let nodes = [...visited]
+      .map((path) => this.snapshot.nodes.get(path))
+      .filter((node): node is GraphNode => Boolean(node));
     if (filter?.tags?.length) {
-      results = results.filter((n) =>
-        filter.tags!.some((t) => n.tags.includes(t)),
-      );
+      nodes = nodes.filter((node) => filter.tags!.some((tag) => node.tags.includes(tag)));
     }
-    if (filter?.folder) {
-      results = results.filter((n) => n.path.startsWith(filter.folder!));
-    }
+    if (filter?.folder) nodes = nodes.filter((node) => node.path.startsWith(filter.folder!));
     if (filter?.frontmatter) {
-      results = results.filter((n) =>
-        Object.entries(filter.frontmatter!).every(
-          ([k, v]) => n.frontmatter[k] === v,
-        ),
-      );
+      nodes = nodes.filter((node) => Object.entries(filter.frontmatter!).every(
+        ([key, value]) => frontmatterEquals(node.frontmatter[key], value),
+      ));
     }
-
-    return results.map((n) => ({
-      path: n.path,
-      title: n.title,
-      tags: n.tags,
-      ref: n.path,
-    }));
+    return nodes.sort((a, b) => a.path.localeCompare(b.path)).map((node) => this.toNoteRef(node.path)!);
   }
 
-  /**
-   * Get notes by tag.
-   */
   getNotesByTag(tag: string): NoteRef[] {
-    const paths = this.tagIndex.get(tag);
+    const paths = this.snapshot.tagIndex.get(tag);
     if (!paths) return [];
-    return [...paths]
-      .map((p) => this.toNoteRef(p))
-      .filter((r): r is NoteRef => r !== null);
+    return [...paths].sort().map((path) => this.toNoteRef(path)).filter(isNoteRef);
   }
 
-  /**
-   * Get notes in a specific folder (prefix match).
-   */
   getNotesByFolder(folder: string): NoteRef[] {
-    const results: NoteRef[] = [];
-    for (const [path, node] of this.nodes) {
-      if (path.startsWith(folder)) {
-        results.push({ path: node.path, title: node.title, tags: node.tags, ref: node.path });
-      }
-    }
-    return results;
+    return [...this.snapshot.nodes.values()]
+      .filter((node) => node.path.startsWith(folder))
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .map((node) => this.toNoteRef(node.path)!);
   }
 
-  /**
-   * Get the GraphNode for a path (or undefined).
-   */
   getNode(notePath: string): GraphNode | undefined {
-    return this.nodes.get(notePath);
+    return this.snapshot.nodes.get(normalizeVaultPath(notePath));
   }
 
-  /**
-   * Look up a note path by title or filename.
-   */
   resolveTitle(title: string): string | undefined {
-    return this.titleIndex.get(title.toLowerCase());
+    const candidates = this.resolveTitleCandidates(title);
+    return candidates.length === 1 ? candidates[0] : undefined;
   }
 
-  /**
-   * Get overall graph statistics.
-   */
+  resolveTitleCandidates(title: string): string[] {
+    return [...(this.snapshot.titleIndex.get(normalizeLookup(title)) ?? [])].sort();
+  }
+
+  getObservedSchema(): ObservedFieldSchema[] {
+    return [...this.snapshot.observedSchema.values()]
+      .map((entry) => ({ ...entry, variants: [...entry.variants], examples: [...entry.examples] }))
+      .sort((a, b) => b.nodeCount - a.nodeCount || a.key.localeCompare(b.key));
+  }
+
+  resolveFrontmatterField(
+    requestedKey: string,
+    mode: "logical" | "raw" = "logical",
+  ): { known: boolean; key: string; variants: string[]; aliases: string[] } {
+    const requested = requestedKey.split(".").map(normalizeFieldKey).join(".");
+    const logicalAliases = this.configuredFieldAliases();
+    const resolved = mode === "logical" ? logicalAliases.get(requested) ?? requested : requested;
+    const schema = this.snapshot.observedSchema.get(resolved);
+    const configured = [...logicalAliases.values()].includes(resolved);
+    return {
+      known: Boolean(schema || configured),
+      key: resolved,
+      variants: schema?.variants ?? [],
+      aliases: schema?.aliases ?? [],
+    };
+  }
+
+  getFrontmatterEntries(key: string): FrontmatterIndexEntry[] {
+    return [...(this.snapshot.frontmatterIndex.get(key) ?? [])];
+  }
+
+  suggestFrontmatterFields(requestedKey: string, limit = 5): ObservedFieldSchema[] {
+    const requested = requestedKey.split(".").map(normalizeFieldKey).join(".");
+    return this.getObservedSchema()
+      .map((schema) => ({ schema, distance: levenshtein(requested, schema.key) }))
+      .sort((a, b) => a.distance - b.distance || b.schema.nodeCount - a.schema.nodeCount)
+      .slice(0, limit)
+      .map(({ schema }) => schema);
+  }
+
+  getCatalogIssues(): CatalogIssue[] {
+    return this.snapshot.issues.slice(0, 100);
+  }
+
+  getWarningCounts(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const node of this.snapshot.nodes.values()) {
+      for (const warning of new Set(node.warnings)) counts[warning] = (counts[warning] ?? 0) + 1;
+    }
+    for (const issue of this.snapshot.issues) counts[issue.code] = (counts[issue.code] ?? 0) + 1;
+    return counts;
+  }
+
+  getUnresolvedLinks(notePath: string): RelationshipEdge[] {
+    return (this.getNode(notePath)?.links ?? []).filter((edge) => edge.status !== "resolved");
+  }
+
   getStats(): GraphStats {
     let linkCount = 0;
-    for (const node of this.nodes.values()) {
-      linkCount += node.outLinks.size;
-    }
-
+    for (const node of this.snapshot.nodes.values()) linkCount += node.outLinks.size;
     return {
-      noteCount: this.nodes.size,
+      noteCount: this.snapshot.nodes.size,
       linkCount,
-      tagCount: this.tagIndex.size,
+      tagCount: this.snapshot.tagIndex.size,
       topTags: this.getTopTags(20),
       mostLinkedNotes: this.getMostLinkedNotes(10),
     };
   }
 
-  /**
-   * Get the top N tags by usage count.
-   */
-  getTopTags(n: number): TagCount[] {
-    const tagCounts: TagCount[] = [];
-    for (const [tag, paths] of this.tagIndex) {
-      tagCounts.push({ tag, count: paths.size });
-    }
-    return tagCounts.sort((a, b) => b.count - a.count).slice(0, n);
+  getTopTags(limit: number): TagCount[] {
+    return [...this.snapshot.tagIndex.entries()]
+      .map(([tag, paths]) => ({ tag, count: paths.size }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+      .slice(0, limit);
   }
 
-  /**
-   * Get the N most-linked notes (highest in-degree).
-   */
-  getMostLinkedNotes(n: number): NoteRef[] {
-    const entries = [...this.nodes.values()]
-      .sort((a, b) => b.inLinks.size - a.inLinks.size)
-      .slice(0, n);
-
-    return entries.map((node) => ({
-      path: node.path,
-      title: node.title,
-      tags: node.tags,
-      ref: node.path,
-    }));
+  getMostLinkedNotes(limit: number): NoteRef[] {
+    return [...this.snapshot.nodes.values()]
+      .sort((a, b) => b.inLinks.size - a.inLinks.size || a.path.localeCompare(b.path))
+      .slice(0, limit)
+      .map((node) => this.toNoteRef(node.path)!);
   }
 
-  // ─── Helpers ────────────────────────────────────────────────────────────
-
-  private extractTitle(notePath: string, content: string): string {
-    const h1Match = content.match(/^#\s+(.+)$/m);
-    if (h1Match) return h1Match[1].trim();
-    return basename(notePath, extname(notePath));
-  }
-
-  private extractTags(
-    frontmatter: Record<string, unknown>,
-    content: string,
-  ): string[] {
-    const tags = new Set<string>();
-
-    const fmTags = frontmatter.tags;
-    if (Array.isArray(fmTags)) {
-      for (const t of fmTags) {
-        if (typeof t === "string") tags.add(t);
+  private async readSourceNode(
+    notePath: string,
+    nodes: Map<string, GraphNode>,
+    rawLinks: Map<string, RelationshipEdge[]>,
+    issues: CatalogIssue[],
+    knownStats?: { mtimeMs: number; size: number },
+  ): Promise<void> {
+    const normalizedPath = normalizeVaultPath(notePath);
+    try {
+      const fullPath = join(this.vaultPath, normalizedPath);
+      const [raw, fileStats] = await Promise.all([
+        readFile(fullPath, "utf-8"),
+        knownStats ? Promise.resolve(knownStats) : stat(fullPath),
+      ]);
+      const parsed = parseCatalogNode(normalizedPath, raw, {
+        mtimeMs: fileStats.mtimeMs,
+        size: fileStats.size,
+      }, this.config);
+      nodes.set(normalizedPath, parsed.node);
+      rawLinks.set(normalizedPath, parsed.rawLinks);
+      if (!parsed.node.frontmatterParsed) {
+        issues.push({
+          path: normalizedPath,
+          code: "FRONTMATTER_PARSE_ERROR",
+          message: parsed.node.warningDetails.find((warning) => warning.code === "FRONTMATTER_PARSE_ERROR")?.message
+            ?? "Frontmatter could not be parsed.",
+        });
       }
-    } else if (typeof fmTags === "string") {
-      tags.add(fmTags);
+    } catch (error) {
+      issues.push({
+        path: normalizedPath,
+        code: "UNREADABLE_FILE",
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
-
-    const inlineTagRegex = /(?:^|\s)#([a-zA-Z][\w-/]*)/g;
-    let match;
-    while ((match = inlineTagRegex.exec(content)) !== null) {
-      tags.add(match[1]);
-    }
-
-    return [...tags];
   }
 
-  /**
-   * Extract markdown headings (## and ###) from content for search indexing.
-   * Skips the H1 (used as title) and stops at depth 3 to avoid noise.
-   */
-  private extractHeadings(content: string): string[] {
-    const headings: string[] = [];
-    const headingRegex = /^#{2,3}\s+(.+)$/gm;
-    let match;
-    while ((match = headingRegex.exec(content)) !== null) {
-      headings.push(match[1].trim());
+  private publish(
+    sourceNodes: Map<string, GraphNode>,
+    rawLinks: Map<string, RelationshipEdge[]>,
+    issues: CatalogIssue[],
+    generation = this.nextGeneration(),
+    builtAt = new Date(),
+  ): void {
+    const nodes = new Map<string, GraphNode>();
+    for (const [path, source] of sourceNodes) nodes.set(path, cloneForDerivation(source));
+
+    const titleIndex = buildTitleIndex(nodes);
+    applyDuplicateIdWarnings(nodes);
+    resolveRelationships(nodes, rawLinks, titleIndex);
+
+    const tagIndex = new Map<string, Set<string>>();
+    const frontmatterIndex = new Map<string, FrontmatterIndexEntry[]>();
+    const observedSchema = buildObservedSchema(nodes, this.configuredFieldAliases());
+    for (const node of nodes.values()) {
+      for (const tag of node.tags) addToSetMap(tagIndex, tag, node.path);
+      for (const entry of flattenFrontmatter(node.path, node.frontmatter)) {
+        const bucket = frontmatterIndex.get(entry.key) ?? [];
+        bucket.push(entry);
+        frontmatterIndex.set(entry.key, bucket);
+      }
     }
-    return headings;
+    for (const entries of frontmatterIndex.values()) entries.sort((a, b) => a.path.localeCompare(b.path));
+
+    this.snapshot = {
+      nodes,
+      tagIndex,
+      titleIndex,
+      rawLinks: cloneRawLinks(rawLinks),
+      fileMtimes: new Map([...nodes].map(([path, node]) => [path, node.sourceMtimeMs])),
+      frontmatterIndex,
+      observedSchema,
+      issues: dedupeIssues(issues),
+      generation,
+      builtAt,
+    };
+  }
+
+  private configuredFieldAliases(): Map<string, string> {
+    const schema = this.config.frontmatterSchema;
+    return new Map<string, string>([
+      ["customer", normalizeFieldKey(schema.customerField)],
+      ["tags", normalizeFieldKey(schema.tagsField)],
+      ["date", normalizeFieldKey(schema.dateField)],
+      ["status", normalizeFieldKey(schema.statusField)],
+      ["project", normalizeFieldKey(schema.projectField)],
+      ["tpid", normalizeFieldKey(schema.tpidField)],
+      ["accountid", normalizeFieldKey(schema.accountidField)],
+      ["title", normalizeFieldKey(schema.titleField)],
+      ["description", normalizeFieldKey(schema.descriptionField)],
+      ["type", normalizeFieldKey(schema.typeField)],
+      ["timestamp", normalizeFieldKey(schema.timestampField)],
+      ["id", normalizeFieldKey(schema.idField)],
+    ]);
+  }
+
+  private nextGeneration(): string {
+    this.generationSequence++;
+    return `gen_${Date.now().toString(36)}_${this.generationSequence.toString(36)}`;
+  }
+
+  private async withMutation<T>(work: () => Promise<T>): Promise<T> {
+    const prior = this.mutationTail;
+    let release: (() => void) | undefined;
+    this.mutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    try {
+      return await work();
+    } finally {
+      release?.();
+    }
   }
 
   private toNoteRef(path: string): NoteRef | null {
-    const node = this.nodes.get(path);
+    const node = this.snapshot.nodes.get(path);
     if (!node) return null;
     return { path: node.path, title: node.title, tags: node.tags, ref: node.path };
   }
+}
+
+function emptySnapshot(): CatalogSnapshot {
+  return {
+    nodes: new Map(),
+    tagIndex: new Map(),
+    titleIndex: new Map(),
+    rawLinks: new Map(),
+    fileMtimes: new Map(),
+    frontmatterIndex: new Map(),
+    observedSchema: new Map(),
+    issues: [],
+    generation: EMPTY_GENERATION,
+    builtAt: new Date(0),
+  };
+}
+
+function cloneForDerivation(node: GraphNode): GraphNode {
+  const warningDetails = node.warningDetails.filter(
+    (warning) => !["AMBIGUOUS_LINK", "BROKEN_LINK", "DUPLICATE_ID"].includes(warning.code),
+  );
+  const warnings = warningDetails.map((warning) => warning.code);
+  return {
+    ...node,
+    aliases: [...node.aliases],
+    tags: [...node.tags],
+    headings: [...node.headings],
+    chunks: node.chunks.map((chunk) => ({ ...chunk })),
+    frontmatter: { ...node.frontmatter },
+    outLinks: new Set<string>(),
+    inLinks: new Set<string>(),
+    links: [],
+    warnings,
+    warningDetails,
+    readiness: node.readiness.filter((facet) => facet !== "connected"),
+  };
+}
+
+function cloneRawLinks(source: Map<string, RelationshipEdge[]>): Map<string, RelationshipEdge[]> {
+  return new Map([...source].map(([path, edges]) => [
+    path,
+    edges.map((edge) => ({ ...edge, ...(edge.candidates ? { candidates: [...edge.candidates] } : {}) })),
+  ]));
+}
+
+function buildTitleIndex(nodes: Map<string, GraphNode>): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+  for (const node of nodes.values()) {
+    const values = [
+      node.title,
+      basename(node.path, extname(node.path)),
+      node.nodeId,
+      ...node.aliases,
+      ...(node.explicitId ? [node.explicitId] : []),
+    ];
+    for (const value of values) addToSetMap(index, normalizeLookup(value), node.path);
+  }
+  return index;
+}
+
+function applyDuplicateIdWarnings(nodes: Map<string, GraphNode>): void {
+  const ids = new Map<string, GraphNode[]>();
+  for (const node of nodes.values()) {
+    if (!node.explicitId) continue;
+    const bucket = ids.get(node.explicitId.toLowerCase()) ?? [];
+    bucket.push(node);
+    ids.set(node.explicitId.toLowerCase(), bucket);
+  }
+  for (const [id, bucket] of ids) {
+    if (bucket.length < 2) continue;
+    const candidates = bucket.map((node) => node.path).sort();
+    for (const node of bucket) addWarning(node, {
+      code: "DUPLICATE_ID",
+      message: `Explicit ID ${id} is used by multiple notes.`,
+      candidates,
+    });
+  }
+}
+
+function resolveRelationships(
+  nodes: Map<string, GraphNode>,
+  rawLinks: Map<string, RelationshipEdge[]>,
+  titleIndex: Map<string, Set<string>>,
+): void {
+  for (const [sourcePath, node] of nodes) {
+    const resolvedEdges: RelationshipEdge[] = [];
+    for (const rawEdge of rawLinks.get(sourcePath) ?? []) {
+      const edge = { ...rawEdge };
+      const direct = linkPathCandidates(sourcePath, edge.target).find((candidate) => nodes.has(candidate));
+      let candidates: string[] = [];
+      if (direct) {
+        candidates = [direct];
+      } else {
+        const targetLookup = normalizeLookup(basename(edge.target, extname(edge.target)));
+        const global = [...(titleIndex.get(targetLookup) ?? [])].sort();
+        const local = global.filter((candidate) => dirname(candidate) === dirname(sourcePath));
+        candidates = local.length === 1 ? local : global;
+      }
+
+      if (candidates.length === 1) {
+        edge.status = "resolved";
+        edge.resolvedPath = candidates[0];
+        node.outLinks.add(candidates[0]);
+        nodes.get(candidates[0])?.inLinks.add(sourcePath);
+      } else if (candidates.length > 1) {
+        edge.status = "ambiguous";
+        edge.candidates = candidates;
+        addWarning(node, {
+          code: "AMBIGUOUS_LINK",
+          message: `Link target ${edge.target} resolves to multiple notes.`,
+          target: edge.target,
+          candidates,
+        });
+      } else {
+        edge.status = "broken";
+        addWarning(node, {
+          code: "BROKEN_LINK",
+          message: `Link target ${edge.target} could not be resolved.`,
+          target: edge.target,
+        });
+      }
+      resolvedEdges.push(edge);
+    }
+    node.links = resolvedEdges;
+  }
+
+  for (const node of nodes.values()) {
+    if ((node.outLinks.size > 0 || node.inLinks.size > 0) && !node.readiness.includes("connected")) {
+      node.readiness.push("connected");
+    }
+  }
+}
+
+function buildObservedSchema(
+  nodes: Map<string, GraphNode>,
+  configuredAliases: Map<string, string>,
+): Map<string, ObservedFieldSchema> {
+  interface Builder {
+    variants: Set<string>;
+    aliases: Set<string>;
+    nodes: Set<string>;
+    types: ObservedFieldSchema["types"];
+    folders: Record<string, number>;
+    examples: unknown[];
+  }
+  const builders = new Map<string, Builder>();
+  for (const node of nodes.values()) {
+    for (const entry of flattenFrontmatter(node.path, node.frontmatter)) {
+      const builder = builders.get(entry.key) ?? {
+        variants: new Set<string>(),
+        aliases: new Set<string>(),
+        nodes: new Set<string>(),
+        types: {},
+        folders: {},
+        examples: [],
+      };
+      builder.variants.add(entry.rawKey);
+      builder.nodes.add(node.path);
+      builder.types[entry.kind] = (builder.types[entry.kind] ?? 0) + 1;
+      const folder = folderOf(node.path);
+      builder.folders[folder] = (builder.folders[folder] ?? 0) + 1;
+      const example = boundedExample(entry.value);
+      if (builder.examples.length < 5 && !builder.examples.some((value) => JSON.stringify(value) === JSON.stringify(example))) {
+        builder.examples.push(example);
+      }
+      builders.set(entry.key, builder);
+    }
+  }
+
+  for (const [alias, actual] of configuredAliases) {
+    const builder = builders.get(actual);
+    if (builder) builder.aliases.add(alias);
+  }
+
+  const schema = new Map<string, ObservedFieldSchema>();
+  for (const [key, builder] of builders) {
+    const warnings: CatalogWarningCode[] = [];
+    if (builder.variants.size > 1) warnings.push("KEY_VARIANTS");
+    if (Object.keys(builder.types).length > 1) warnings.push("MIXED_VALUE_TYPES");
+    schema.set(key, {
+      key,
+      variants: [...builder.variants].sort(),
+      aliases: [...builder.aliases].sort(),
+      nodeCount: builder.nodes.size,
+      coverage: nodes.size === 0 ? 0 : builder.nodes.size / nodes.size,
+      types: builder.types,
+      folders: Object.fromEntries(Object.entries(builder.folders).sort(([a], [b]) => a.localeCompare(b))),
+      examples: builder.examples,
+      warnings,
+    });
+  }
+  return schema;
+}
+
+function addWarning(node: GraphNode, warning: GraphNode["warningDetails"][number]): void {
+  node.warningDetails.push(warning);
+  if (!node.warnings.includes(warning.code)) node.warnings.push(warning.code);
+}
+
+function boundedExample(value: unknown): unknown {
+  if (typeof value === "string") return value.slice(0, 120);
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+  const serialized = JSON.stringify(value);
+  return serialized.length <= 120 ? value : `${serialized.slice(0, 117)}...`;
+}
+
+function addToSetMap(map: Map<string, Set<string>>, key: string, value: string): void {
+  const bucket = map.get(key) ?? new Set<string>();
+  bucket.add(value);
+  map.set(key, bucket);
+}
+
+function normalizeLookup(value: string): string {
+  return value.trim().toLowerCase().replace(/\\/g, "/");
+}
+
+function frontmatterEquals(actual: unknown, expected: unknown): boolean {
+  if (Array.isArray(actual)) return actual.some((value) => frontmatterEquals(value, expected));
+  if (typeof actual === "string" && typeof expected === "string") {
+    return actual.toLowerCase() === expected.toLowerCase();
+  }
+  return actual === expected;
+}
+
+function isNoteRef(value: NoteRef | null): value is NoteRef {
+  return value !== null;
+}
+
+function removeIssuesForPath(issues: CatalogIssue[], path: string): void {
+  for (let index = issues.length - 1; index >= 0; index--) {
+    if (issues[index].path === path) issues.splice(index, 1);
+  }
+}
+
+function dedupeIssues(issues: CatalogIssue[]): CatalogIssue[] {
+  const seen = new Set<string>();
+  return issues.filter((issue) => {
+    const key = `${issue.path}\u0000${issue.code}\u0000${issue.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function isPersistedNode(value: unknown): value is PersistedCatalogNode {
+  if (!value || typeof value !== "object") return false;
+  const node = value as Partial<PersistedCatalogNode>;
+  return typeof node.path === "string"
+    && typeof node.nodeId === "string"
+    && typeof node.title === "string"
+    && typeof node.bodyText === "string"
+    && Array.isArray(node.tags)
+    && Boolean(node.frontmatter && typeof node.frontmatter === "object")
+    && Array.isArray(node.rawLinks)
+    && typeof node.sourceMtimeMs === "number"
+    && typeof node.sourceSize === "number";
+}
+
+function levenshtein(a: string, b: string): number {
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= a.length; row++) {
+    const current = [row];
+    for (let column = 1; column <= b.length; column++) {
+      current[column] = Math.min(
+        current[column - 1] + 1,
+        previous[column] + 1,
+        previous[column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[b.length];
 }

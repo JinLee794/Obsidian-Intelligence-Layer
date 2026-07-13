@@ -196,7 +196,9 @@ tiers:
 capabilities:
   freshness_model: mtime_ms
   write_audit: true
-  semantic_search: true
+  knowledge_catalog: true
+  full_content_search: true
+  observed_frontmatter_schema: true
   watcher: chokidar
 addressing:
   note_ref: "path#anchor"
@@ -473,7 +475,7 @@ Suggested tiering for OIL's current runtime surface:
 
 - **Tier 0 (current-client optimized):** `get_health`.
 - **Tier 0 (future-compatible, optional):** `list_capabilities`, `describe_tool` once client behavior makes them net-positive.
-- **Tier 1:** `search_vault`, `semantic_search`, `query_frontmatter`, `get_note_metadata`, `read_note_section`, `get_related_entities`, `atomic_append`, `atomic_replace`, `create_note`, `get_agent_log`.
+- **Tier 1:** `search_vault`, `inspect_catalog`, `query_frontmatter`, `get_note_metadata`, `read_note_section`, `get_related_entities`, `atomic_append`, `atomic_replace`, `create_note`, `get_agent_log`.
 - **Tier 2:** `get_customer_context`, `prepare_crm_prefetch`, `check_vault_health`.
 
 This is the balance point for this repository: keep deterministic, state-backed assembly in MCP; keep remember/retrieve policy, summarization, note naming, retry rules, and escalation in the skill.

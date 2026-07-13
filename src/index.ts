@@ -15,19 +15,18 @@ import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
 import { registerDomainTools } from "./tools/domain.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
+import { resolveVaultPath } from "./vault-path.js";
 
 async function main(): Promise<void> {
   // ── Resolve vault path ─────────────────────────────────────────────────
-  const vaultPath = process.env.OBSIDIAN_VAULT_PATH;
-  if (!vaultPath) {
-    console.error(
-      "Error: OBSIDIAN_VAULT_PATH environment variable is required.\n" +
-        "Set it to the absolute path of your Obsidian vault.",
-    );
-    process.exit(1);
-  }
+  const resolvedVault = await resolveVaultPath({
+    envPath: process.env.OBSIDIAN_VAULT_PATH,
+    profileName: process.env.OIL_VAULT_PROFILE,
+  });
+  const vaultPath = resolvedVault.path;
 
-  console.error(`[OIL] Starting — vault: ${vaultPath}`);
+  console.error(`[OIL] Starting — vault: ${vaultPath} (${resolvedVault.source})`);
+  for (const warning of resolvedVault.warnings) console.error(`[OIL] Vault warning: ${warning}`);
 
   // ── 1. Load configuration ──────────────────────────────────────────────
   console.error("[OIL] Loading configuration...");
@@ -35,39 +34,25 @@ async function main(): Promise<void> {
   console.error("[OIL] Configuration loaded.");
 
   // ── 2. Build graph index (with persistence + background indexing) ─────
-  const graph = new GraphIndex(vaultPath);
+  const graph = new GraphIndex(vaultPath, config);
   const graphFile = config.search.graphIndexFile;
-  const bgThreshold = config.search.backgroundIndexThresholdMs;
-
-  const loaded = await graph.loadFromDisk(graphFile);
-  if (loaded) {
-    // Persisted index loaded — start incremental rebuild in background
-    const stats = graph.getStats();
+  console.error("[OIL] Reconciling catalog snapshot...");
+  const startTime = Date.now();
+  let changed: number | null = null;
+  try {
+    changed = await graph.buildIncremental(graphFile);
+  } catch (error) {
+    if (graph.nodeCount === 0) throw error;
     console.error(
-      `[OIL] Graph loaded from disk — ${stats.noteCount} notes. Incremental update in background.`,
-    );
-    setImmediate(async () => {
-      try {
-        await graph.buildIncremental(graphFile);
-      } catch (err) {
-        console.error("[OIL] Background incremental rebuild failed:", err);
-      }
-    });
-  } else {
-    // No persisted index — full build, with background fallback if slow
-    console.error("[OIL] No persisted graph index — full build...");
-    const startTime = Date.now();
-    await graph.build();
-    const elapsed = Date.now() - startTime;
-    const stats = graph.getStats();
-    console.error(
-      `[OIL] Graph index built in ${elapsed}ms — ${stats.noteCount} notes, ${stats.linkCount} links, ${stats.tagCount} tags.`,
-    );
-    // Save to disk for next startup
-    graph.saveToDisk(graphFile).catch((err) =>
-      console.error("[OIL] Failed to save graph index:", err),
+      "[OIL] Catalog reconciliation failed; serving the persisted generation as stale:",
+      error,
     );
   }
+  const elapsed = Date.now() - startTime;
+  const stats = graph.getStats();
+  console.error(
+    `[OIL] Catalog ${graph.indexState} in ${elapsed}ms — ${stats.noteCount} notes, ${stats.linkCount} links, ${changed ?? "unknown"} source change(s).`,
+  );
 
   // ── 3. Initialise session cache ────────────────────────────────────────
   const cache = new SessionCache();
@@ -75,6 +60,7 @@ async function main(): Promise<void> {
   // ── 4. Start file watcher ──────────────────────────────────────────────
   const watcher = new VaultWatcher(vaultPath, graph, cache);
   watcher.start();
+  await watcher.waitUntilReady();
   console.error("[OIL] File watcher started.");
 
   // ── 5. Create MCP server and register tools ────────────────────────────

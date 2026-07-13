@@ -3,10 +3,15 @@ import type { NoteRef } from "./types.js";
 export type ToolErrorCode =
   | "INVALID_INPUT"
   | "NOT_FOUND"
+  | "UNKNOWN_FIELD"
+  | "TYPE_MISMATCH"
+  | "AMBIGUOUS_REF"
   | "CONFLICT"
+  | "INVALID_CURSOR"
   | "LIMIT_EXCEEDED"
   | "CAPABILITY_MISSING"
   | "STALE_INDEX"
+  | "INDEX_UNAVAILABLE"
   | "PERMISSION_DENIED"
   | "INTERNAL_ERROR";
 
@@ -20,6 +25,50 @@ export function jsonResponse(payload: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
   };
+}
+
+/**
+ * Shape deterministic aggregator output to a serialized-character budget.
+ * Ordinary payloads are unchanged; oversized values lose depth/cardinality
+ * before the tool returns LIMIT_EXCEEDED rather than flooding agent context.
+ */
+export function boundedJsonResponse(payload: unknown, maxChars: number) {
+  const raw = JSON.stringify(payload, null, 2);
+  if (raw.length <= maxChars) return jsonResponse(payload);
+
+  for (const limits of [
+    { maxArray: 10, maxString: 240, maxDepth: 8 },
+    { maxArray: 5, maxString: 160, maxDepth: 6 },
+    { maxArray: 3, maxString: 100, maxDepth: 4 },
+  ]) {
+    const shaped = boundValue(payload, limits, 0);
+    if (shaped && typeof shaped === "object" && !Array.isArray(shaped)) {
+      const currentWarnings = (shaped as Record<string, unknown>).warnings;
+      Object.assign(shaped as Record<string, unknown>, {
+        truncated: true,
+        warnings: [
+          ...new Set([
+            ...(Array.isArray(currentWarnings) ? currentWarnings : []),
+            "RESULTS_TRUNCATED",
+          ]),
+        ],
+      });
+    }
+    if (JSON.stringify(shaped, null, 2).length <= maxChars) return jsonResponse(shaped);
+  }
+
+  return jsonResponse({
+    truncated: true,
+    warnings: ["RESULTS_TRUNCATED", "LIMIT_EXCEEDED"],
+    maximum_serialized_chars: maxChars,
+    available_keys: payload && typeof payload === "object" && !Array.isArray(payload)
+      ? Object.keys(payload as Record<string, unknown>).slice(0, 50)
+      : [],
+    agent_guidance: {
+      retryable: true,
+      next_step: "Narrow the request or use catalog search, metadata, and section primitives to retrieve the evidence progressively.",
+    },
+  });
 }
 
 export function errorResponse(
@@ -87,4 +136,27 @@ export function errorCodeFromUnknown(
   }
 
   return fallback;
+}
+
+function boundValue(
+  value: unknown,
+  limits: { maxArray: number; maxString: number; maxDepth: number },
+  depth: number,
+): unknown {
+  if (typeof value === "string") {
+    return value.length > limits.maxString
+      ? `${value.slice(0, Math.max(0, limits.maxString - 3))}...`
+      : value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= limits.maxDepth) return "[truncated]";
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, limits.maxArray)
+      .map((entry) => boundValue(entry, limits, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, child]) => [key, boundValue(child, limits, depth + 1)]),
+  );
 }

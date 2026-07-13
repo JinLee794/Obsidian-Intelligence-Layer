@@ -1,25 +1,20 @@
-# Obsidian Intelligence Layer (OIL) — Spec v0.2
+# Obsidian Intelligence Layer (OIL) — Specifications
 
-> Knowledge Layer for AI Agent Workflows · Draft for Review · March 2026
+> Knowledge Layer for AI Agent Workflows · Drafts for Review
 
 OIL transforms a personal Obsidian vault from passive file storage into an active, queryable knowledge layer — the persistent memory substrate that bridges AI agent workflows across CRM, M365, and other MCP-connected systems. OIL owns the vault; the copilot orchestrates across MCPs.
 
 ---
 
-## Documents
+## Active Documents
 
 | # | Section | Summary |
-|---|---------|---------|
-| 1 | [Executive Summary](./01-executive-summary.md) | What OIL is, why it exists, core design philosophy |
-| 2 | [Problem Statement](./02-problem-statement.md) | What the existing MCP gets wrong, what we actually need |
-| 3 | [Architecture](./03-architecture.md) | System layers, integration map, vault schema, vault protocol phases |
-| 4 | [Core Capabilities](./04-core-capabilities.md) | Graph index, semantic search, session cache, tiered write gate |
-| 5 | [Tool Surface](./05-tool-surface.md) | Full tool reference: orient, retrieve, and write tools (tiered) |
-| 6 | [Configuration](./06-configuration.md) | `oil.config.yaml` schema + skills architecture decision |
-| 7 | [Integration Flows](./07-integration-flows.md) | Pre-call brief, post-call notes, pipeline review, onboarding — worked examples |
-| 8 | [Implementation Roadmap](./08-roadmap.md) | 4-phase build plan + fork strategy for bitbonsai/mcp-obsidian |
-| 9 | [Open Questions](./09-open-questions.md) | Resolved decisions + remaining open questions |
-| 10 | [Success Criteria](./10-success-criteria.md) | How we know it's working |
+| --- | --- | --- |
+| 11 | [Optimized MCP Design](./11-optimized-mcp-design.md) | Read-optimized, atomic-write MCP design and reduced tool surface |
+| 12 | [Agentic Memory Architecture](./12-context-optimization.md) | Stateful substrate + policy skill contract, capability tiers, and context budgets |
+| 13 | [Knowledge Node Catalog](./13-knowledge-node-catalog.md) | OKF-inspired, compatibility-first catalog, frontmatter retrieval, discovery, freshness, and eval contract |
+
+The superseded v0.1 design documents are retained in [`_archive/`](./_archive/) for history.
 
 ---
 

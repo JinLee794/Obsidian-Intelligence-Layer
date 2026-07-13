@@ -53,9 +53,13 @@ describe("core tools — get_health", () => {
     const result = await server.callToolJson("get_health", {});
 
     expect(result.server.name).toBe("obsidian-intelligence-layer");
-    expect(result.server.version).toBe("0.5.2");
+    expect(result.server.version).toBe("0.6.0");
     expect(result.tool_surface.total).toBe(14);
     expect(result.index.note_count).toBeGreaterThan(0);
+    expect(result.index.state).toBe("current");
+    expect(result.index.generation).toMatch(/^gen_/);
+    expect(result.index.extraction_profile.extractorVersion).toBe("knc-1");
+    expect(typeof result.index.warning_counts).toBe("object");
     expect(result.cache.cachedNotes).toBe(0);
     expect(result.watcher.active).toBe(false);
     expect(result.audit.path).toBe("_agent-log/");

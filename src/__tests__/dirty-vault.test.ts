@@ -116,8 +116,10 @@ describe("dirty-vault robustness", () => {
     expect(notes).not.toContain(".obsidian/Ignored.md");
     expect(notes).not.toContain("Attachments/report.pdf");
 
-    expect(graph.getNode("Reference/Broken Frontmatter.md")).toBeUndefined();
-    expect(graph.nodeCount).toBe(5);
+    expect(graph.getNode("Reference/Broken Frontmatter.md")?.warnings).toContain(
+      "FRONTMATTER_PARSE_ERROR",
+    );
+    expect(graph.nodeCount).toBe(6);
     expect(graph.getNode("Customers/Anchor Customer.md")).toBeDefined();
   });
 
