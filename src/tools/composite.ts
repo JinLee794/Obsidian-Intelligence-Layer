@@ -70,9 +70,10 @@ export function registerCompositeTools(
                 .map((g) => `_msp_opportunityid_value eq '${g}'`)
                 .join(" or ")
             : null,
-          account_filter: p.tpid
-            ? `_msp_accountid_value eq '${p.tpid}'`
+          account_filter: p.accountid
+            ? `_msp_accountid_value eq '${p.accountid}'`
             : null,
+          tpid_filter: p.tpid ? `msp_mstopparentid eq '${p.tpid}'` : null,
         },
       }));
 

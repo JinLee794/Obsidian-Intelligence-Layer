@@ -6,7 +6,7 @@
 import { watch, type FSWatcher } from "chokidar";
 import { relative } from "node:path";
 import { isAllowedFile } from "./vault.js";
-import type { GraphIndex } from "./graph.js";
+import { normalizeNotePath, type GraphIndex } from "./graph.js";
 import type { SessionCache } from "./cache.js";
 import { invalidateSearchIndex } from "./search.js";
 
@@ -37,10 +37,13 @@ export class VaultWatcher {
     if (this.watcher) return;
 
     this.watcher = watch(this.vaultPath, {
-      ignored: [
-        /(^|[/\\])\../, // dotfiles/dirs
-        "**/node_modules/**",
-      ],
+      // chokidar 4 dropped glob support, so `ignored` must be a predicate.
+      // It is also handed absolute paths — testing a dot-segment pattern
+      // against those would ignore the *entire* vault whenever the vault root
+      // itself lives under a dotted directory (e.g. `~/MCAPS-IQ/.vault`),
+      // silently disabling every graph and cache invalidation. Always decide
+      // based on the path *relative to the vault root*.
+      ignored: (fullPath: string) => this.shouldIgnore(fullPath),
       persistent: true,
       ignoreInitial: true,
       awaitWriteFinish: {
@@ -83,6 +86,22 @@ export class VaultWatcher {
   }
 
   /**
+   * Decide whether a watched path should be skipped.
+   *
+   * Evaluated against the vault-relative path so that dotted segments in the
+   * vault root (a very common Obsidian layout, e.g. `<repo>/.vault`) do not
+   * cause every file in the vault to be ignored.
+   */
+  private shouldIgnore(fullPath: string): boolean {
+    const rel = normalizeNotePath(relative(this.vaultPath, fullPath));
+    if (rel === "") return false; // the vault root itself
+    if (rel.startsWith("../")) return true; // outside the vault
+    return rel
+      .split("/")
+      .some((segment) => segment.startsWith(".") || segment === "node_modules");
+  }
+
+  /**
    * Handle a file change event with debouncing.
    */
   private handleChange(
@@ -91,7 +110,9 @@ export class VaultWatcher {
   ): void {
     if (!isAllowedFile(fullPath)) return;
 
-    const notePath = relative(this.vaultPath, fullPath);
+    // `relative()` yields backslashes on Windows; the graph and session cache
+    // are both keyed on POSIX-style vault paths, so normalize before dispatch.
+    const notePath = normalizeNotePath(relative(this.vaultPath, fullPath));
 
     // Cancel any pending update for this path
     const existing = this.pendingUpdates.get(notePath);

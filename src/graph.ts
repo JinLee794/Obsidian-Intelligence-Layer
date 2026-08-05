@@ -9,7 +9,7 @@ import { readFile, writeFile, stat } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
 import matter from "gray-matter";
 import type { GraphNode, GraphStats, NoteRef, TagCount } from "./types.js";
-import { listAllNotes, extractWikilinks, isAllowedFile } from "./vault.js";
+import { listAllNotes, extractWikilinks, isAllowedFile, normalizeLineEndings } from "./vault.js";
 
 // ─── Persisted Graph Format ───────────────────────────────────────────────────
 
@@ -31,6 +31,15 @@ interface PersistedGraph {
 }
 
 // ─── Graph Index ──────────────────────────────────────────────────────────────
+
+/**
+ * Vault note paths are canonically POSIX-style (Obsidian convention), but
+ * `path.relative()` on Windows returns backslashes. Normalizing at every
+ * index boundary keeps watcher-driven updates matching the indexed keys.
+ */
+export function normalizeNotePath(notePath: string): string {
+  return notePath.replace(/\\/g, "/");
+}
 
 export class GraphIndex {
   /** path → GraphNode */
@@ -99,7 +108,9 @@ export class GraphIndex {
     try {
       const fullPath = join(this.vaultPath, notePath);
       const raw = await readFile(fullPath, "utf-8");
-      const { data: frontmatter, content } = matter(raw);
+      // Normalize CRLF up front — heading/tag regexes below use `.` and `$`,
+      // neither of which tolerates a trailing "\r".
+      const { data: frontmatter, content } = matter(normalizeLineEndings(raw));
 
       // Track mtime for incremental rebuild
       try {
@@ -194,10 +205,11 @@ export class GraphIndex {
    * Re-index a single note after it changes on disk.
    */
   async updateNote(notePath: string): Promise<void> {
+    const key = normalizeNotePath(notePath);
     // Remove old data
-    this.removeNote(notePath);
+    this.removeNote(key);
     // Re-index
-    await this.indexNote(notePath);
+    await this.indexNote(key);
     // Full link re-resolution (could be optimised for single-note updates)
     this.resolveAllBacklinks();
   }
@@ -206,9 +218,13 @@ export class GraphIndex {
    * Remove a note from the index.
    */
   removeNote(notePath: string): void {
-    const node = this.nodes.get(notePath);
+    const key = normalizeNotePath(notePath);
+    const node = this.nodes.get(key);
     if (!node) return;
+    return this.removeNodeInternal(key, node);
+  }
 
+  private removeNodeInternal(notePath: string, node: GraphNode): void {
     // Remove from tag index
     for (const tag of node.tags) {
       this.tagIndex.get(tag)?.delete(notePath);
@@ -420,7 +436,7 @@ export class GraphIndex {
    * Get all notes that link TO a given note (backlinks).
    */
   getBacklinks(notePath: string): NoteRef[] {
-    const node = this.nodes.get(notePath);
+    const node = this.nodes.get(normalizeNotePath(notePath));
     if (!node) return [];
     return [...node.inLinks]
       .map((p) => this.toNoteRef(p))
@@ -431,7 +447,7 @@ export class GraphIndex {
    * Get all notes linked FROM a given note (forward links).
    */
   getForwardLinks(notePath: string): NoteRef[] {
-    const node = this.nodes.get(notePath);
+    const node = this.nodes.get(normalizeNotePath(notePath));
     if (!node) return [];
     return [...node.outLinks]
       .map((p) => this.toNoteRef(p))
@@ -531,7 +547,7 @@ export class GraphIndex {
    * Get the GraphNode for a path (or undefined).
    */
   getNode(notePath: string): GraphNode | undefined {
-    return this.nodes.get(notePath);
+    return this.nodes.get(normalizeNotePath(notePath));
   }
 
   /**

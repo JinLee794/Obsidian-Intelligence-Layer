@@ -33,6 +33,9 @@ import {
   readMeetingsFromFrontmatter,
   looksLikeTpid,
   resolveCustomerByTpid,
+  resolveTeamSection,
+  resolveConnectHooksSection,
+  splitLines,
 } from "../vault.js";
 import { extractPrefetchIds } from "../correlate.js";
 import { checkVaultHealth } from "../hygiene.js";
@@ -117,12 +120,13 @@ export function registerDomainTools(
         });
       }
 
-      // Read customer note (with cache)
-      let parsed = cache.getNote(customerFile);
+      // Read customer note (with cache, revalidated against the file's mtime
+      // so external edits are never served stale)
+      let parsed = cache.getNote(customerFile, customerStats.mtimeMs);
       if (!parsed) {
         try {
           parsed = await readNote(vaultPath, customerFile);
-          cache.putNote(customerFile, parsed);
+          cache.putNote(customerFile, parsed, customerStats.mtimeMs);
         } catch {
           return errorResponse("NOT_FOUND", `Customer file not found: ${customerFile}`, {
             customer: resolvedCustomer,
@@ -132,13 +136,9 @@ export function registerDomainTools(
         }
       }
 
-      // Parse structured sections (try common heading variants)
-      const teamSection = parsed.sections.get("Team")
-        ?? parsed.sections.get("Microsoft Team")
-        ?? parsed.sections.get("Key Stakeholders")
-        ?? parsed.sections.get("Stakeholders")
-        ?? "";
-      const connectSection = parsed.sections.get("Connect Hooks") ?? "";
+      // Parse structured sections (shared resolver — hygiene uses the same one)
+      const teamSection = resolveTeamSection(parsed.sections);
+      const connectSection = resolveConnectHooksSection(parsed.sections);
 
       // Read entities — prefers sub-notes, falls back to section parsing
       const opportunities = await readOpportunityNotes(vaultPath, config, resolvedCustomer);
@@ -152,8 +152,7 @@ export function registerDomainTools(
         agentInsights = insightsResult.entries;
       } else {
         const insightsSection = parsed.sections.get("Agent Insights") ?? "";
-        agentInsights = insightsSection
-          .split("\n")
+        agentInsights = splitLines(insightsSection)
           .filter((l) => l.trim())
           .map((l) => l.replace(/^[-*]\s+/, "").trim());
       }
@@ -293,7 +292,17 @@ export function registerDomainTools(
                     .map((g: string) => `_msp_opportunityid_value eq '${g}'`)
                     .join(" or ")
                 : null,
-              account_filter: p.tpid ? `_msp_accountid_value eq '${p.tpid}'` : null,
+              // `_msp_accountid_value` is a GUID lookup — it must be built from
+              // accountid, never from TPID (a separate business identifier that
+              // lives on `accounts.msp_mstopparentid`).
+              account_filter: p.accountid
+                ? `_msp_accountid_value eq '${p.accountid}'`
+                : null,
+              tpid_filter: p.tpid ? `msp_mstopparentid eq '${p.tpid}'` : null,
+              _entities: {
+                account_filter: "opportunity/milestone (lookup by account GUID)",
+                tpid_filter: "accounts (business identifier)",
+              },
             },
           };
         }),
@@ -301,7 +310,10 @@ export function registerDomainTools(
 
       return jsonResponse({
         prefetch: shaped,
-        _note: "Use odata_hints directly in crm_query $filter expressions.",
+        _note:
+          "Use odata_hints directly in crm_query $filter expressions. " +
+          "account_filter targets opportunity/milestone lookups by account GUID; " +
+          "tpid_filter targets the accounts entity. Values are never truncated.",
       });
     },
   );

@@ -7,11 +7,28 @@
 import type { NoteRef, PendingWrite } from "./types.js";
 import type { ParsedNote } from "./vault.js";
 
+/**
+ * Vault paths are canonically POSIX-style. Windows callers (notably the
+ * chokidar watcher, which uses `path.relative()`) produce backslash paths;
+ * without normalization `invalidateNote()` silently misses the cached entry
+ * and readers serve stale content until the TTL lapses.
+ */
+function cacheKey(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+interface NoteCacheEntry {
+  note: ParsedNote;
+  cachedAt: number;
+  /** mtime of the file at the moment it was cached, when known. */
+  sourceMtimeMs?: number;
+}
+
 export class SessionCache {
   /** Recently accessed note paths (ordered, most recent last) */
   private recentlyAccessed: string[] = [];
   /** Cached parsed notes: path → ParsedNote */
-  private noteCache = new Map<string, { note: ParsedNote; cachedAt: number }>();
+  private noteCache = new Map<string, NoteCacheEntry>();
   /** Cached graph traversal results */
   private traversalCache = new Map<string, { refs: NoteRef[]; cachedAt: number }>();
   /** Queue of gated write operations awaiting confirmation */
@@ -25,24 +42,38 @@ export class SessionCache {
   // ─── Note Cache ─────────────────────────────────────────────────────────
 
   /**
-   * Get a cached note, or undefined if not cached or stale.
+   * Get a cached note, or undefined if not cached, stale, or superseded on disk.
+   *
+   * Pass `currentMtimeMs` when the caller already stat()'d the file — the entry
+   * is then revalidated against the file's real mtime instead of relying on the
+   * TTL and the file watcher, which cannot see edits made while OIL is offline.
    */
-  getNote(path: string): ParsedNote | undefined {
-    const entry = this.noteCache.get(path);
+  getNote(path: string, currentMtimeMs?: number): ParsedNote | undefined {
+    const key = cacheKey(path);
+    const entry = this.noteCache.get(key);
     if (!entry) return undefined;
     if (Date.now() - entry.cachedAt > this.ttlMs) {
-      this.noteCache.delete(path);
+      this.noteCache.delete(key);
+      return undefined;
+    }
+    if (
+      currentMtimeMs !== undefined &&
+      entry.sourceMtimeMs !== undefined &&
+      Math.abs(entry.sourceMtimeMs - currentMtimeMs) > 1
+    ) {
+      this.noteCache.delete(key);
       return undefined;
     }
     return entry.note;
   }
 
   /**
-   * Cache a parsed note.
+   * Cache a parsed note. Supply `sourceMtimeMs` to enable mtime revalidation.
    */
-  putNote(path: string, note: ParsedNote): void {
-    this.noteCache.set(path, { note, cachedAt: Date.now() });
-    this.trackAccess(path);
+  putNote(path: string, note: ParsedNote, sourceMtimeMs?: number): void {
+    const key = cacheKey(path);
+    this.noteCache.set(key, { note, cachedAt: Date.now(), sourceMtimeMs });
+    this.trackAccess(key);
     this.evictIfNeeded();
   }
 
@@ -50,14 +81,15 @@ export class SessionCache {
    * Invalidate a cached note (e.g., after file change).
    */
   invalidateNote(path: string): void {
-    this.noteCache.delete(path);
+    const key = cacheKey(path);
+    this.noteCache.delete(key);
     // Also invalidate any traversal caches that might include this path
-    for (const [key, entry] of this.traversalCache) {
+    for (const [traversalKey, entry] of this.traversalCache) {
       if (
-        key.includes(path) ||
-        entry.refs.some((r) => r.path === path)
+        traversalKey.includes(key) ||
+        entry.refs.some((r) => cacheKey(r.path) === key)
       ) {
-        this.traversalCache.delete(key);
+        this.traversalCache.delete(traversalKey);
       }
     }
   }

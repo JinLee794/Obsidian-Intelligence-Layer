@@ -210,6 +210,7 @@ export interface FrontmatterSchemaConfig {
   projectField: string;
   tpidField: string;
   accountidField: string;
+  titleField: string;
 }
 
 export interface SearchConfig {

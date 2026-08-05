@@ -86,6 +86,39 @@ function isExcludedDir(dirName: string): boolean {
   return EXCLUDED_DIRS.has(dirName) || dirName.startsWith(".");
 }
 
+// ─── Line Endings ─────────────────────────────────────────────────────────────
+
+/**
+ * Collapse CRLF/CR line endings to LF.
+ *
+ * Every line-oriented parser in OIL splits on "\n" and matches headings/list
+ * items with `.`-based regexes, and `.` never matches `\r`. Without this,
+ * Windows-authored (CRLF) notes silently parse to zero sections, zero team
+ * members and zero action items. Normalize once at the parse boundary.
+ */
+export function normalizeLineEndings(content: string): string {
+  return content.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * Split text into lines regardless of the source line-ending convention.
+ */
+export function splitLines(content: string): string[] {
+  return content.split(/\r\n?|\n/);
+}
+
+/**
+ * Detect the dominant line ending of an existing document so writes can
+ * preserve it instead of introducing mixed endings.
+ */
+export function detectLineEnding(content: string): "\r\n" | "\n" {
+  const crlf = (content.match(/\r\n/g) ?? []).length;
+  if (crlf === 0) return "\n";
+  const lf = (content.match(/\n/g) ?? []).length;
+  // `lf` counts CRLF too — compare CRLF against bare LF occurrences.
+  return crlf >= lf - crlf ? "\r\n" : "\n";
+}
+
 // ─── Note Reading ─────────────────────────────────────────────────────────────
 
 export interface ParsedNote {
@@ -114,7 +147,10 @@ export async function readNote(
  * Parse a markdown string into a structured note.
  */
 export function parseNote(notePath: string, raw: string): ParsedNote {
-  const { data: frontmatter, content } = matter(raw);
+  // Normalize line endings before anything else — every downstream parser
+  // splits on "\n" and uses `.`-based regexes that cannot match "\r".
+  const { data: frontmatter, content: rawContent } = matter(normalizeLineEndings(raw));
+  const content = normalizeLineEndings(rawContent);
   const title = extractTitle(notePath, content);
   const sections = parseSections(content);
   const wikilinks = extractWikilinks(content);
@@ -135,7 +171,7 @@ export function parseNote(notePath: string, raw: string): ParsedNote {
  * Derive a note title: first H1 heading, then filename.
  */
 function extractTitle(notePath: string, content: string): string {
-  const h1Match = content.match(/^#\s+(.+)$/m);
+  const h1Match = normalizeLineEndings(content).match(/^#\s+(.+)$/m);
   if (h1Match) return h1Match[1].trim();
   return basename(notePath, extname(notePath));
 }
@@ -146,7 +182,7 @@ function extractTitle(notePath: string, content: string): string {
  */
 export function parseSections(content: string): Map<string, string> {
   const sections = new Map<string, string>();
-  const lines = content.split("\n");
+  const lines = splitLines(content);
   let currentHeading = "";
   let currentContent: string[] = [];
 
@@ -308,7 +344,7 @@ export async function noteExists(
  */
 export function parseOpportunities(section: string): OpportunityRef[] {
   const opps: OpportunityRef[] = [];
-  const lines = section.split("\n").filter((l) => l.trim());
+  const lines = splitLines(section).filter((l) => l.trim());
 
   for (const line of lines) {
     // Match: - Name (`opportunityid: GUID`) or - Name (GUID)
@@ -340,7 +376,7 @@ export function parseOpportunities(section: string): OpportunityRef[] {
  */
 export function parseMilestones(section: string): MilestoneRef[] {
   const milestones: MilestoneRef[] = [];
-  const lines = section.split("\n").filter((l) => l.trim());
+  const lines = splitLines(section).filter((l) => l.trim());
 
   for (const line of lines) {
     const idMatch = line.match(
@@ -364,32 +400,101 @@ export function parseMilestones(section: string): MilestoneRef[] {
 
 /**
  * Parse team members from the ## Team section.
+ *
+ * Handles the common corporate-directory shapes:
+ *   - [[Jin Lee (HLS US SE)]] — Sr Solution Engineer
+ *   - Andrea Welker (She/Her) — Strat Acct Tech Strategist
+ *   - Bob Chen - Cloud Architect
+ *   - Ada Lovelace (Engineer)
+ *   - [[Dave Wilson]]
+ *
+ * Parentheses inside a display name must NOT be treated as the role
+ * separator; a parenthetical is only a role when it closes at end of line
+ * and no explicit separator (—, –, spaced -) was found first.
  */
 export function parseTeam(section: string): TeamMember[] {
   const team: TeamMember[] = [];
-  const lines = section.split("\n").filter((l) => l.trim());
+  const lines = splitLines(section).filter((l) => l.trim());
 
   for (const line of lines) {
-    const listMatch = line.match(/^[-*]\s+(?:\[.\]\s+)?(.+)/);
+    const listMatch = line.match(/^\s*[-*]\s+(?:\[.\]\s+)?(.+)/);
     if (!listMatch) continue;
 
     const entry = listMatch[1].trim();
-    // Match patterns like "Name — Role" or "Name (Role)" or "Name - Role"
-    const roleMatch = entry.match(
-      /^(.+?)\s*(?:—|–|-|\()\s*(.+?)(?:\))?$/,
-    );
-    if (roleMatch) {
-      team.push({
-        name: roleMatch[1].replace(/\[\[|\]\]/g, "").trim(),
-        role: roleMatch[2].trim(),
-      });
+    if (!entry) continue;
+
+    let name: string;
+    let rest: string;
+
+    // A leading wikilink is the authoritative name boundary — everything
+    // inside [[...]] belongs to the name, parentheses included.
+    const leadingLink = entry.match(/^\[\[([^\]]+)]]/);
+    if (leadingLink) {
+      name = leadingLink[1].split("|")[0].trim();
+      rest = entry.slice(leadingLink[0].length).trim();
     } else {
-      team.push({
-        name: entry.replace(/\[\[|\]\]/g, "").trim(),
-      });
+      const sepIdx = findTopLevelSeparator(entry);
+      if (sepIdx >= 0) {
+        name = entry.slice(0, sepIdx).trim();
+        rest = entry.slice(sepIdx + 1).trim();
+      } else {
+        // Only treat a parenthetical as the role when it closes at end of line.
+        const trailingParen = entry.match(/^(.+?)\s*\(([^()]*)\)$/);
+        if (trailingParen) {
+          name = trailingParen[1].trim();
+          rest = trailingParen[2].trim();
+        } else {
+          name = entry;
+          rest = "";
+        }
+      }
     }
+
+    const role = cleanRole(rest);
+    name = name.replace(/\[\[|]]/g, "").trim();
+    if (!name) continue;
+
+    team.push(role ? { name, role } : { name });
   }
   return team;
+}
+
+/**
+ * Index of the first name/role separator that sits outside any bracket or
+ * parenthesis group. Returns -1 when there is none.
+ */
+function findTopLevelSeparator(entry: string): number {
+  let paren = 0;
+  let bracket = 0;
+
+  for (let i = 0; i < entry.length; i++) {
+    const ch = entry[i];
+    if (ch === "(") paren++;
+    else if (ch === ")") paren = Math.max(0, paren - 1);
+    else if (ch === "[") bracket++;
+    else if (ch === "]") bracket = Math.max(0, bracket - 1);
+    else if (paren === 0 && bracket === 0) {
+      if (ch === "—" || ch === "–") return i;
+      // A plain hyphen only separates when surrounded by whitespace,
+      // so hyphenated names (Jean-Luc) stay intact.
+      if (ch === "-" && /\s/.test(entry[i - 1] ?? "") && /\s/.test(entry[i + 1] ?? "")) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Strip a leading separator and a wrapping parenthesis from the role remainder.
+ */
+function cleanRole(rest: string): string | undefined {
+  let role = rest.replace(/^\s*(?:[—–-]|\()\s*/, "").trim();
+  if (role.endsWith(")") && !role.includes("(")) {
+    role = role.slice(0, -1).trim();
+  }
+  role = role.replace(/\[\[|]]/g, "").trim();
+  return role.length > 0 ? role : undefined;
 }
 
 /**
@@ -403,7 +508,7 @@ export function parseActionItems(
   const regex = /^[-*]\s+\[([ xX])\]\s+(.+)$/gm;
   let match;
 
-  while ((match = regex.exec(content)) !== null) {
+  while ((match = regex.exec(normalizeLineEndings(content))) !== null) {
     const done = match[1].toLowerCase() === "x";
     const text = match[2].trim();
 
@@ -433,6 +538,72 @@ export function toNoteRef(note: ParsedNote): NoteRef {
     tags: note.tags,
     excerpt,
   };
+}
+
+// ─── Section Resolution ───────────────────────────────────────────────────────
+
+/** Heading variants that all mean "the customer team roster". */
+export const TEAM_SECTION_HEADINGS = [
+  "Team",
+  "Microsoft Team",
+  "Key Stakeholders",
+  "Stakeholders",
+] as const;
+
+/** Heading variants that all mean "connect hooks". */
+export const CONNECT_HOOKS_SECTION_HEADINGS = [
+  "Connect Hooks",
+  "Connect",
+] as const;
+
+/**
+ * Resolve the team roster section from a parsed note, accepting every heading
+ * variant OIL supports. Single source of truth so retrieval (get_customer_context)
+ * and hygiene (hasTeam) can never disagree about whether a roster exists.
+ */
+export function resolveTeamSection(sections: Map<string, string>): string {
+  return resolveSection(sections, TEAM_SECTION_HEADINGS);
+}
+
+/**
+ * Resolve the connect hooks section, accepting all supported heading variants.
+ */
+export function resolveConnectHooksSection(sections: Map<string, string>): string {
+  return resolveSection(sections, CONNECT_HOOKS_SECTION_HEADINGS);
+}
+
+function resolveSection(
+  sections: Map<string, string>,
+  headings: readonly string[],
+): string {
+  for (const heading of headings) {
+    const value = sections.get(heading);
+    if (value !== undefined) return value;
+  }
+  // Case-insensitive fallback — Obsidian headings are author-typed.
+  const lowered = new Map<string, string>();
+  for (const [key, value] of sections) lowered.set(key.toLowerCase(), value);
+  for (const heading of headings) {
+    const value = lowered.get(heading.toLowerCase());
+    if (value !== undefined) return value;
+  }
+  return "";
+}
+
+/**
+ * Resolve an entity display name using catalog precedence:
+ * frontmatter title → first H1 → filename.
+ *
+ * `note.title` alone surfaces decorative H1s (e.g. "🎯") as the entity name.
+ */
+export function resolveEntityName(note: ParsedNote, config: OilConfig): string {
+  const titleField = config.frontmatterSchema.titleField ?? "title";
+  const fmTitle = note.frontmatter[titleField as keyof NoteFrontmatter];
+  if (typeof fmTitle === "string" && fmTitle.trim().length > 0) {
+    return fmTitle.trim();
+  }
+  if (typeof fmTitle === "number") return String(fmTitle);
+  return note.title;
 }
 
 // ─── Customer Path Resolution ─────────────────────────────────────────────────
@@ -555,7 +726,7 @@ export async function readOpportunityNotes(
 
   if (entityNotes.length > 0) {
     return entityNotes.map((note) => ({
-      name: note.title,
+      name: resolveEntityName(note, config),
       guid: typeof note.frontmatter.opportunityId === "string"
         ? note.frontmatter.opportunityId
         : typeof note.frontmatter.guid === "string"
@@ -606,7 +777,7 @@ export async function readMilestoneNotes(
 
   if (entityNotes.length > 0) {
     return entityNotes.map((note) => ({
-      name: note.title,
+      name: resolveEntityName(note, config),
       id: typeof note.frontmatter.milestoneId === "string"
         ? note.frontmatter.milestoneId
         : typeof note.frontmatter.milestoneid === "string"
@@ -755,8 +926,7 @@ export async function readInsightsPartitioned(
     for (const file of recent) {
       try {
         const parsed = await readNote(vaultPath, file);
-        const lines = parsed.content
-          .split("\n")
+        const lines = splitLines(parsed.content)
           .filter((l) => l.trim())
           .map((l) => l.replace(/^[-*]\s+/, "").trim());
         entries.push(...lines);

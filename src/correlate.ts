@@ -25,6 +25,8 @@ import {
   readMilestoneNotes,
   listCustomerNames,
   customerNameFromPath,
+  resolveTeamSection,
+  splitLines,
 } from "./vault.js";
 
 // ─── VAULT-PREFETCH: ID Extraction ───────────────────────────────────────────
@@ -87,13 +89,7 @@ export async function extractPrefetchIds(
     // Read entities — prefers sub-notes, falls back to section parsing
     const opps = await readOpportunityNotes(vaultPath, config, customer);
     const milestones = await readMilestoneNotes(vaultPath, config, customer);
-    const team = parseTeam(
-      parsed.sections.get("Team")
-      ?? parsed.sections.get("Microsoft Team")
-      ?? parsed.sections.get("Key Stakeholders")
-      ?? parsed.sections.get("Stakeholders")
-      ?? "",
-    );
+    const team = parseTeam(resolveTeamSection(parsed.sections));
 
     results.push({
       customer,
@@ -355,7 +351,7 @@ export async function buildDriftSnapshot(
   // Read entities — prefers sub-notes, falls back to section parsing
   const opportunities = await readOpportunityNotes(vaultPath, config, customerName);
   const milestones = await readMilestoneNotes(vaultPath, config, customerName);
-  const team = parseTeam(parsed.sections.get("Team") ?? "");
+  const team = parseTeam(resolveTeamSection(parsed.sections));
 
   // Find most recent Agent Insight date
   const insightsSection = parsed.sections.get("Agent Insights") ?? "";
