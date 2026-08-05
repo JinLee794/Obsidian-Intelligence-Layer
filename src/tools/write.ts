@@ -19,6 +19,7 @@ import {
 import { validateVaultPath, validationError } from "../validation.js";
 import { securePath, noteExists } from "../vault.js";
 import { appendToSection, executeWrite, logWrite } from "../gate.js";
+import { invalidateSearchIndex } from "../search.js";
 
 /**
  * Register all Write tools on the MCP server.
@@ -26,10 +27,28 @@ import { appendToSection, executeWrite, logWrite } from "../gate.js";
 export function registerWriteTools(
   server: McpServer,
   vaultPath: string,
-  _graph: GraphIndex,
+  graph: GraphIndex,
   cache: SessionCache,
   config: OilConfig,
 ): void {
+  /**
+   * Bring every derived index back in sync with a note that was just written.
+   *
+   * The file watcher also does this, but only after a debounce (and it can be
+   * absent or throttled entirely). Doing it inline makes write→read
+   * consistency deterministic: a note created or edited through these tools is
+   * immediately visible to graph traversal, frontmatter lookups and search.
+   */
+  const syncIndexes = async (path: string): Promise<void> => {
+    cache.invalidateNote(path);
+    try {
+      await graph.updateNote(path);
+    } catch {
+      // A failed re-index must never fail an otherwise successful write.
+    }
+    invalidateSearchIndex();
+  };
+
   // ── atomic_append ─────────────────────────────────────────────────────
 
   server.registerTool(
@@ -95,7 +114,7 @@ export function registerWriteTools(
           }
 
           await appendToSection(vaultPath, path, heading, content, "append");
-          cache.invalidateNote(path);
+          await syncIndexes(path);
 
           const after = await getMtime(vaultPath, path);
 
@@ -193,7 +212,7 @@ export function registerWriteTools(
           }
 
           await executeWrite(vaultPath, path, content, "overwrite");
-          cache.invalidateNote(path);
+          await syncIndexes(path);
 
           const after = await getMtime(vaultPath, path);
 
@@ -270,7 +289,7 @@ export function registerWriteTools(
           }
 
           await executeWrite(vaultPath, path, content, "create");
-          cache.invalidateNote(path);
+          await syncIndexes(path);
 
           try {
             await logWrite(vaultPath, config, {

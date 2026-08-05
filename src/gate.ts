@@ -9,7 +9,7 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { OilConfig, PendingWrite } from "./types.js";
 import type { SessionCache } from "./cache.js";
-import { securePath, noteExists } from "./vault.js";
+import { securePath, noteExists, detectLineEnding, normalizeLineEndings } from "./vault.js";
 
 // ─── Diff Generation ──────────────────────────────────────────────────────────
 
@@ -126,7 +126,13 @@ export async function appendToSection(
 ): Promise<void> {
   const fullPath = securePath(vaultPath, path);
   const { readFile: readFileFs } = await import("node:fs/promises");
-  const raw = await readFileFs(fullPath, "utf-8");
+  const original = await readFileFs(fullPath, "utf-8");
+
+  // Work in LF, then restore the document's own convention so a CRLF note
+  // never ends up with mixed line endings (which breaks naive line parsers).
+  const eol = detectLineEnding(original);
+  const raw = normalizeLineEndings(original);
+  const body = normalizeLineEndings(content);
 
   const headingPattern = new RegExp(
     `^(#{1,6})\\s+${escapeRegExp(heading)}\\s*$`,
@@ -155,20 +161,20 @@ export async function appendToSection(
       result =
         raw.slice(0, insertPos) +
         "\n" +
-        content +
+        body +
         "\n" +
         raw.slice(insertPos);
     } else {
       // Append before the next heading (or at EOF)
       const before = raw.slice(0, sectionEnd).trimEnd();
-      result = before + "\n" + content + "\n" + raw.slice(sectionEnd);
+      result = before + "\n" + body + "\n" + raw.slice(sectionEnd);
     }
   } else {
     // Heading doesn't exist — add at end of file
-    result = raw.trimEnd() + "\n\n## " + heading + "\n\n" + content + "\n";
+    result = raw.trimEnd() + "\n\n## " + heading + "\n\n" + body + "\n";
   }
 
-  await writeFile(fullPath, result, "utf-8");
+  await writeFile(fullPath, eol === "\r\n" ? result.replace(/\n/g, "\r\n") : result, "utf-8");
 }
 
 // ─── Audit Logging ────────────────────────────────────────────────────────────

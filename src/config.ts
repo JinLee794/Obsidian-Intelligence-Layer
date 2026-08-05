@@ -30,6 +30,7 @@ const DEFAULTS: OilConfig = {
     projectField: "project",
     tpidField: "tpid",
     accountidField: "accountid",
+    titleField: "title",
   },
   search: {
     graphIndexFile: "_oil-graph.json",
@@ -103,6 +104,7 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     project_field: "projectField",
     tpid_field: "tpidField",
     accountid_field: "accountidField",
+    title_field: "titleField",
     graph_index_file: "graphIndexFile",
     background_index_threshold_ms: "backgroundIndexThresholdMs",
     write_gate: "writeGate",

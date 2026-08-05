@@ -27,6 +27,9 @@ import {
   readMilestoneNotes,
   listCustomerNames,
   detectFlatCustomers,
+  resolveTeamSection,
+  resolveConnectHooksSection,
+  splitLines,
 } from "./vault.js";
 
 const STALE_THRESHOLD_DAYS = 30;
@@ -47,20 +50,23 @@ export async function checkCustomerFreshness(
 
   // File modification time
   let lastModified: Date | null = null;
+  let lastModifiedMs: number | undefined;
   try {
     const fullPath = securePath(vaultPath, path);
     const fileStat = await stat(fullPath);
     lastModified = fileStat.mtime;
+    lastModifiedMs = fileStat.mtimeMs;
   } catch {
     // File may not exist
   }
 
-  // Read and parse
-  let parsed = cache.getNote(path);
+  // Read and parse — revalidate the cache against the file's real mtime so an
+  // external edit (Obsidian, sync script) can never be served stale.
+  let parsed = cache.getNote(path, lastModifiedMs);
   if (!parsed) {
     try {
       parsed = await readNote(vaultPath, path);
-      cache.putNote(path, parsed);
+      cache.putNote(path, parsed, lastModifiedMs);
     } catch {
       return {
         customer: customerName,
@@ -90,9 +96,10 @@ export async function checkCustomerFreshness(
     .filter((m) => !m.id && !m.number)
     .map((m) => m.name);
 
-  // Section presence
-  const teamSection = parsed.sections.get("Team") ?? "";
-  const connectSection = parsed.sections.get("Connect Hooks") ?? "";
+  // Section presence — must accept the same heading variants that
+  // get_customer_context resolves, or hasTeam reports a permanent false.
+  const teamSection = resolveTeamSection(parsed.sections);
+  const connectSection = resolveConnectHooksSection(parsed.sections);
 
   // last_validated from frontmatter
   const rawValidated = parsed.frontmatter?.last_validated;
@@ -192,7 +199,7 @@ export async function checkVaultHealth(
 function findStaleEntries(insightsSection: string): StaleEntry[] {
   const now = new Date();
   const stale: StaleEntry[] = [];
-  const lines = insightsSection.split("\n").filter((l) => l.trim());
+  const lines = splitLines(insightsSection).filter((l) => l.trim());
 
   for (const line of lines) {
     // Match: - 2026-01-15 Some insight text
