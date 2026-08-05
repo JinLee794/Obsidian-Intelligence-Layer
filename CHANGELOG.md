@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] - 2026-08-04
+
+### Fixes
+
+- Normalize CRLF line endings across parser boundaries so section retrieval works for Windows-authored notes
+- Prevent stale reads by normalizing Windows paths, fixing watcher exclusions for dotted vault roots, revalidating cached notes by modification time, and reindexing writes inline
+
+### Tests
+
+- Add regression coverage for CRLF parsing, retrieval, cache revalidation, watcher invalidation, write consistency, and response truncation
+
 ## [0.5.2] - 2026-04-21
 
 ### Fixes

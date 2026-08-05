@@ -1,10 +1,10 @@
 {
   "name": "@jinlee794/obsidian-intelligence-layer",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Obsidian Intelligence Layer — Knowledge Layer MCP Server for AI Agent Workflows",
   "type": "module",
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   },
   "repository": {
     "type": "git",

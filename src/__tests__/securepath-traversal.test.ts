@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 
 let tempDir: string;
 let vaultRoot: string;
+let fileSymlinkCreated = false;
+let directorySymlinkCreated = false;
 
 beforeAll(async () => {
   // Create a temporary vault structure for testing
@@ -33,14 +35,21 @@ beforeAll(async () => {
     await symlink(
       join(tempDir, "secret.md"),
       join(vaultRoot, "notes", "sneaky-link.md"),
+      "file",
     );
+    fileSymlinkCreated = true;
   } catch {
     // Symlink creation may fail on some platforms/permissions — tests will be skipped
   }
 
   // Create a symlink to a directory outside the vault
   try {
-    await symlink(tempDir, join(vaultRoot, "escape-dir"));
+    await symlink(
+      tempDir,
+      join(vaultRoot, "escape-dir"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    directorySymlinkCreated = true;
   } catch {
     // Symlink creation may fail
   }
@@ -96,11 +105,15 @@ describe("securePath — encoding tricks", () => {
     expect(result.startsWith(vaultRoot)).toBe(true);
   });
 
-  it("rejects dot-dot with backslashes on path level", () => {
-    // On POSIX, backslash is a valid filename char, not a separator
-    // Just ensure it doesn't escape
-    const result = securePath(vaultRoot, "notes\\..\\..\\secret.md");
-    expect(result.startsWith(vaultRoot)).toBe(true);
+  it("handles dot-dot with backslashes safely on every platform", () => {
+    if (process.platform === "win32") {
+      expect(() =>
+        securePath(vaultRoot, "notes\\..\\..\\secret.md"),
+      ).toThrow("Path traversal denied");
+    } else {
+      const result = securePath(vaultRoot, "notes\\..\\..\\secret.md");
+      expect(result.startsWith(vaultRoot)).toBe(true);
+    }
   });
 
   it("rejects null byte injection", () => {
@@ -116,31 +129,19 @@ describe("securePath — encoding tricks", () => {
 
 describe("securePath — symlink traversal", () => {
   it("rejects symlink file escape outside vault", async () => {
-    // If symlink creation failed on this platform, skip this assertion.
-    try {
-      securePath(vaultRoot, "notes/sneaky-link.md");
-      throw new Error("Expected securePath to reject symlink escape");
-    } catch (err) {
-      const msg = String(err);
-      if (msg.includes("Expected securePath")) throw err;
-      if (!msg.includes("Path traversal denied")) {
-        // Non-security platform-specific failures are tolerated.
-        // Example: symlink path missing on restricted environments.
-      }
-    }
+    if (!fileSymlinkCreated) return;
+
+    expect(() => securePath(vaultRoot, "notes/sneaky-link.md")).toThrow(
+      "Path traversal denied",
+    );
   });
 
   it("rejects directory symlink escape outside vault", async () => {
-    try {
-      securePath(vaultRoot, "escape-dir/secret.md");
-      throw new Error("Expected securePath to reject symlink dir escape");
-    } catch (err) {
-      const msg = String(err);
-      if (msg.includes("Expected securePath")) throw err;
-      if (!msg.includes("Path traversal denied")) {
-        // Non-security platform-specific failures are tolerated.
-      }
-    }
+    if (!directorySymlinkCreated) return;
+
+    expect(() => securePath(vaultRoot, "escape-dir/secret.md")).toThrow(
+      "Path traversal denied",
+    );
   });
 });
 
