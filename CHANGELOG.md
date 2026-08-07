@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.5] - 2026-08-07
+
+### Fixes
+
+- Build `dist` during Git dependency installation so the declared `obsidian-intelligence-layer` executable is present and runnable
+- Document an explicit `npx --package` MCP configuration that resolves the packaged executable consistently
+
+### Tests
+
+- Pack and install the release artifact in a clean temporary project, verify the CLI entrypoint and platform shim, complete a real MCP initialization handshake, and list the server tools
+- Require lint, unit tests, and the package startup smoke test in the publish workflow and before manual publication
+
 ## [0.5.4] - 2026-08-07
 
 ### Fixes
