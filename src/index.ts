@@ -37,7 +37,6 @@ async function main(): Promise<void> {
   // ── 2. Build graph index (with persistence + background indexing) ─────
   const graph = new GraphIndex(vaultPath);
   const graphFile = config.search.graphIndexFile;
-  const bgThreshold = config.search.backgroundIndexThresholdMs;
 
   const loaded = await graph.loadFromDisk(graphFile);
   if (loaded) {
@@ -63,8 +62,10 @@ async function main(): Promise<void> {
     console.error(
       `[OIL] Graph index built in ${elapsed}ms — ${stats.noteCount} notes, ${stats.linkCount} links, ${stats.tagCount} tags.`,
     );
-    // Save to disk for next startup
-    graph.saveToDisk(graphFile).catch((err) =>
+    // Await persistence before serving: an early shutdown would otherwise
+    // discard the index and force another full rebuild on the next start.
+    // Still non-fatal — persistence is only a startup optimisation.
+    await graph.saveToDisk(graphFile).catch((err) =>
       console.error("[OIL] Failed to save graph index:", err),
     );
   }

@@ -1,9 +1,9 @@
 /**
  * Tests for graph.ts — GraphIndex: build, queries, incremental updates, persistence.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { GraphIndex } from "../graph.js";
-import { mkdtemp, rm, mkdir, writeFile, readFile, unlink } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, unlink, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -352,5 +352,117 @@ describe("GraphIndex — persistence", () => {
     const graph = new GraphIndex(vaultRoot);
     const loaded = await graph.loadFromDisk("_nonexistent.json");
     expect(loaded).toBe(false);
+  });
+});
+
+describe("GraphIndex — incremental startup", () => {
+  let dir: string;
+  let vault: string;
+  const INDEX = "_oil-graph.json";
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "oil-incr-"));
+    vault = join(dir, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "A.md"), "# A\n\n[[B]]\n", "utf-8");
+    await writeFile(join(vault, "B.md"), "# B\n", "utf-8");
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("preserves in-memory updates instead of reloading a stale index", async () => {
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    await graph.saveToDisk(INDEX);
+
+    // Edit B on disk but restore its mtime, so only the live update knows.
+    const bPath = join(vault, "B.md");
+    const before = await stat(bPath);
+    await writeFile(bPath, "# B Renamed\n", "utf-8");
+    await utimes(bPath, before.atime, before.mtime);
+
+    await graph.updateNote("B.md");
+    expect(graph.getNode("B.md")!.title).toBe("B Renamed");
+
+    await graph.buildIncremental(INDEX);
+
+    // A reload from disk would resurrect the stale "B" title.
+    expect(graph.getNode("B.md")!.title).toBe("B Renamed");
+  });
+
+  it("indexes notes inserted while the index is already loaded", async () => {
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    await graph.saveToDisk(INDEX);
+
+    await writeFile(join(vault, "C.md"), "# C\n\n[[A]]\n", "utf-8");
+    const reindexed = await graph.buildIncremental(INDEX);
+
+    expect(reindexed).toBe(1);
+    expect(graph.getNode("C.md")).toBeDefined();
+    expect(graph.getNode("A.md")!.inLinks.has("C.md")).toBe(true);
+  });
+
+  it("drops notes deleted while the index is already loaded", async () => {
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    await graph.saveToDisk(INDEX);
+
+    await unlink(join(vault, "B.md"));
+    await graph.buildIncremental(INDEX);
+
+    expect(graph.getNode("B.md")).toBeUndefined();
+    expect(graph.nodeCount).toBe(1);
+  });
+
+  it("persists inserts so a later load sees them", async () => {
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    await graph.saveToDisk(INDEX);
+
+    await writeFile(join(vault, "C.md"), "# C\n", "utf-8");
+    await graph.buildIncremental(INDEX);
+
+    const reloaded = new GraphIndex(vault);
+    expect(await reloaded.loadFromDisk(INDEX)).toBe(true);
+    expect(reloaded.getNode("C.md")).toBeDefined();
+  });
+
+  it("builds from disk when nothing is in memory yet", async () => {
+    const seed = new GraphIndex(vault);
+    await seed.build();
+    await seed.saveToDisk(INDEX);
+
+    const graph = new GraphIndex(vault);
+    await graph.buildIncremental(INDEX);
+
+    expect(graph.nodeCount).toBe(2);
+  });
+
+  it("removes temp files orphaned by an interrupted save", async () => {
+    const graph = new GraphIndex(vault);
+    await graph.build();
+
+    const orphan = join(vault, `${INDEX}.11111111-2222-3333-4444-555555555555.tmp`);
+    await writeFile(orphan, "partial", "utf-8");
+    const stale = new Date(Date.now() - 5 * 60 * 1000);
+    await utimes(orphan, stale, stale);
+
+    await graph.saveToDisk(INDEX);
+
+    await expect(stat(orphan)).rejects.toThrow();
+  });
+
+  it("clears the building flag when persistence fails", async () => {    const graph = new GraphIndex(vault);
+    await graph.build();
+    await graph.saveToDisk(INDEX);
+
+    await writeFile(join(vault, "C.md"), "# C\n", "utf-8");
+    await expect(
+      graph.buildIncremental(join("no-such-dir", "graph.json")),
+    ).rejects.toThrow();
+    expect(graph.building).toBe(false);
   });
 });
