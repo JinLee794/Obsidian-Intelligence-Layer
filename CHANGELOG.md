@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] - 2026-08-07
+
+### Fixes
+
+- Write the persisted graph index atomically (temp file + rename) so a concurrent reader can no longer observe a partially written file and discard the index, which forced repeated full rebuilds
+- Await index persistence during cold start so an early shutdown cannot leave the vault without an index and trigger another full rebuild on the next start
+- Retry the index rename on transient Windows `EPERM`/`EACCES` while another instance holds the file open
+- Skip the redundant second index read during warm start, which re-parsed the whole file and discarded live watcher and write updates
+- Reset the `building` flag when index persistence fails
+- Sweep temp files orphaned by an interrupted save instead of leaving them in the vault
+
+### Improvements
+
+- Report why the graph index could not be read instead of silently falling back to a full rebuild
+
+### Tests
+
+- Add regression coverage for incremental startup: live-update preservation, insert and delete handling, temp-file cleanup, and building-flag reset
+
 ## [0.5.3] - 2026-08-04
 
 ### Fixes
