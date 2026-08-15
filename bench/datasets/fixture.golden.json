@@ -59,7 +59,8 @@
         "Customers/Northwind.md",
         "Meetings/2026-02-25-Northwind-Escalation.md"
       ],
-      "expectTiers": ["semantic"]
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
     },
     {
       "id": "para-datacentre-move",
@@ -69,21 +70,24 @@
         "Projects/azure-migration.md",
         "Meetings/2026-02-20-Contoso-Migration-Review.md"
       ],
-      "expectTiers": ["semantic"]
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
     },
     {
       "id": "para-assistant-rollout",
       "scenario": "paraphrase",
       "query": "who can help me with generative assistant rollouts",
       "relevant": ["People/Dave Wilson.md", "Projects/ai-copilot-pilot.md"],
-      "expectTiers": ["semantic"]
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
     },
     {
       "id": "para-raised-to-management",
       "scenario": "paraphrase",
       "query": "a situation that had to be raised to management",
       "relevant": ["Meetings/2026-02-25-Northwind-Escalation.md"],
-      "expectTiers": ["semantic"]
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
     },
     {
       "id": "attr-at-risk",

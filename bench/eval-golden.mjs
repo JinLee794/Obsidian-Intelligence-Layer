@@ -19,13 +19,18 @@
  *     "relevant": ["Path/To/Note.md", ...],   // any of these counts as a hit
  *     "primary": "Path/To/Note.md",           // optional: must rank at #1
  *     "expectTiers": ["lexical"],             // optional: tiers that must run
- *     "forbidTiers": ["semantic"]             // optional: tiers that must not
+ *     "forbidTiers": ["semantic"],            // optional: tiers that must not
+ *     "requiresSemantic": true                // optional: skipped without Ollama
  *   }]
  * }
  *
  * `forbidTiers` is what keeps the cheap path honest: an identifier lookup that
  * quietly starts paying for an embedding round trip is a regression even when
  * its results are unchanged.
+ *
+ * Baselines are stored per mode. Scores with the semantic tier off are legitimately
+ * lower, so comparing across modes would report a regression that is really just a
+ * missing Ollama.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -95,8 +100,15 @@ function reciprocalRank(paths, relevant) {
 }
 
 const results = [];
+const skipped = [];
 
 for (const testCase of dataset.cases) {
+  // A case that only makes sense with embeddings is not a failure without them.
+  if (testCase.requiresSemantic && !semanticReady) {
+    skipped.push(testCase.id);
+    continue;
+  }
+
   const { results: hits, tiersUsed } = await cascadeSearch(graph, testCase.query, limit, undefined);
   const paths = hits.map((h) => h.path);
   const relevant = testCase.relevant ?? [];
@@ -104,8 +116,12 @@ for (const testCase of dataset.cases) {
   const found = relevant.filter((p) => paths.includes(p));
   const rr = reciprocalRank(paths, relevant);
   const primaryOk = testCase.primary ? paths[0] === testCase.primary : null;
+  // Tier expectations that name the semantic tier only hold when it is running.
+  const expectTiers = (testCase.expectTiers ?? []).filter(
+    (t) => semanticReady || t !== "semantic",
+  );
   const tierOk =
-    (testCase.expectTiers ?? []).every((t) => tiersUsed.includes(t)) &&
+    expectTiers.every((t) => tiersUsed.includes(t)) &&
     (testCase.forbidTiers ?? []).every((t) => !tiersUsed.includes(t));
 
   results.push({
@@ -136,7 +152,9 @@ const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / va
 
 const summary = {
   dataset: dataset.name ?? datasetPath,
+  mode: noSemantic ? "lexical" : semanticReady ? "semantic" : "lexical",
   cases: results.length,
+  skipped: skipped.length,
   semantic: noSemantic ? "off" : semanticReady ? "on" : "unavailable",
   hit_rate: Number(mean(results.map((r) => (r.hit ? 1 : 0))).toFixed(4)),
   mrr: Number(mean(results.map((r) => r.rr)).toFixed(4)),
@@ -178,6 +196,9 @@ for (const [scenario, bucket] of byScenario) {
 }
 
 console.log(`\n${"─".repeat(78)}`);
+if (skipped.length > 0) {
+  console.log(`  skipped           ${skipped.length} case(s) needing the semantic tier: ${skipped.join(", ")}`);
+}
 console.log(`  hit rate          ${pct(summary.hit_rate)}`);
 console.log(`  MRR               ${summary.mrr.toFixed(3)}`);
 console.log(`  recall            ${pct(summary.recall)}`);
@@ -187,17 +208,29 @@ console.log();
 
 // ─── Baseline ─────────────────────────────────────────────────────────────────
 
-const baselinePath = datasetPath.replace(/\.json$/, ".baseline.json");
+// Baselines are per mode: a lexical-only run scores lower by design, and
+// comparing it against a semantic baseline would flag a missing Ollama as a
+// code regression.
+const baselinePath = datasetPath.replace(
+  /\.json$/,
+  summary.mode === "semantic" ? ".baseline.json" : ".lexical.baseline.json",
+);
 
 if (mode === "baseline") {
   await writeFile(baselinePath, `${JSON.stringify(summary, null, 2)}\n`, "utf-8");
   console.log(`Baseline written to ${baselinePath}\n`);
 } else if (mode === "compare") {
   if (!existsSync(baselinePath)) {
-    console.error(`No baseline at ${baselinePath}. Run with --baseline first.`);
+    console.error(`No ${summary.mode} baseline at ${baselinePath}. Run with --baseline first.`);
     process.exit(1);
   }
   const previous = JSON.parse(await readFile(baselinePath, "utf-8"));
+  if (previous.mode && previous.mode !== summary.mode) {
+    console.error(
+      `Baseline was recorded in ${previous.mode} mode but this run is ${summary.mode}. Refusing to compare.`,
+    );
+    process.exit(1);
+  }
   const metrics = ["hit_rate", "mrr", "recall", "primary_accuracy", "tier_routing"];
   let regressed = false;
 
