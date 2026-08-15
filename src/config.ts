@@ -42,8 +42,11 @@ const DEFAULTS: OilConfig = {
     model: "nomic-embed-text",
     indexFile: "_oil-vectors.json",
     minScore: 0.45,
-    batchSize: 16,
-    timeoutMs: 20000,
+    // Measured against CPU-only Ollama on real notes: four inputs per request
+    // is both the fastest per note (~0.9s vs ~1.7s at sixteen) and the least
+    // likely to trip a timeout.
+    batchSize: 4,
+    timeoutMs: 15000,
   },
   audit: {
     logAllWrites: true,

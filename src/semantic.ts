@@ -280,10 +280,16 @@ export class SemanticIndex {
   }
 
   private async embed(inputs: string[]): Promise<Float32Array[]> {
+    // The budget is per input, not per call: a fixed per-request timeout fails
+    // on the largest batch first, which is exactly when it is least deserved.
+    // Measured on CPU-only Ollama, sixteen notes take ~27s against what used to
+    // be a flat 20s ceiling.
+    const timeout = this.config.timeoutMs * Math.max(1, inputs.length);
+
     let res = await this.post(
       "/api/embed",
       { model: this.config.model, input: inputs },
-      this.config.timeoutMs,
+      timeout,
     );
 
     // 404 is Ollama's answer for an unknown model. Pull it once, then retry.
@@ -293,7 +299,7 @@ export class SemanticIndex {
       res = await this.post(
         "/api/embed",
         { model: this.config.model, input: inputs },
-        this.config.timeoutMs,
+        timeout,
       );
     }
 
@@ -342,6 +348,9 @@ export class SemanticIndex {
       const node = graph.getNode(ref.path);
       if (!node) continue;
       const text = embeddingText(node);
+      // Ollama rejects an empty input outright, failing the whole batch for one
+      // blank note.
+      if (!text.trim()) continue;
       wanted.set(ref.path, hashText(text));
       texts.set(ref.path, text);
     }

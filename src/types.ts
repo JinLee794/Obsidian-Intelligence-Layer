@@ -181,6 +181,7 @@ export interface SemanticConfig {
   /** Cosine floor below which a note is treated as unrelated. */
   minScore: number;
   batchSize: number;
+  /** Per-input request budget; a batch gets this multiplied by its size. */
   timeoutMs: number;
 }
 
