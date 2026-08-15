@@ -29,9 +29,10 @@ These tools are designed to return dense, token-efficient summaries rather than 
 
 ### B. Scalable Search Tools
 
-1. **`semantic_search(query, limit=5)`**
-   * **Optimization:** Leverages a standard external embedding API (e.g., OpenAI) or simple native OS search (ripgrep) rather than requiring a complex local daemon or a heavy 50MB runtime download. 
-   * **Returns:** Only the semantic match snippets (Context strings), not the entire file, keeping token counts strictly bounded.
+1. **`search_vault(query, limit=10)`**
+   * **Optimization:** Cascades an in-tree Okapi BM25 ranker into fuzzy matching, escalating only when BM25 fails to cover every query term. No embedding API, no local daemon, no runtime download.
+   * **Returns:** Ranked snippets (context strings), not entire files, keeping token counts strictly bounded.
+   * **As built:** the originally proposed `semantic_search` was folded into this tool. An embedding tier was prototyped and removed — see `12-context-optimization.md` §open-questions.
 
 2. **`query_frontmatter(key, value_fragment)`**
    * **Optimization:** Runs a straightforward fast native regex/grep scan across the vault rather than attempting to maintain an over-engineered SQLite DB or secondary flat-file cache. Modern Node can handle thousands of text files in milliseconds.
@@ -63,3 +64,15 @@ Instead of silent failures when CRM IDs rot:
 * **Frontmatter Queries:** Performed natively with fast regex/grep; no caching DB or sqlite needed.
 * **Writes:** Require an `mtime` check to prevent race conditions.
 * **Orchestration:** Completely removed. No more phases or pipelines.
+
+> **As built (2026-08) — where this proposal was not followed.** The graph index was
+> *kept*, not removed: `get_related_entities` and the domain aggregators depend on
+> wikilink traversal, and it proved the highest-precision relatedness signal available.
+> A tool named `semantic_search` shipped in v0.5.2–v0.5.5, but it ran fuzzy matching
+> plus a substring scan rather than anything meaning-based — the name never matched the
+> behaviour. A real embedding tier was later built, measured, and removed in favour of
+> an in-tree BM25 ranker with no external API and no daemon, and the tool was folded
+> into `search_vault`. Frontmatter queries resolve from an in-memory index derived from
+> the graph rather than a grep scan. The `mtime` write check and the removal of
+> orchestration phases were adopted as written. See the root `README.md` for the
+> shipped surface.

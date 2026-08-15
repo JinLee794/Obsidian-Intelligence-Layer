@@ -150,7 +150,7 @@ describe("workflow evals", () => {
       "read_note_section",
     ]);
     expect(
-      search.some((result: { path: string }) =>
+      search.results.some((result: { path: string }) =>
         [
           "Customers/Contoso.md",
           "Meetings/2026-02-20-Contoso-Migration-Review.md",

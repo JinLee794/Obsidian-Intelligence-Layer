@@ -26,7 +26,7 @@ import { registerRetrieveTools } from "../src/tools/retrieve.js";
 import { registerWriteTools } from "../src/tools/write.js";
 import { registerDomainTools } from "../src/tools/domain.js";
 import {
-  searchVault,
+  cascadeSearch,
   lexicalSearch,
   fuzzySearch,
   invalidateSearchIndex,
@@ -129,10 +129,10 @@ describe("Fuzzy search", () => {
   bench("fuzzy: copilot", () => { fuzzySearch(graph, "copilot", 10); });
 });
 
-describe("Cascade search (lexical→fuzzy)", () => {
-  bench("cascade: migration", () => { searchVault(graph, config, "migration", undefined, 10); });
-  bench("cascade: risk", () => { searchVault(graph, config, "risk", undefined, 10); });
-  bench("cascade: copilot", () => { searchVault(graph, config, "copilot", undefined, 10); });
+describe("Cascade search (lexical→fuzzy→semantic)", () => {
+  bench("cascade: migration", async () => { await cascadeSearch(graph, "migration", 10, undefined); });
+  bench("cascade: risk", async () => { await cascadeSearch(graph, "risk", 10, undefined); });
+  bench("cascade: copilot", async () => { await cascadeSearch(graph, "copilot", 10, undefined); });
 });
 
 // ── 3. Graph operations ─────────────────────────────────────────────────────
@@ -166,8 +166,9 @@ describe("Tool layer (end-to-end)", () => {
     await server.callTool("search_vault", { query: "migration", limit: 10 });
   });
 
-  bench("semantic_search: risk", async () => {
-    await server.callTool("semantic_search", { query: "risk", limit: 5 });
+  // Escalates past BM25 into the fuzzy tier — the expensive cascade path.
+  bench("search_vault: escalated", async () => {
+    await server.callTool("search_vault", { query: "renewal risk signal", limit: 5 });
   });
 
   bench("get_note_metadata", async () => {
@@ -238,8 +239,7 @@ describe("Scaling profile", () => {
     graph.getNotesByFolder("Customers/");
   });
 
-  bench("graph.getAllNodes iteration", () => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    for (const _node of graph.getAllNodes()) { /* iterate */ }
+  bench("graph full-vault scan", () => {
+    for (const ref of graph.getNotesByFolder("")) graph.getNode(ref.path);
   });
 });

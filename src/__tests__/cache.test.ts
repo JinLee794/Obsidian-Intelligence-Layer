@@ -1,18 +1,19 @@
 /**
- * Tests for SessionCache — LRU note cache, traversal cache, pending writes.
+ * Tests for SessionCache — LRU note cache, self-write marks, traversal cache.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { SessionCache } from "../cache.js";
 import type { ParsedNote } from "../vault.js";
-import type { PendingWrite } from "../types.js";
 
 function makeParsedNote(path: string): ParsedNote {
   return {
     path,
+    title: path,
     frontmatter: { tags: ["test"] },
     content: `# ${path}\nSome content`,
     sections: new Map([["Test", "section body"]]),
-    rawContent: `---\ntags: [test]\n---\n# ${path}\nSome content`,
+    wikilinks: [],
+    tags: ["test"],
   };
 }
 
@@ -85,6 +86,53 @@ describe("SessionCache — note cache", () => {
   });
 });
 
+describe("SessionCache — self-write marks", () => {
+  let cache: SessionCache;
+
+  beforeEach(() => {
+    cache = new SessionCache();
+  });
+
+  it("returns false when nothing was marked", () => {
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(false);
+  });
+
+  it("matches the exact mtime OIL wrote", () => {
+    cache.markSelfWrite("notes/a.md", 1000);
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(true);
+  });
+
+  it("is single-use so a later edit is still processed", () => {
+    cache.markSelfWrite("notes/a.md", 1000);
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(true);
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(false);
+  });
+
+  it("does not match an external edit with a different mtime", () => {
+    cache.markSelfWrite("notes/a.md", 1000);
+    expect(cache.consumeSelfWrite("notes/a.md", 5000)).toBe(false);
+    // The mark survives so OIL's own echo can still be dropped
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(true);
+  });
+
+  it("tolerates sub-millisecond filesystem drift", () => {
+    cache.markSelfWrite("notes/a.md", 1000);
+    expect(cache.consumeSelfWrite("notes/a.md", 1000.5)).toBe(true);
+  });
+
+  it("normalizes Windows-style separators", () => {
+    cache.markSelfWrite("notes\\a.md", 1000);
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(true);
+  });
+
+  it("expires unclaimed marks", () => {
+    cache.markSelfWrite("notes/a.md", 1000);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 31_000);
+    expect(cache.consumeSelfWrite("notes/a.md", 1000)).toBe(false);
+    vi.restoreAllMocks();
+  });
+});
+
 describe("SessionCache — traversal cache", () => {
   let cache: SessionCache;
 
@@ -124,74 +172,6 @@ describe("SessionCache — traversal cache", () => {
   });
 });
 
-describe("SessionCache — pending writes", () => {
-  let cache: SessionCache;
-
-  beforeEach(() => {
-    cache = new SessionCache();
-  });
-
-  it("adds and retrieves a pending write", () => {
-    const write: PendingWrite = {
-      id: "w1",
-      operation: "write_note",
-      path: "notes/new.md",
-      diff: "some diff",
-      createdAt: new Date(),
-    };
-    cache.addPendingWrite(write);
-    expect(cache.getPendingWrite("w1")).toEqual(write);
-  });
-
-  it("returns undefined for unknown write ID", () => {
-    expect(cache.getPendingWrite("nonexistent")).toBeUndefined();
-  });
-
-  it("removes a pending write", () => {
-    const write: PendingWrite = {
-      id: "w1",
-      operation: "write_note",
-      path: "notes/new.md",
-      diff: "some diff",
-      createdAt: new Date(),
-    };
-    cache.addPendingWrite(write);
-    expect(cache.removePendingWrite("w1")).toBe(true);
-    expect(cache.getPendingWrite("w1")).toBeUndefined();
-  });
-
-  it("returns false when removing nonexistent write", () => {
-    expect(cache.removePendingWrite("nonexistent")).toBe(false);
-  });
-
-  it("lists all pending writes", () => {
-    const w1: PendingWrite = {
-      id: "w1", operation: "write_note", path: "a.md", diff: "d1", createdAt: new Date(),
-    };
-    const w2: PendingWrite = {
-      id: "w2", operation: "patch_note", path: "b.md", diff: "d2", createdAt: new Date(),
-    };
-    cache.addPendingWrite(w1);
-    cache.addPendingWrite(w2);
-    expect(cache.listPendingWrites()).toHaveLength(2);
-  });
-
-  it("preserves pending writes on clear()", () => {
-    const write: PendingWrite = {
-      id: "w1", operation: "write_note", path: "a.md", diff: "d1", createdAt: new Date(),
-    };
-    cache.addPendingWrite(write);
-    cache.putNote("a.md", makeParsedNote("a.md"));
-
-    cache.clear();
-
-    // Notes and traversals cleared, but pending writes persist
-    expect(cache.getNote("a.md")).toBeUndefined();
-    expect(cache.getRecentlyAccessed()).toEqual([]);
-    expect(cache.getPendingWrite("w1")).toEqual(write);
-  });
-});
-
 describe("SessionCache — getStats", () => {
   it("reports zero counts on empty cache", () => {
     const cache = new SessionCache();
@@ -199,43 +179,25 @@ describe("SessionCache — getStats", () => {
     expect(stats.cachedNotes).toBe(0);
     expect(stats.cachedTraversals).toBe(0);
     expect(stats.recentlyAccessed).toBe(0);
-    expect(stats.pendingWrites).toBe(0);
   });
 
   it("reports correct counts after populating", () => {
     const cache = new SessionCache();
     cache.putNote("a.md", makeParsedNote("a.md"));
     cache.putNote("b.md", makeParsedNote("b.md"));
-    cache.addPendingWrite({
-      id: "w1",
-      operation: "write_note",
-      path: "c.md",
-      diff: "diff",
-      createdAt: new Date(),
-    });
 
     const stats = cache.getStats();
     expect(stats.cachedNotes).toBe(2);
     expect(stats.recentlyAccessed).toBe(2);
-    expect(stats.pendingWrites).toBe(1);
   });
 
   it("reflects clear() correctly", () => {
     const cache = new SessionCache();
     cache.putNote("a.md", makeParsedNote("a.md"));
-    cache.addPendingWrite({
-      id: "w1",
-      operation: "write_note",
-      path: "c.md",
-      diff: "diff",
-      createdAt: new Date(),
-    });
 
     cache.clear();
     const stats = cache.getStats();
     expect(stats.cachedNotes).toBe(0);
     expect(stats.recentlyAccessed).toBe(0);
-    // Pending writes survive clear()
-    expect(stats.pendingWrites).toBe(1);
   });
 });

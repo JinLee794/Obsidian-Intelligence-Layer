@@ -4,7 +4,8 @@
  * OIL CLI — npx entry point.
  *
  * Usage:
- *   npx obsidian-intelligence-layer mcp
+ *   npx obsidian-intelligence-layer mcp [flags]
+ *   npx obsidian-intelligence-layer doctor
  *
  * Environment:
  *   OBSIDIAN_VAULT_PATH — absolute path to the Obsidian vault (required).
@@ -31,16 +32,69 @@ if (existsSync(envFile)) {
   }
 }
 
-// ── Route subcommand ───────────────────────────────────────────────
-const command = process.argv[2];
+const USAGE = `Usage: obsidian-intelligence-layer <command> [flags]
 
-if (command === "mcp") {
+Commands:
+  mcp                       Start the MCP server over stdio.
+  doctor                    Check vault, Ollama and effective settings, then exit.
+
+Flags (equivalent env vars in parentheses):
+  --vault=<path>            Vault to serve (OBSIDIAN_VAULT_PATH)
+  --no-semantic             Disable the semantic tier (OIL_SEMANTIC=off)
+  --semantic-model=<name>   Embedding model (OIL_SEMANTIC_MODEL)
+  --semantic-endpoint=<url> Ollama base URL (OIL_SEMANTIC_ENDPOINT)
+  --semantic-min-score=<n>  Cosine floor for a hit (OIL_SEMANTIC_MIN_SCORE)
+
+Flags win over the environment, which wins over oil.config.yaml in the vault.`;
+
+/**
+ * Translate flags into the environment the server already reads, so an MCP
+ * client can drive every setting from either `args` or `env` — whichever its
+ * config format makes easier.
+ */
+function applyFlags(argv: string[]): string | null {
+  for (const arg of argv) {
+    if (arg === "--no-semantic") {
+      process.env.OIL_SEMANTIC = "off";
+      continue;
+    }
+    const match = /^--([a-z-]+)=(.*)$/.exec(arg);
+    if (!match) return arg;
+
+    const [, name, value] = match;
+    switch (name) {
+      case "vault":
+        process.env.OBSIDIAN_VAULT_PATH = resolve(value);
+        break;
+      case "semantic-model":
+        process.env.OIL_SEMANTIC_MODEL = value;
+        break;
+      case "semantic-endpoint":
+        process.env.OIL_SEMANTIC_ENDPOINT = value;
+        break;
+      case "semantic-min-score":
+        process.env.OIL_SEMANTIC_MIN_SCORE = value;
+        break;
+      default:
+        return arg;
+    }
+  }
+  return null;
+}
+
+// ── Route subcommand ───────────────────────────────────────────────
+const [command, ...flags] = process.argv.slice(2);
+const unknown = applyFlags(flags);
+
+if (unknown) {
+  console.error(`Unknown option: ${unknown}\n\n${USAGE}`);
+  process.exit(1);
+} else if (command === "mcp") {
   await import("./index.js");
+} else if (command === "doctor") {
+  const { runDoctor } = await import("./doctor.js");
+  process.exit(await runDoctor());
 } else {
-  console.error(
-    "Usage: obsidian-intelligence-layer mcp\n\n" +
-      "Starts the OIL MCP server over stdio.\n" +
-      "Requires OBSIDIAN_VAULT_PATH to be set.",
-  );
+  console.error(USAGE);
   process.exit(1);
 }

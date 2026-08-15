@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { VaultWatcher } from "../watcher.js";
 import { GraphIndex } from "../graph.js";
 import { SessionCache } from "../cache.js";
-import { mkdtemp, rm, mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, unlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -47,6 +47,31 @@ describe("VaultWatcher — lifecycle", () => {
     const cache = new SessionCache();
     const watcher = new VaultWatcher(vaultRoot, graph, cache);
     await watcher.stop(); // Should not throw
+  });
+
+  it("reports readiness only once the initial scan has finished", async () => {
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const cache = new SessionCache();
+    const watcher = new VaultWatcher(vaultRoot, graph, cache);
+
+    expect(watcher.getStatus().ready).toBe(false);
+
+    watcher.start();
+    // Changes made before this resolves are simply not observed by chokidar,
+    // which silently loses edits on a vault large enough to make the scan slow.
+    await watcher.whenReady();
+    expect(watcher.getStatus().ready).toBe(true);
+
+    await watcher.stop();
+    expect(watcher.getStatus().ready).toBe(false);
+  });
+
+  it("whenReady resolves immediately when never started", async () => {
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const watcher = new VaultWatcher(vaultRoot, graph, new SessionCache());
+    await expect(watcher.whenReady()).resolves.toBeUndefined();
   });
 });
 
@@ -176,6 +201,47 @@ describe("VaultWatcher — file change detection", () => {
 
     // Clean up
     await unlink(join(vaultRoot, "notes/data.json"));
+    await new Promise((r) => setTimeout(r, 600));
+  });
+
+  it("skips the echo of a write OIL already indexed", { retry: 2 }, async () => {
+    graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    cache = new SessionCache();
+    watcher = new VaultWatcher(vaultRoot, graph, cache);
+    watcher.start();
+    await new Promise((r) => setTimeout(r, 500));
+
+    const notePath = "notes/self-written.md";
+    const fullPath = join(vaultRoot, notePath);
+
+    // Stand in for a write tool: write, then mark the resulting mtime the way
+    // syncIndexes does. The graph is deliberately left un-indexed so that any
+    // re-index by the watcher is observable.
+    await writeFile(fullPath, `---\ntags: [self]\n---\n# Self Written\n`, "utf-8");
+    cache.markSelfWrite(notePath, (await stat(fullPath)).mtimeMs);
+
+    await new Promise((r) => setTimeout(r, 2000));
+    expect(graph.getNode(notePath)).toBeUndefined();
+
+    // A genuine external edit still gets picked up
+    await writeFile(
+      fullPath,
+      `---\ntags: [self]\n---\n# Self Written\nEdited by hand.\n`,
+      "utf-8",
+    );
+
+    let detected = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (graph.getNode(notePath)) {
+        detected = true;
+        break;
+      }
+    }
+    expect(detected).toBe(true);
+
+    await unlink(fullPath).catch(() => {});
     await new Promise((r) => setTimeout(r, 600));
   });
 });

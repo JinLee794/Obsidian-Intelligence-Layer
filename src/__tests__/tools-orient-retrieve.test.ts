@@ -218,7 +218,7 @@ describe("retrieve v2 — get_related_entities", () => {
   });
 });
 
-describe("retrieve v2 — semantic_search", () => {
+describe("retrieve v2 — search_vault cascade", () => {
   let server: MockMcpServer;
 
   beforeEach(async () => {
@@ -229,22 +229,32 @@ describe("retrieve v2 — semantic_search", () => {
     registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
-  it("returns bounded snippet results", async () => {
-    const result = await server.callToolJson("semantic_search", {
+  it("returns ranked results with excerpts and refs", async () => {
+    const result = await server.callToolJson("search_vault", {
       query: "migration SOW",
       limit: 3,
     });
 
     expect(result.count).toBeGreaterThan(0);
-    expect(result.results[0].snippet).toBeTruthy();
-    expect(result.results[0].snippet.length).toBeLessThanOrEqual(230);
-    expect(result.results[0].ref).toBe(result.results[0].path);
+    expect(result.results[0].excerpt).toBeTruthy();
+    expect(result.results[0].ref).toBeTruthy();
+  });
+
+  it("reports which tiers ran", async () => {
+    const result = await server.callToolJson("search_vault", { query: "migration SOW" });
+    expect(result.tiers_used).toContain("lexical");
+  });
+
+  // A query no note matches must still resolve cleanly rather than hang or throw.
+  it("completes the cascade when no tier finds a match", async () => {
+    const result = await server.callToolJson("search_vault", {
+      query: "an idea phrased in words no note uses",
+    });
+    expect(Array.isArray(result.results)).toBe(true);
   });
 
   it("rejects empty query with INVALID_INPUT", async () => {
-    const result = await server.callToolJson("semantic_search", {
-      query: "  ",
-    });
+    const result = await server.callToolJson("search_vault", { query: "  " });
 
     expect(result.error).toBeDefined();
     expect(result.error_code).toBe("INVALID_INPUT");
@@ -278,8 +288,8 @@ describe("retrieve v2 — query_frontmatter", () => {
       limit: 3,
     });
 
-    expect(result.length).toBeGreaterThan(0);
-    expect(result[0].ref).toBe(result[0].path);
+    expect(result.results.length).toBeGreaterThan(0);
+    expect(result.results[0].ref).toBe(result.results[0].path);
   });
 
   it("reflects index on new tool registration", async () => {

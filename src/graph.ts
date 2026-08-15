@@ -57,6 +57,17 @@ export class GraphIndex {
   private vaultPath: string;
   private _lastIndexed: Date = new Date();
   private _building = false;
+  private _version = 0;
+
+  /**
+   * Recent per-note mutations, so a derived index can refresh only what moved.
+   * Bounded: past the limit the oldest entries are dropped and anyone lagging
+   * that far is told to rebuild, which is cheaper than tracking forever.
+   */
+  private mutationLog: Array<{ version: number; path: string }> = [];
+  private static readonly MUTATION_LOG_LIMIT = 2048;
+  /** Deltas below this version have been discarded or invalidated wholesale. */
+  private logFloor = 0;
 
   constructor(vaultPath: string) {
     this.vaultPath = vaultPath;
@@ -70,9 +81,52 @@ export class GraphIndex {
     return this.nodes.size;
   }
 
+  /**
+   * Bumped by every mutation. Derived indexes (search) key their caches on it —
+   * node count alone cannot detect an in-place content edit.
+   */
+  get version(): number {
+    return this._version;
+  }
+
   /** True while a build or incremental update is in progress. */
   get building(): boolean {
     return this._building;
+  }
+
+  private recordMutation(path: string): void {
+    this.mutationLog.push({ version: this._version, path });
+    if (this.mutationLog.length > GraphIndex.MUTATION_LOG_LIMIT) {
+      const dropped = this.mutationLog.splice(
+        0,
+        this.mutationLog.length - GraphIndex.MUTATION_LOG_LIMIT,
+      );
+      this.logFloor = dropped[dropped.length - 1].version;
+    }
+  }
+
+  /** Forget the delta history — callers at any earlier version must rebuild. */
+  private resetMutationLog(): void {
+    this.mutationLog.length = 0;
+    this.logFloor = this._version;
+  }
+
+  /**
+   * Notes mutated since `sinceVersion`, or null when that delta is no longer
+   * available and the caller has to rebuild from scratch.
+   *
+   * A path is returned whether it was added, edited or deleted; callers are
+   * expected to re-read the node and treat a missing one as a removal.
+   */
+  changesSince(sinceVersion: number): string[] | null {
+    if (sinceVersion < this.logFloor) return null;
+    if (sinceVersion >= this._version) return [];
+
+    const paths = new Set<string>();
+    for (const entry of this.mutationLog) {
+      if (entry.version > sinceVersion) paths.add(entry.path);
+    }
+    return [...paths];
   }
 
   // ─── Full Index Build ───────────────────────────────────────────────────
@@ -82,11 +136,13 @@ export class GraphIndex {
    */
   async build(): Promise<void> {
     this._building = true;
+    this._version++;
     this.nodes.clear();
     this.tagIndex.clear();
     this.titleIndex.clear();
     this.rawOutLinks.clear();
     this.fileMtimes.clear();
+    this.resetMutationLog();
 
     const notePaths = await listAllNotes(this.vaultPath);
 
@@ -127,6 +183,9 @@ export class GraphIndex {
       const tags = this.extractTags(frontmatter, content);
       const headings = this.extractHeadings(content);
       const bodySnippet = content.slice(0, 10_000);
+
+      this._version++;
+      this.recordMutation(notePath);
 
       // Store raw wikilink targets for persistence
       this.rawOutLinks.set(notePath, wikilinks);
@@ -226,6 +285,9 @@ export class GraphIndex {
   }
 
   private removeNodeInternal(notePath: string, node: GraphNode): void {
+    this._version++;
+    this.recordMutation(notePath);
+
     // Remove from tag index
     for (const tag of node.tags) {
       this.tagIndex.get(tag)?.delete(notePath);
@@ -370,11 +432,13 @@ export class GraphIndex {
         }
       }
 
+      this._version++;
       this.nodes.clear();
       this.tagIndex.clear();
       this.titleIndex.clear();
       this.rawOutLinks.clear();
       this.fileMtimes.clear();
+      this.resetMutationLog();
 
       for (const pn of data.nodes) {
         const node: GraphNode = {

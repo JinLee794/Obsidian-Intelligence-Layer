@@ -36,16 +36,17 @@ const DEFAULTS: OilConfig = {
     graphIndexFile: "_oil-graph.json",
     backgroundIndexThresholdMs: 3000,
   },
-  writeGate: {
-    diffFormat: "markdown",
+  semantic: {
+    enabled: true,
+    endpoint: "http://127.0.0.1:11434",
+    model: "nomic-embed-text",
+    indexFile: "_oil-vectors.json",
+    minScore: 0.45,
+    batchSize: 16,
+    timeoutMs: 20000,
+  },
+  audit: {
     logAllWrites: true,
-    batchDiffMaxNotes: 50,
-    autoConfirmedSections: ["Agent Insights", "Connect Hooks"],
-    autoConfirmedOperations: [
-      "log_agent_action",
-      "capture_connect_hook",
-      "patch_note_designated",
-    ],
   },
 };
 
@@ -81,6 +82,26 @@ function deepMerge(
 }
 
 /**
+ * Fold the deprecated `write_gate` block into `audit`.
+ * Applied before remapping so `audit` always wins, whichever block YAML lists last.
+ */
+function applyLegacyAliases(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!("write_gate" in raw)) return raw;
+
+  const { write_gate: legacy, ...rest } = raw;
+  const asObject = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+
+  console.error(
+    "[OIL] Config: `write_gate` is deprecated — rename it to `audit`. Using it for now.",
+  );
+
+  return { ...rest, audit: { ...asObject(legacy), ...asObject(rest.audit) } };
+}
+
+/**
  * Remap snake_case YAML keys to camelCase config keys.
  */
 function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
@@ -107,12 +128,11 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     title_field: "titleField",
     graph_index_file: "graphIndexFile",
     background_index_threshold_ms: "backgroundIndexThresholdMs",
-    write_gate: "writeGate",
-    diff_format: "diffFormat",
+    index_file: "indexFile",
+    min_score: "minScore",
+    batch_size: "batchSize",
+    timeout_ms: "timeoutMs",
     log_all_writes: "logAllWrites",
-    batch_diff_max_notes: "batchDiffMaxNotes",
-    auto_confirmed_sections: "autoConfirmedSections",
-    auto_confirmed_operations: "autoConfirmedOperations",
   };
 
   const result: Record<string, unknown> = {};
@@ -128,6 +148,52 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * Apply environment overrides on top of the vault's YAML.
+ *
+ * An MCP client configures a server through `command`, `args` and `env` — never
+ * through a file inside the user's vault. Anything a user needs to decide at
+ * connection time therefore has to be reachable from the environment, so these
+ * take precedence over `oil.config.yaml`.
+ */
+export function applyEnvOverrides(
+  config: OilConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): OilConfig {
+  const semantic = { ...config.semantic };
+
+  const enabled = parseBoolean(env.OIL_SEMANTIC);
+  if (enabled !== undefined) semantic.enabled = enabled;
+
+  if (env.OIL_SEMANTIC_ENDPOINT) semantic.endpoint = env.OIL_SEMANTIC_ENDPOINT;
+  if (env.OIL_SEMANTIC_MODEL) semantic.model = env.OIL_SEMANTIC_MODEL;
+
+  const minScore = parseNumber(env.OIL_SEMANTIC_MIN_SCORE, "OIL_SEMANTIC_MIN_SCORE");
+  if (minScore !== undefined) semantic.minScore = minScore;
+
+  return { ...config, semantic };
+}
+
+/** Accepts the spellings people actually type, and warns rather than guessing. */
+function parseBoolean(raw: string | undefined): boolean | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "on", "yes", "enabled"].includes(value)) return true;
+  if (["0", "false", "off", "no", "disabled"].includes(value)) return false;
+  console.error(`[OIL] Config: ignoring OIL_SEMANTIC='${raw}' — expected on or off.`);
+  return undefined;
+}
+
+function parseNumber(raw: string | undefined, name: string): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    console.error(`[OIL] Config: ignoring ${name}='${raw}' — expected a number.`);
+    return undefined;
+  }
+  return value;
+}
+
+/**
  * Load OIL configuration from `oil.config.yaml` in the vault root.
  * Falls back to defaults if the file doesn't exist.
  */
@@ -138,16 +204,18 @@ export async function loadConfig(vaultPath: string): Promise<OilConfig> {
     const raw = await readFile(configPath, "utf-8");
     const parsed = parseYaml(raw) as Record<string, unknown> | null;
     if (!parsed || typeof parsed !== "object") {
-      return { ...DEFAULTS };
+      return applyEnvOverrides({ ...DEFAULTS });
     }
-    const remapped = remapYaml(parsed);
-    return deepMerge(
-      DEFAULTS as unknown as Record<string, unknown>,
-      remapped,
-    ) as unknown as OilConfig;
+    const remapped = remapYaml(applyLegacyAliases(parsed));
+    return applyEnvOverrides(
+      deepMerge(
+        DEFAULTS as unknown as Record<string, unknown>,
+        remapped,
+      ) as unknown as OilConfig,
+    );
   } catch {
     // Config file doesn't exist — use defaults
-    return { ...DEFAULTS };
+    return applyEnvOverrides({ ...DEFAULTS });
   }
 }
 

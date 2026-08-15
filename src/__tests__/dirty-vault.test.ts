@@ -13,8 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { GraphIndex } from "../graph.js";
 import { DEFAULT_CONFIG } from "../config.js";
-import { searchVault, invalidateSearchIndex } from "../search.js";
-import { listAllNotes } from "../vault.js";
+import { cascadeSearch, invalidateSearchIndex } from "../search.js";import { listAllNotes } from "../vault.js";
 
 let tempDir: string;
 let vaultRoot: string;
@@ -121,8 +120,8 @@ describe("dirty-vault robustness", () => {
     expect(graph.getNode("Customers/Anchor Customer.md")).toBeDefined();
   });
 
-  it("keeps search functional when malformed frontmatter exists nearby", () => {
-    const results = searchVault(graph, DEFAULT_CONFIG, "Anchor Customer", undefined, 5);
+  it("keeps search functional when malformed frontmatter exists nearby", async () => {
+    const { results } = await cascadeSearch(graph, "Anchor Customer", 5, undefined);
     expect(results.some((result) => result.path === "Customers/Anchor Customer.md")).toBe(true);
   });
 
@@ -138,11 +137,11 @@ describe("dirty-vault robustness", () => {
     ]);
   });
 
-  it("finds notes in folders with spaces and large bodies", () => {
-    const folderResults = searchVault(graph, DEFAULT_CONFIG, "Quarterly Review", undefined, 5);
+  it("finds notes in folders with spaces and large bodies", async () => {
+    const { results: folderResults } = await cascadeSearch(graph, "Quarterly Review", 5, undefined);
     expect(folderResults.some((result) => result.path === "Messy Folder/Sub Folder/Quarterly Review.md")).toBe(true);
 
-    const largeBodyResults = searchVault(graph, DEFAULT_CONFIG, "Escalation-marker", undefined, 5);
+    const { results: largeBodyResults } = await cascadeSearch(graph, "Escalation-marker", 5, undefined);
     expect(largeBodyResults.some((result) => result.path === "Daily Notes/2026-04-20 messy note.md")).toBe(true);
   });
 });

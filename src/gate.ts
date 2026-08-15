@@ -1,100 +1,18 @@
 /**
- * OIL — Tiered Write Gate Engine
- * Routes writes through auto-confirmed (Tier 1) or gated (Tier 2) paths.
- * All writes are logged to _agent-log/ for auditability.
+ * OIL — Write execution and audit logging
+ * Concurrency is enforced by the mtime checks in tools/write.ts; this module
+ * only performs the write and records it to _agent-log/.
  */
 
 import { writeFile, appendFile, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
-import type { OilConfig, PendingWrite } from "./types.js";
-import type { SessionCache } from "./cache.js";
+import { dirname } from "node:path";
+import type { OilConfig } from "./types.js";
 import { securePath, noteExists, detectLineEnding, normalizeLineEndings } from "./vault.js";
-
-// ─── Diff Generation ──────────────────────────────────────────────────────────
-
-export interface WriteDiff {
-  id: string;
-  operation: string;
-  path: string;
-  diff: string;
-  sideEffects?: string[];
-}
-
-/**
- * Generate a markdown-formatted diff for human review.
- */
-export function generateDiff(
-  operation: string,
-  path: string,
-  content: string,
-  isNew: boolean,
-  sideEffects?: string[],
-): WriteDiff {
-  const id = randomUUID();
-  const lines = [
-    `## Proposed Write — ${operation}`,
-    "",
-    `**Action:** ${isNew ? "Create new note" : "Update existing note"}`,
-    `**Path:** \`${path}\``,
-    "",
-    "**Content preview:**",
-    "",
-    content.length > 1000
-      ? `${content.slice(0, 1000)}\n\n*... (${content.length} chars total)*`
-      : content,
-  ];
-
-  if (sideEffects?.length) {
-    lines.push("", "**Side effects:**");
-    for (const effect of sideEffects) {
-      lines.push(`  - ${effect}`);
-    }
-  }
-
-  lines.push("", 'Reply **confirm** to execute, or describe changes you want made.');
-
-  return {
-    id,
-    operation,
-    path,
-    diff: lines.join("\n"),
-    sideEffects,
-  };
-}
-
-// ─── Tier Routing ─────────────────────────────────────────────────────────────
-
-/**
- * Check if an operation is auto-confirmed (Tier 1).
- */
-export function isAutoConfirmed(
-  config: OilConfig,
-  operation: string,
-  targetSection?: string,
-): boolean {
-  // Check if operation is in the auto-confirmed list
-  if (config.writeGate.autoConfirmedOperations.includes(operation)) {
-    return true;
-  }
-
-  // Check if the target section is in the auto-confirmed sections list
-  if (
-    operation === "patch_note" &&
-    targetSection &&
-    config.writeGate.autoConfirmedSections.includes(targetSection)
-  ) {
-    return true;
-  }
-
-  return false;
-}
 
 // ─── Write Execution ──────────────────────────────────────────────────────────
 
 /**
  * Execute a write operation — actually writes to the vault filesystem.
- * Used both by auto-confirmed and by gated writes after confirmation.
  */
 export async function executeWrite(
   vaultPath: string,
@@ -143,19 +61,17 @@ export async function appendToSection(
   let result: string;
 
   if (match) {
-    const headingLevel = match[1].length;
     const insertPos = match.index + match[0].length;
 
-    // Find the end of this section (next heading of same or higher level, or EOF)
+    // A section ends at the NEXT HEADING OF ANY LEVEL, matching parseSections().
+    // Ending it at the next same-or-higher heading instead would append past a
+    // section's own sub-headings — so a write to "Agent Insights" would land
+    // outside what read_note_section() reports for "Agent Insights", and an
+    // agent verifying its own write would not find it. For an H1 title, whose
+    // siblings are all deeper, the content went to end-of-file entirely.
     const rest = raw.slice(insertPos);
-    const nextHeadingPattern = new RegExp(
-      `^#{1,${headingLevel}}\\s+`,
-      "m",
-    );
-    const nextMatch = nextHeadingPattern.exec(rest);
-    const sectionEnd = nextMatch
-      ? insertPos + nextMatch.index
-      : raw.length;
+    const nextMatch = /^#{1,6}\s+/m.exec(rest);
+    const sectionEnd = nextMatch ? insertPos + nextMatch.index : raw.length;
 
     if (operation === "prepend") {
       result =
@@ -186,12 +102,13 @@ export async function logWrite(
   vaultPath: string,
   config: OilConfig,
   entry: {
-    tier: "auto" | "gated";
     operation: string;
     path: string;
     detail?: string;
   },
 ): Promise<void> {
+  if (!config.audit.logAllWrites) return;
+
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10);
   const timeStr = now.toISOString().slice(11, 19);
@@ -203,7 +120,8 @@ export async function logWrite(
 
   const logEntry = [
     "",
-    `### ${timeStr} — ${entry.operation} [${entry.tier}]`,
+    // The [auto] marker is retained so previously written logs stay parseable.
+    `### ${timeStr} — ${entry.operation} [auto]`,
     `- **Path:** \`${entry.path}\``,
   ];
   if (entry.detail) {
@@ -219,152 +137,6 @@ export async function logWrite(
   } else {
     await appendFile(fullPath, logEntry.join("\n"), "utf-8");
   }
-}
-
-// ─── Gated Write Flow ─────────────────────────────────────────────────────────
-
-/**
- * Queue a gated write — stores the pending operation for later confirmation.
- */
-export function queueGatedWrite(
-  cache: SessionCache,
-  diff: WriteDiff,
-  writePayload: {
-    content: string;
-    mode: "create" | "overwrite" | "append" | "move";
-    sourcePath?: string;
-  },
-): string {
-  const pending: PendingWrite = {
-    id: diff.id,
-    operation: diff.operation,
-    path: diff.path,
-    diff: JSON.stringify({
-      diffText: diff.diff,
-      content: writePayload.content,
-      mode: writePayload.mode,
-      sideEffects: diff.sideEffects,
-      ...(writePayload.sourcePath ? { sourcePath: writePayload.sourcePath } : {}),
-    }),
-    createdAt: new Date(),
-  };
-  cache.addPendingWrite(pending);
-  return diff.id;
-}
-
-/**
- * Confirm and execute a pending gated write.
- */
-export async function confirmWrite(
-  vaultPath: string,
-  config: OilConfig,
-  cache: SessionCache,
-  writeId: string,
-): Promise<{ success: boolean; path?: string; error?: string }> {
-  const pending = cache.getPendingWrite(writeId);
-  if (!pending) {
-    return { success: false, error: `No pending write with ID: ${writeId}` };
-  }
-
-  const payload = JSON.parse(pending.diff) as {
-    content: string;
-    mode: "create" | "overwrite" | "append" | "move";
-    sourcePath?: string;
-  };
-
-  if (payload.mode === "move" && payload.sourcePath) {
-    // Move operation: create new file, delete old file
-    await executeWrite(vaultPath, pending.path, payload.content, "create");
-    const oldFullPath = securePath(vaultPath, payload.sourcePath);
-    const { unlink } = await import("node:fs/promises");
-    await unlink(oldFullPath);
-  } else {
-    await executeWrite(vaultPath, pending.path, payload.content, payload.mode === "move" ? "create" : payload.mode);
-  }
-
-  await logWrite(vaultPath, config, {
-    tier: "gated",
-    operation: pending.operation,
-    path: pending.path,
-    detail: payload.mode === "move"
-      ? `Moved from ${payload.sourcePath} (confirmed by user)`
-      : "Confirmed by user",
-  });
-
-  cache.removePendingWrite(writeId);
-  return { success: true, path: pending.path };
-}
-
-/**
- * Reject a pending gated write.
- */
-export function rejectWrite(
-  cache: SessionCache,
-  writeId: string,
-): { success: boolean; error?: string } {
-  const pending = cache.getPendingWrite(writeId);
-  if (!pending) {
-    return { success: false, error: `No pending write with ID: ${writeId}` };
-  }
-  cache.removePendingWrite(writeId);
-  return { success: true };
-}
-
-// ─── Compact Batch Diff ───────────────────────────────────────────────────────
-
-/**
- * Generate a compact batch diff for bulk operations (apply_tags, batch promote).
- * When item count > 5, shows a folder summary + first 5 items instead of
- * listing every individual change.
- */
-export function generateCompactBatchDiff(
-  operation: string,
-  label: string,
-  items: { path: string; detail: string }[],
-): WriteDiff {
-  const id = randomUUID();
-  const compact = items.length > 5;
-
-  const lines = [
-    `## Batch Operation — ${operation}`,
-    "",
-    `**Action:** ${label}`,
-    `**Notes affected:** ${items.length}`,
-    "",
-  ];
-
-  if (compact) {
-    // Group by folder
-    const byFolder = new Map<string, number>();
-    for (const item of items) {
-      const slash = item.path.lastIndexOf("/");
-      const folder = slash >= 0 ? item.path.slice(0, slash + 1) : "(root)";
-      byFolder.set(folder, (byFolder.get(folder) ?? 0) + 1);
-    }
-
-    lines.push("**By folder:**");
-    for (const [folder, count] of [...byFolder.entries()].sort((a, b) => b[1] - a[1])) {
-      lines.push(`- **${folder}**: ${count} note(s)`);
-    }
-    lines.push("", "**First 5 notes:**");
-    for (const item of items.slice(0, 5)) {
-      lines.push(`- \`${item.path}\`: ${item.detail}`);
-    }
-    lines.push(`- *... and ${items.length - 5} more*`);
-  } else {
-    for (const item of items) {
-      lines.push(`- \`${item.path}\`: ${item.detail}`);
-    }
-  }
-
-  lines.push("", "Reply **confirm** to execute, or describe changes you want made.");
-
-  return {
-    id,
-    operation,
-    path: `(${items.length} notes)`,
-    diff: lines.join("\n"),
-  };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

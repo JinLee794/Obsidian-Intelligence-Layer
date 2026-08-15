@@ -13,8 +13,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GraphIndex } from "../graph.js";
 import { loadConfig } from "../config.js";
-import { searchVault, invalidateSearchIndex, fuzzySearch } from "../search.js";
-import { setupHarness, FIXTURE_VAULT, type MockMcpServer } from "./harness.js";
+import { cascadeSearch, invalidateSearchIndex, fuzzySearch } from "../search.js";import { setupHarness, FIXTURE_VAULT, type MockMcpServer } from "./harness.js";
 import { generateVault } from "../../bench/fixtures/generate-vault.js";
 import type { OilConfig } from "../types.js";
 
@@ -69,11 +68,9 @@ describe("Cold-start ceilings", () => {
 describe("Search latency ceilings", () => {
   it("cascade search ≤50ms", async () => {
     // Warm up index
-    searchVault(graph, config, "warmup", undefined, 5);
+    await cascadeSearch(graph, "warmup", 5, undefined);
 
-    const ms = await medianMs(() => {
-      searchVault(graph, config, "migration", undefined, 10);
-    });
+    const ms = await medianMs(() => cascadeSearch(graph, "migration", 10, undefined));
     expect(ms).toBeLessThan(50);
   });
 
@@ -148,11 +145,9 @@ describe("Scaling regression", () => {
     const buildMs = performance.now() - buildT0;
 
     // Warm the index
-    searchVault(g, cfg, "warmup", undefined, 1);
+    await cascadeSearch(g, "warmup", 1, undefined);
 
-    const searchMs = await medianMs(() => {
-      searchVault(g, cfg, "migration", undefined, 10);
-    });
+    const searchMs = await medianMs(() => cascadeSearch(g, "migration", 10, undefined));
 
     return { buildMs, searchMs, dir };
   }

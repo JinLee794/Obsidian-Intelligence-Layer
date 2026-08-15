@@ -4,7 +4,7 @@
  * Caches file reads and graph traversal results. Avoids redundant reads in multi-turn flows.
  */
 
-import type { NoteRef, PendingWrite } from "./types.js";
+import type { NoteRef } from "./types.js";
 import type { ParsedNote } from "./vault.js";
 
 /**
@@ -31,13 +31,15 @@ export class SessionCache {
   private noteCache = new Map<string, NoteCacheEntry>();
   /** Cached graph traversal results */
   private traversalCache = new Map<string, { refs: NoteRef[]; cachedAt: number }>();
-  /** Queue of gated write operations awaiting confirmation */
-  private pendingWrites: PendingWrite[] = [];
+  /** Writes OIL made itself: path → the mtime it produced and already indexed */
+  private selfWrites = new Map<string, { mtimeMs: number; expiresAt: number }>();
 
   private readonly maxRecentlyAccessed = 50;
   private readonly maxNoteCache = 200;
   /** Cache entries expire after 5 minutes */
   private readonly ttlMs = 5 * 60 * 1000;
+  /** Unclaimed self-write marks expire well after the watcher's debounce */
+  private readonly selfWriteTtlMs = 30 * 1000;
 
   // ─── Note Cache ─────────────────────────────────────────────────────────
 
@@ -94,6 +96,47 @@ export class SessionCache {
     }
   }
 
+  // ─── Self-Write Marks ───────────────────────────────────────────────────
+
+  /**
+   * Record that OIL itself produced `mtimeMs` for `path` and has already
+   * re-indexed it inline. The file watcher will see its own echo ~300ms later
+   * and can skip the redundant re-index.
+   */
+  markSelfWrite(path: string, mtimeMs: number): void {
+    this.pruneSelfWrites();
+    this.selfWrites.set(cacheKey(path), {
+      mtimeMs,
+      expiresAt: Date.now() + this.selfWriteTtlMs,
+    });
+  }
+
+  /**
+   * True when `mtimeMs` is exactly the state OIL last wrote, meaning the change
+   * event is our own echo. Consumes the mark, so a later external edit — even
+   * one landing on the same path — is still processed normally.
+   */
+  consumeSelfWrite(path: string, mtimeMs: number): boolean {
+    const key = cacheKey(path);
+    const entry = this.selfWrites.get(key);
+    if (!entry) return false;
+    if (Date.now() > entry.expiresAt) {
+      this.selfWrites.delete(key);
+      return false;
+    }
+    // File systems vary by sub-millisecond precision.
+    if (Math.abs(entry.mtimeMs - mtimeMs) > 1) return false;
+    this.selfWrites.delete(key);
+    return true;
+  }
+
+  private pruneSelfWrites(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.selfWrites) {
+      if (now > entry.expiresAt) this.selfWrites.delete(key);
+    }
+  }
+
   // ─── Graph Traversal Cache ──────────────────────────────────────────────
 
   /**
@@ -131,27 +174,6 @@ export class SessionCache {
     return [...this.recentlyAccessed];
   }
 
-  // ─── Pending Writes ─────────────────────────────────────────────────────
-
-  addPendingWrite(write: PendingWrite): void {
-    this.pendingWrites.push(write);
-  }
-
-  getPendingWrite(id: string): PendingWrite | undefined {
-    return this.pendingWrites.find((w) => w.id === id);
-  }
-
-  removePendingWrite(id: string): boolean {
-    const idx = this.pendingWrites.findIndex((w) => w.id === id);
-    if (idx === -1) return false;
-    this.pendingWrites.splice(idx, 1);
-    return true;
-  }
-
-  listPendingWrites(): PendingWrite[] {
-    return [...this.pendingWrites];
-  }
-
   // ─── Housekeeping ──────────────────────────────────────────────────────
 
   private evictIfNeeded(): void {
@@ -173,20 +195,17 @@ export class SessionCache {
     this.noteCache.clear();
     this.traversalCache.clear();
     this.recentlyAccessed.length = 0;
-    // Pending writes are NOT cleared — they persist until confirmed/rejected.
   }
 
   getStats(): {
     cachedNotes: number;
     cachedTraversals: number;
     recentlyAccessed: number;
-    pendingWrites: number;
   } {
     return {
       cachedNotes: this.noteCache.size,
       cachedTraversals: this.traversalCache.size,
       recentlyAccessed: this.recentlyAccessed.length,
-      pendingWrites: this.pendingWrites.length,
     };
   }
 }

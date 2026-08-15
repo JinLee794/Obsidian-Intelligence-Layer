@@ -31,13 +31,12 @@ describe("Tool surface", () => {
         "query_frontmatter",
         "read_note_section",
         "search_vault",
-        "semantic_search",
       ]
     `);
   });
 
   it("tool count matches snapshot", () => {
-    expect(server.tools.size).toBe(14);
+    expect(server.tools.size).toBe(13);
   });
 
   // Spec §10.1 — Idle context cost: schema injected into every conversation.

@@ -236,6 +236,78 @@ describe("write/read integration", () => {
 
     expect(result.status).toBe("executed");
   });
+
+  // appendToSection and parseSections must agree on where a section ends.
+  // They previously did not: appendToSection stopped at the next same-or-higher
+  // heading, so a write to a heading that has sub-headings — or to the H1 title,
+  // whose siblings are all deeper — landed outside the section the reader
+  // reports, and an agent verifying its own write would not find it.
+  it("writes where read_note_section will find it, for a heading with sub-headings", async () => {
+    const notePath = "Customers/Nested.md";
+    await writeFile(
+      join(vaultRoot, notePath),
+      `# Nested\n\n## Parent\n\nparent body\n\n### Child\n\nchild body\n\n## Other\n\nother body\n`,
+      "utf-8",
+    );
+
+    const server = new MockMcpServer();
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const cache = new SessionCache();
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
+    registerWriteTools(server as any, vaultRoot, graph, cache, config);
+
+    const meta = await server.callToolJson("get_note_metadata", { path: notePath });
+    const write = await server.callToolJson("atomic_append", {
+      path: notePath,
+      heading: "Parent",
+      content: "- appended to parent",
+      expected_mtime: meta.mtime_ms,
+    });
+    expect(write.status).toBe("executed");
+
+    const parent = await server.callToolJson("read_note_section", {
+      path: notePath,
+      heading: "Parent",
+    });
+    expect(parent.content).toContain("appended to parent");
+
+    const child = await server.callToolJson("read_note_section", {
+      path: notePath,
+      heading: "Child",
+    });
+    expect(child.content).not.toContain("appended to parent");
+  });
+
+  it("writes under an H1 title where read_note_section will find it", async () => {
+    const notePath = "Customers/TitleOnly.md";
+    await writeFile(
+      join(vaultRoot, notePath),
+      `# TitleOnly\n\n## Team\n\n- Alice\n`,
+      "utf-8",
+    );
+
+    const server = new MockMcpServer();
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const cache = new SessionCache();
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
+    registerWriteTools(server as any, vaultRoot, graph, cache, config);
+
+    const meta = await server.callToolJson("get_note_metadata", { path: notePath });
+    await server.callToolJson("atomic_append", {
+      path: notePath,
+      heading: "TitleOnly",
+      content: "- under the title",
+      expected_mtime: meta.mtime_ms,
+    });
+
+    const section = await server.callToolJson("read_note_section", {
+      path: notePath,
+      heading: "TitleOnly",
+    });
+    expect(section.content).toContain("under the title");
+  });
 });
 
 describe("write v2 — create_note", () => {

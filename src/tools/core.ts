@@ -5,14 +5,15 @@ import type { GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { VaultWatcher } from "../watcher.js";
 import type { OilConfig } from "../types.js";
+import { getSemanticIndex } from "../semantic.js";
 import { jsonResponse } from "../tool-responses.js";
 import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
 const LIVE_TOOL_SURFACE = {
   core: 1,
-  primitives: 10,
+  primitives: 9,
   aggregators: 3,
-  total: 14,
+  total: 13,
 } as const;
 
 export function registerCoreTools(
@@ -48,6 +49,13 @@ export function registerCoreTools(
           last_indexed: graph.lastIndexed.toISOString(),
           building: graph.building,
         },
+        semantic: getSemanticIndex(graph)?.stats ?? {
+          status: "disabled",
+          model: config.semantic.model,
+          note_count: 0,
+          dimensions: 0,
+          reason: "Semantic tier not attached",
+        },
         cache: cache.getStats(),
         watcher: watcher.getStatus(),
         audit,
@@ -78,7 +86,7 @@ async function getAuditSummary(vaultPath: string, config: OilConfig): Promise<{
 
     if (candidates.length === 0) {
       return {
-        enabled: config.writeGate.logAllWrites,
+        enabled: config.audit.logAllWrites,
         path: config.schema.agentLog,
         last_log_date: null,
         last_write_at: null,
@@ -90,14 +98,14 @@ async function getAuditSummary(vaultPath: string, config: OilConfig): Promise<{
     const fileStats = await stat(latestPath);
 
     return {
-      enabled: config.writeGate.logAllWrites,
+      enabled: config.audit.logAllWrites,
       path: config.schema.agentLog,
       last_log_date: latest.replace(/\.md$/, ""),
       last_write_at: fileStats.mtime.toISOString(),
     };
   } catch {
     return {
-      enabled: config.writeGate.logAllWrites,
+      enabled: config.audit.logAllWrites,
       path: config.schema.agentLog,
       last_log_date: null,
       last_write_at: null,

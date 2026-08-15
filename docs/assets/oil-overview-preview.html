@@ -955,17 +955,17 @@ body {
     <div class="search-showcase__card">
       <div class="search-showcase__icon">🔍</div>
       <div class="search-showcase__name">search_vault</div>
-      <div class="search-showcase__desc">Lexical + fuzzy matching with folder and tag filters. Primary search tool.</div>
+      <div class="search-showcase__desc">BM25 keyword ranking, escalating to fuzzy matching only when needed.</div>
       <div class="search-showcase__example">
         <code>search_vault("contoso migration", folder: "Customers/")</code>
       </div>
     </div>
     <div class="search-showcase__card search-showcase__card--highlight">
-      <div class="search-showcase__icon">💬</div>
-      <div class="search-showcase__name">semantic_search</div>
-      <div class="search-showcase__desc">Natural-language queries against note titles and body content.</div>
+      <div class="search-showcase__icon">🕸️</div>
+      <div class="search-showcase__name">get_related_entities</div>
+      <div class="search-showcase__desc">Graph traversal across wikilinks — refs and titles only, never file dumps.</div>
       <div class="search-showcase__example">
-        <code>semantic_search("who owns the Azure migration?")</code>
+        <code>get_related_entities("Customers/Contoso.md", max_hops: 2)</code>
       </div>
     </div>
     <div class="search-showcase__card">

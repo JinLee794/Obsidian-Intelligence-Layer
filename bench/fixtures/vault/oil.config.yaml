@@ -11,14 +11,5 @@ schema:
 search:
   graph_index_file: "_oil-graph.json"
 
-write_gate:
-  diff_format: markdown
+audit:
   log_all_writes: true
-  batch_diff_max_notes: 50
-  auto_confirmed_sections:
-    - Agent Insights
-    - Connect Hooks
-  auto_confirmed_operations:
-    - log_agent_action
-    - capture_connect_hook
-    - patch_note_designated

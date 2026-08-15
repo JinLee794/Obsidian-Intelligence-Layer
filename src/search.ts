@@ -1,35 +1,104 @@
 /**
  * OIL — Search Engine
- * Tier 1: Lexical (substring match). Tier 2: Fuzzy (fuse.js).
- * Default behaviour: lexical first, fuzzy fallback when lexical returns < limit.
+ *
+ * Three tiers with deliberately disjoint responsibilities:
+ *   lexical (BM25)  — exact terms, identifiers, frontmatter values
+ *   fuzzy (fuse.js) — misspelled names: "did you mean this note?"
+ *   semantic        — meaning, when the words never matched at all
+ *
+ * `cascadeSearch` is the single entry point. Tiers past the first run only on
+ * evidence that the cheaper one failed, so the common entity-name query stays
+ * on the millisecond path.
  */
 
 import Fuse from "fuse.js";
 import type { GraphIndex } from "./graph.js";
-import type { SearchResult, OilConfig } from "./types.js";
+import { bm25Search, exactFieldSearch, invalidateBm25Index, tokenize } from "./bm25.js";
+import { getSemanticIndex } from "./semantic.js";
+import type { SearchResult } from "./types.js";
 
 // ─── Search Index Entry ───────────────────────────────────────────────────────
 
+/**
+ * Body text is deliberately absent.
+ *
+ * BM25 already indexes the full body with term statistics and prefix expansion,
+ * so including it here bought a second, worse pass over the same text — and it
+ * was the dominant cost of the tier, scanning every note's 10 KB snippet with
+ * an edit-distance matcher. Fuzzy now covers exactly what it is good at:
+ * short, name-like fields where a transposition is plausible.
+ */
 interface SearchEntry {
   path: string;
   title: string;
   tags: string[];
   headings: string[];
-  bodySnippet: string;
 }
 
 // ─── Fuse Index Cache ─────────────────────────────────────────────────────────
 
-let fuseIndex: Fuse<SearchEntry> | null = null;
-let indexedNodeCount = 0;
+interface CachedIndex {
+  fuse: Fuse<SearchEntry>;
+  version: number;
+}
 
 /**
- * Build or return the cached fuse.js search index.
- * Rebuilds when the graph node count changes.
+ * Keyed by graph instance so two vaults (or two test fixtures) in one process
+ * never share an index, and by `graph.version` so any mutation — including an
+ * in-place content edit, which leaves the node count unchanged — forces a
+ * rebuild without depending on callers remembering to invalidate.
+ */
+let indexCache = new WeakMap<GraphIndex, CachedIndex>();
+
+/**
+ * Above this share of the corpus, rebuilding the fuzzy index beats patching it.
+ * fuse.js splices its record array and renumbers every following record on each
+ * removal, so patching costs O(changed x notes) while a rebuild is one pass.
+ */
+const FUZZY_PATCH_MAX_SHARE = 0.05;
+
+function toSearchEntry(node: {
+  path: string;
+  title: string;
+  tags: string[];
+  headings: string[];
+}): SearchEntry {
+  return {
+    path: node.path,
+    title: node.title,
+    tags: node.tags,
+    headings: node.headings,
+  };
+}
+
+/**
+ * Build or return the cached fuse.js search index for this graph.
+ *
+ * On a version change the graph is asked which notes actually moved, so an edit
+ * costs one removal pass plus a re-add rather than re-tokenising the vault.
  */
 function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
-  if (fuseIndex && graph.nodeCount === indexedNodeCount) {
-    return fuseIndex;
+  const cached = indexCache.get(graph);
+  if (cached) {
+    if (cached.version === graph.version) return cached.fuse;
+
+    const changed = graph.changesSince(cached.version);
+    const patchable =
+      changed !== null &&
+      changed.length <= Math.max(16, graph.nodeCount * FUZZY_PATCH_MAX_SHARE);
+
+    if (changed && patchable) {
+      if (changed.length > 0) {
+        const changedPaths = new Set(changed);
+        cached.fuse.remove((entry) => changedPaths.has(entry.path));
+        for (const path of changed) {
+          const node = graph.getNode(path);
+          if (node) cached.fuse.add(toSearchEntry(node));
+        }
+      }
+      cached.version = graph.version;
+      return cached.fuse;
+    }
   }
 
   const entries: SearchEntry[] = [];
@@ -38,45 +107,42 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
   for (const ref of allRefs) {
     const node = graph.getNode(ref.path);
     if (!node) continue;
-
-    entries.push({
-      path: node.path,
-      title: node.title,
-      tags: node.tags,
-      headings: node.headings,
-      bodySnippet: node.bodySnippet ?? "",
-    });
+    entries.push(toSearchEntry(node));
   }
 
-  fuseIndex = new Fuse(entries, {
+  const fuse = new Fuse(entries, {
     keys: [
       { name: "title", weight: 3 },
       { name: "tags", weight: 2 },
       { name: "headings", weight: 1 },
-      { name: "bodySnippet", weight: 0.5 },
     ],
     threshold: 0.4,
     includeScore: true,
     ignoreLocation: true,
     useExtendedSearch: false,
   });
-  indexedNodeCount = graph.nodeCount;
+  indexCache.set(graph, { fuse, version: graph.version });
 
-  return fuseIndex;
+  return fuse;
 }
 
 /**
- * Invalidate the fuse index so it rebuilds on next search.
+ * Drop every cached search index so the next search rebuilds from the graph.
+ * Version tracking already covers graph mutations; this remains for callers
+ * that need an unconditional reset (tests, benchmarks).
  */
 export function invalidateSearchIndex(): void {
-  fuseIndex = null;
-  indexedNodeCount = 0;
+  indexCache = new WeakMap();
+  invalidateBm25Index();
 }
 
 // ─── Search Functions ─────────────────────────────────────────────────────────
 
 /**
- * Tier 1 — Lexical search: substring match on titles and tags.
+ * Tier 1 — Lexical search, ranked with Okapi BM25.
+ *
+ * Scores come from term statistics rather than fixed per-field constants, so
+ * a rare term in the body can legitimately outrank a common term in a title.
  */
 export function lexicalSearch(
   graph: GraphIndex,
@@ -84,40 +150,57 @@ export function lexicalSearch(
   limit: number,
   filters?: SearchFilters,
 ): SearchResult[] {
-  const q = query.toLowerCase();
-  const results: SearchResult[] = [];
+  const hits = bm25Search(graph, query, limit, (path) =>
+    passesFilters(path, graph, filters),
+  );
+  if (hits.length === 0) return [];
 
-  const allRefs = graph.getNotesByFolder("");
-  for (const ref of allRefs) {
-    if (!passesFilters(ref.path, graph, filters)) continue;
+  // Normalise to (0, 1] for a stable, comparable score across queries. BM25 is
+  // unbounded, so the raw value is only meaningful relative to this result set.
+  const top = hits[0].score || 1;
 
-    const node = graph.getNode(ref.path);
-    const titleMatch = ref.title.toLowerCase().includes(q);
-    const tagMatch = ref.tags.some((t) => t.toLowerCase().includes(q));
-    const headingMatch = node?.headings.some((h) => h.toLowerCase().includes(q)) ?? false;
-    const bodyMatch = node?.bodySnippet?.toLowerCase().includes(q) ?? false;
+  return hits.map((hit) => {
+    const node = graph.getNode(hit.path);
+    return {
+      path: hit.path,
+      title: hit.title,
+      excerpt: buildExcerpt(node?.bodySnippet ?? "", hit.matchedTerms, node?.tags ?? []),
+      score: Number((hit.score / top).toFixed(4)),
+      matchedTerms: hit.matchedTerms,
+      matchType: "lexical" as const,
+    };
+  });
+}
 
-    if (titleMatch || tagMatch || headingMatch || bodyMatch) {
-      // Build a contextual excerpt for body matches
-      let excerpt = ref.tags.join(", ");
-      if (bodyMatch && !titleMatch && !tagMatch && !headingMatch && node?.bodySnippet) {
-        const idx = node.bodySnippet.toLowerCase().indexOf(q);
-        const start = Math.max(0, idx - 40);
-        const end = Math.min(node.bodySnippet.length, idx + q.length + 40);
-        excerpt = (start > 0 ? "…" : "") + node.bodySnippet.slice(start, end).trim() + (end < node.bodySnippet.length ? "…" : "");
-      }
-      results.push({
-        path: ref.path,
-        title: ref.title,
-        excerpt,
-        score: titleMatch ? 1.0 : headingMatch ? 0.85 : tagMatch ? 0.7 : 0.5,
-        matchType: "lexical",
-      });
-    }
+/** Contextual excerpt around the first matched term, falling back to tags. */
+function buildExcerpt(body: string, terms: string[], tags: string[]): string {
+  const compact = body.replace(/\s+/g, " ").trim();
+  if (!compact) return tags.join(", ");
+
+  const lower = compact.toLowerCase();
+  let index = -1;
+  for (const term of terms) {
+    index = lower.indexOf(term);
+    if (index >= 0) break;
   }
+  if (index < 0) return leadExcerpt(compact, tags);
 
-  results.sort((a, b) => b.score - a.score);
-  return results.slice(0, limit);
+  const start = Math.max(0, index - 60);
+  const end = Math.min(compact.length, index + 160);
+  return (
+    (start > 0 ? "…" : "") + compact.slice(start, end).trim() + (end < compact.length ? "…" : "")
+  );
+}
+
+/**
+ * Opening of the note, for hits with no term to anchor on — a fuzzy title match
+ * or a semantic one. Tags alone told an agent almost nothing about why the note
+ * was returned.
+ */
+function leadExcerpt(body: string, tags: string[]): string {
+  const compact = body.replace(/\s+/g, " ").trim();
+  if (!compact) return tags.join(", ");
+  return compact.length > 200 ? `${compact.slice(0, 200).trim()}…` : compact;
 }
 
 /**
@@ -130,7 +213,10 @@ export function fuzzySearch(
   filters?: SearchFilters,
 ): SearchResult[] {
   const fuse = getOrBuildIndex(graph);
-  const raw = fuse.search(query, { limit: limit * 2 });
+  // Filters are applied after fuse ranks, so a filtered search needs a wider
+  // candidate pool or it silently under-returns.
+  const hasFilters = Boolean(filters?.folder || filters?.tags?.length || filters?.frontmatter);
+  const raw = fuse.search(query, { limit: hasFilters ? limit * 10 : limit * 2 });
 
   const results: SearchResult[] = [];
   // Normalize scores: fuse.js returns 0 = perfect match, threshold = worst.
@@ -149,8 +235,12 @@ export function fuzzySearch(
     results.push({
       path: match.item.path,
       title: match.item.title,
-      excerpt: match.item.tags.join(", "),
+      excerpt: leadExcerpt(
+        graph.getNode(match.item.path)?.bodySnippet ?? "",
+        match.item.tags,
+      ),
       score: normalizedScore,
+      matchedTerms: [],
       matchType: "fuzzy",
     });
 
@@ -161,38 +251,232 @@ export function fuzzySearch(
 }
 
 /**
- * Unified search — cascades lexical → fuzzy by default.
- * When no explicit tier is given, tries lexical first (3ms).
- * Falls back to fuzzy (65-180ms) only when lexical returns fewer than `limit` results.
- * An explicit tier skips the cascade and runs only that tier.
+ * Tier 3 — Semantic search over local Ollama embeddings.
+ *
+ * Returns nothing when the tier is disabled, still warming up, or Ollama is not
+ * running, which is what makes it safe to call unconditionally: the cascade
+ * treats an unavailable tier and an unhelpful one identically.
  */
-export function searchVault(
+export async function semanticSearch(
   graph: GraphIndex,
-  _config: OilConfig,
   query: string,
-  tier?: "lexical" | "fuzzy",
-  limit: number = 10,
+  limit: number,
   filters?: SearchFilters,
-): SearchResult[] {
-  // Explicit tier — run only that tier
-  if (tier === "lexical") return lexicalSearch(graph, query, limit, filters);
-  if (tier === "fuzzy") return fuzzySearch(graph, query, limit, filters);
+): Promise<SearchResult[]> {
+  const index = getSemanticIndex(graph);
+  if (!index) return [];
 
-  // Default: lexical first, fuzzy fallback if insufficient results
-  const lexResults = lexicalSearch(graph, query, limit, filters);
-  if (lexResults.length >= limit) return lexResults;
+  // Re-embeds notes the graph has changed since the last pass, in the
+  // background. This query runs against whatever is already indexed.
+  index.ensureFresh(graph);
 
-  // Lexical didn't fill the limit — augment with fuzzy
-  const fuzzyResults = fuzzySearch(graph, query, limit, filters);
-  const seen = new Set(lexResults.map((r) => r.path));
-  const merged = [...lexResults];
-  for (const r of fuzzyResults) {
-    if (seen.has(r.path)) continue;
-    seen.add(r.path);
-    merged.push(r);
-    if (merged.length >= limit) break;
+  const hits = await index.search(query, limit, (path) =>
+    passesFilters(path, graph, filters),
+  );
+
+  return hits.map((hit) => {
+    const node = graph.getNode(hit.path);
+    return {
+      path: hit.path,
+      title: node?.title ?? hit.path,
+      excerpt: leadExcerpt(node?.bodySnippet ?? "", node?.tags ?? []),
+      score: Number(hit.score.toFixed(4)),
+      matchedTerms: [],
+      matchType: "semantic" as const,
+    };
+  });
+}
+
+// ─── Cascade ──────────────────────────────────────────────────────────────────
+
+/**
+ * One search result. `matchedBy` names the tiers that surfaced it, which
+ * subsumes a separate match-type field.
+ */
+export interface CascadeHit {
+  path: string;
+  title: string;
+  excerpt: string;
+  score: number;
+  heading: string | null;
+  matchedBy: string[];
+}
+
+export interface CascadeResult {
+  results: CascadeHit[];
+  tiersUsed: string[];
+  /** Why the cascade escalated past lexical, or null if it never needed to. */
+  escalation: string | null;
+  /** Matches before the limit was applied, when the tier can count them. */
+  totalMatched?: number;
+}
+
+/**
+ * Fuzzy matching answers "did you mean this note?", which only makes sense for a
+ * query shaped like a name. It is also by far the most expensive tier — measured
+ * at 5k notes it costs 360x BM25 for a one-word query and 3000x for four words,
+ * because bitap runs per token per document. A natural-language question would
+ * therefore pay the most for the tier least able to answer it.
+ */
+const FUZZY_MAX_QUERY_TOKENS = 3;
+
+/**
+ * Tiered search with escalation on evidence of lexical failure.
+ *
+ * Escalation is driven by *coverage* rather than result count: BM25 happily
+ * returns a full page of documents that each matched a single query term, so
+ * "enough results" says nothing about whether any of them answered the query.
+ * When no result covers the whole query, the fuzzy and semantic tiers run and
+ * all three rankings are fused.
+ *
+ * The escalation gate is also what keeps the semantic tier affordable. A query
+ * BM25 answers completely never pays for an embedding round trip, so the cost
+ * lands only on the queries where matching words already failed.
+ */
+export async function cascadeSearch(
+  graph: GraphIndex,
+  query: string,
+  limit: number,
+  filters: SearchFilters | undefined,
+): Promise<CascadeResult> {
+  const accept = (path: string) => passesFilters(path, graph, filters);
+  const candidateDepth = Math.max(limit * 3, 20);
+  const tiersUsed: string[] = [];
+  // ── Tier 0: exact frontmatter value ────────────────────────────────
+  // An identifier query is answered by whole-value equality or not at all;
+  // letting term scoring handle it produces confident matches on a fragment
+  // ("ACC-NORTHWIND-001" hitting the token "northwind" in a title).
+  //
+  // Gated on the query not naming a note: "Contoso" and "Dave Wilson" are also
+  // frontmatter values (customer:, action_owners:), and short-circuiting on
+  // those would suppress the very note the user named.
+  if (!graph.resolveTitle(query.trim())) {
+    const exact = exactFieldSearch(graph, query, accept);
+    if (exact.length > 0) {
+      tiersUsed.push("frontmatter");
+      // Whole-value equality gives no relevance signal to rank by, and the
+      // index's own order is insertion order — which shifts whenever a note is
+      // re-indexed after an edit. Sorting by path keeps the window an agent
+      // sees stable across turns; a category value like `status: at-risk` can
+      // otherwise match hundreds of notes and silently return a different ten.
+      const ordered = [...exact].sort((a, b) => a.path.localeCompare(b.path));
+      return {
+        results: ordered.slice(0, limit).map((hit) => ({
+          path: hit.path,
+          title: hit.title,
+          excerpt: `${hit.key}: ${hit.value}`,
+          score: 1,
+          heading: null,
+          matchedBy: [`frontmatter:${hit.key}`],
+        })),
+        tiersUsed,
+        escalation: null,
+        totalMatched: ordered.length,
+      };
+    }
   }
-  return merged;
+  // ── Tier 1: BM25 ────────────────────────────────────────────────────────
+  const lexical = lexicalSearch(graph, query, candidateDepth, filters);
+  tiersUsed.push("lexical");
+
+  const queryTermCount = tokenize(query).length;
+  const fullCoverage =
+    lexical.length > 0 && lexical[0].matchedTerms.length >= queryTermCount;
+
+  // Confident lexical answer: full query coverage and enough results.
+  if (fullCoverage && lexical.length >= limit) {
+    return {
+      results: lexical.slice(0, limit).map(toCascadeHit),
+      tiersUsed,
+      escalation: null,
+    };
+  }
+
+  const escalation = !fullCoverage ? "partial_term_coverage" : "insufficient_results";
+
+  // ── Tier 2: fuzzy — recovers typos and near-miss titles ────────────────
+  const fuzzy =
+    queryTermCount <= FUZZY_MAX_QUERY_TOKENS
+      ? fuzzySearch(graph, query, candidateDepth, filters)
+      : [];
+  if (fuzzy.length > 0) tiersUsed.push("fuzzy");
+
+  // ── Tier 3: semantic — recovers notes that share no words with the query ─
+  //
+  // Gated on coverage alone, never on result count. A query whose every term was
+  // matched has already been understood; there simply are not more notes about
+  // it, and paying for an embedding round trip cannot conjure any.
+  const semantic = fullCoverage
+    ? []
+    : await semanticSearch(graph, query, candidateDepth, filters);
+  if (semantic.length > 0) tiersUsed.push("semantic");
+
+  const fused = reciprocalRankFusion([
+    { name: "lexical", paths: lexical.map((h) => h.path) },
+    { name: "fuzzy", paths: fuzzy.map((h) => h.path) },
+    { name: "semantic", paths: semantic.map((h) => h.path) },
+  ]);
+
+  const excerpts = new Map(
+    [...semantic, ...fuzzy, ...lexical].map((hit) => [hit.path, hit.excerpt]),
+  );
+
+  const results = fused.slice(0, limit).map((entry) => {
+    const node = graph.getNode(entry.path);
+    return {
+      path: entry.path,
+      title: node?.title ?? entry.path,
+      excerpt: excerpts.get(entry.path) ?? (node?.tags ?? []).join(", "),
+      score: Number(entry.score.toFixed(6)),
+      heading: null,
+      matchedBy: entry.sources,
+    };
+  });
+
+  return { results, tiersUsed, escalation };
+}
+
+/** Adapt a single-tier hit to the cascade's response shape. */
+function toCascadeHit(hit: SearchResult): CascadeHit {
+  return {
+    path: hit.path,
+    title: hit.title,
+    excerpt: hit.excerpt,
+    score: hit.score,
+    heading: null,
+    matchedBy: [hit.matchType],
+  };
+}
+
+/**
+ * Reciprocal Rank Fusion.
+ *
+ * BM25 and fuse.js scores live on incomparable scales, so blending the raw
+ * numbers lets whichever tier emits larger values dominate. RRF discards
+ * magnitudes and combines ranks instead, needing no per-corpus tuning. k=60 is
+ * the value from the original TREC work.
+ */
+function reciprocalRankFusion(
+  lists: Array<{ name: string; paths: string[] }>,
+  k = 60,
+): Array<{ path: string; score: number; sources: string[] }> {
+  const scores = new Map<string, { score: number; sources: string[] }>();
+
+  for (const list of lists) {
+    const seen = new Set<string>();
+    list.paths.forEach((path, index) => {
+      if (seen.has(path)) return;
+      seen.add(path);
+      const entry = scores.get(path) ?? { score: 0, sources: [] };
+      entry.score += 1 / (k + index + 1);
+      if (!entry.sources.includes(list.name)) entry.sources.push(list.name);
+      scores.set(path, entry);
+    });
+  }
+
+  return [...scores.entries()]
+    .map(([path, entry]) => ({ path, ...entry }))
+    .sort((a, b) => b.score - a.score);
 }
 
 // ─── Filters ──────────────────────────────────────────────────────────────────

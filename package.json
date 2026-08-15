@@ -27,7 +27,7 @@
     "test": "vitest run",
     "test:package": "node scripts/package-smoke.mjs",
     "check:release": "npm run lint && npm test && npm run test:package",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit -p tsconfig.check.json",
     "bench": "vitest bench",
     "bench:watch": "vitest bench --watch",
     "bench:baseline": "bash scripts/bench-check.sh --update",

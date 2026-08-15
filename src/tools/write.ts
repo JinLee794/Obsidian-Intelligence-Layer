@@ -15,6 +15,8 @@ import {
   errorResponse,
   jsonResponse,
   noteRef,
+  truncateText,
+  MAX_TEXT_CHARS,
 } from "../tool-responses.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { securePath, noteExists } from "../vault.js";
@@ -38,11 +40,14 @@ export function registerWriteTools(
    * absent or throttled entirely). Doing it inline makes write→read
    * consistency deterministic: a note created or edited through these tools is
    * immediately visible to graph traversal, frontmatter lookups and search.
+   * The resulting mtime is recorded so the watcher can drop its own echo
+   * instead of re-indexing the same state a second time.
    */
   const syncIndexes = async (path: string): Promise<void> => {
     cache.invalidateNote(path);
     try {
       await graph.updateNote(path);
+      cache.markSelfWrite(path, await getMtime(vaultPath, path));
     } catch {
       // A failed re-index must never fail an otherwise successful write.
     }
@@ -121,7 +126,6 @@ export function registerWriteTools(
           // Audit log (fire-and-forget)
           try {
             await logWrite(vaultPath, config, {
-              tier: "auto",
               operation: "atomic_append",
               path,
               detail: `append to §${heading} (mtime ${before} → ${after})`,
@@ -219,7 +223,6 @@ export function registerWriteTools(
           // Audit log (fire-and-forget)
           try {
             await logWrite(vaultPath, config, {
-              tier: "auto",
               operation: "atomic_replace",
               path,
               detail: `full replace (mtime ${before} → ${after})`,
@@ -293,7 +296,6 @@ export function registerWriteTools(
 
           try {
             await logWrite(vaultPath, config, {
-              tier: "auto",
               operation: "create_note",
               path,
               detail: "created new note",
@@ -346,11 +348,17 @@ export function registerWriteTools(
       try {
         const fullPath = securePath(vaultPath, logPath);
         const content = await readFile(fullPath, "utf-8");
+        // Tail, not head: a busy day's log is append-only and the recent
+        // entries are the ones worth spending context on.
+        const body = truncateText(content, MAX_TEXT_CHARS, "tail");
         return jsonResponse({
           date: dateStr,
           path: logPath,
           ref: noteRef(logPath),
-          log: content,
+          log: body.text,
+          ...(body.truncated
+            ? { truncated: true, total_chars: body.total_chars, showing: "most recent entries" }
+            : {}),
         });
       } catch {
         return jsonResponse({

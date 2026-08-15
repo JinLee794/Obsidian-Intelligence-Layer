@@ -4,7 +4,8 @@
  */
 
 import { watch, type FSWatcher } from "chokidar";
-import { relative } from "node:path";
+import { relative, join } from "node:path";
+import { stat } from "node:fs/promises";
 import { isAllowedFile } from "./vault.js";
 import { normalizeNotePath, type GraphIndex } from "./graph.js";
 import type { SessionCache } from "./cache.js";
@@ -15,6 +16,14 @@ export class VaultWatcher {
   private vaultPath: string;
   private graph: GraphIndex;
   private cache: SessionCache;
+
+  /**
+   * chokidar does not report changes until its initial scan completes, which on
+   * a large vault takes seconds. Edits made in that window are simply not seen,
+   * so readiness is tracked and reported rather than assumed.
+   */
+  private _ready = false;
+  private readyPromise: Promise<void> = Promise.resolve();
 
   /** Debounce timer for batching rapid changes */
   private pendingUpdates = new Map<string, NodeJS.Timeout>();
@@ -56,6 +65,18 @@ export class VaultWatcher {
       .on("add", (fullPath) => this.handleChange(fullPath, "add"))
       .on("change", (fullPath) => this.handleChange(fullPath, "change"))
       .on("unlink", (fullPath) => this.handleChange(fullPath, "unlink"));
+
+    this.readyPromise = new Promise((resolve) => {
+      this.watcher?.on("ready", () => {
+        this._ready = true;
+        resolve();
+      });
+    });
+  }
+
+  /** Resolves once the initial scan is done and changes are actually observed. */
+  whenReady(): Promise<void> {
+    return this.readyPromise;
   }
 
   /**
@@ -66,6 +87,8 @@ export class VaultWatcher {
       await this.watcher.close();
       this.watcher = null;
     }
+    this._ready = false;
+    this.readyPromise = Promise.resolve();
     // Clear any pending debounced updates
     for (const timer of this.pendingUpdates.values()) {
       clearTimeout(timer);
@@ -76,11 +99,13 @@ export class VaultWatcher {
   getStatus(): {
     backend: "chokidar";
     active: boolean;
+    ready: boolean;
     pendingUpdates: number;
   } {
     return {
       backend: "chokidar",
       active: this.watcher !== null,
+      ready: this._ready,
       pendingUpdates: this.pendingUpdates.size,
     };
   }
@@ -134,6 +159,8 @@ export class VaultWatcher {
     notePath: string,
     event: "add" | "change" | "unlink",
   ): Promise<void> {
+    if (event !== "unlink" && (await this.isOwnEcho(notePath))) return;
+
     // Invalidate session cache first (always safe)
     this.cache.invalidateNote(notePath);
 
@@ -147,5 +174,19 @@ export class VaultWatcher {
     // Invalidate search index AFTER graph is current,
     // so rebuilt index reflects the updated node data.
     invalidateSearchIndex();
+  }
+
+  /**
+   * True when this event is the echo of a write OIL just made and already
+   * re-indexed inline. Matched on mtime, so an external edit landing on the
+   * same path between the two is still picked up.
+   */
+  private async isOwnEcho(notePath: string): Promise<boolean> {
+    try {
+      const { mtimeMs } = await stat(join(this.vaultPath, notePath));
+      return this.cache.consumeSelfWrite(notePath, mtimeMs);
+    } catch {
+      return false;
+    }
   }
 }

@@ -200,11 +200,10 @@ describe("Response contract conformance", () => {
   });
 
   it("search results carry ref on every hit", async () => {
-    const semantic = await server.callToolJson("semantic_search", { query: "migration", limit: 5 });
     const vault = await server.callToolJson("search_vault", { query: "Contoso", limit: 5 });
 
-    expect(semantic.results.every((r: any) => typeof r.ref === "string")).toBe(true);
-    expect(vault.every((r: any) => typeof r.ref === "string")).toBe(true);
+    expect(vault.results.length).toBeGreaterThan(0);
+    expect(vault.results.every((r: any) => typeof r.ref === "string")).toBe(true);
   });
 
   it("query_frontmatter returns ref in matches array", async () => {

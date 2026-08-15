@@ -10,6 +10,7 @@ import { loadConfig } from "./config.js";
 import { GraphIndex } from "./graph.js";
 import { SessionCache } from "./cache.js";
 import { VaultWatcher } from "./watcher.js";
+import { SemanticIndex, attachSemanticIndex } from "./semantic.js";
 import { registerCoreTools } from "./tools/core.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
@@ -73,10 +74,29 @@ async function main(): Promise<void> {
   // ── 3. Initialise session cache ────────────────────────────────────────
   const cache = new SessionCache();
 
+  // ── 3b. Attach the semantic tier ──────────────────────────────────────
+  // Vectors load from the sidecar synchronously; embedding anything new is
+  // deferred so a cold vault (or a model that still has to be pulled) never
+  // delays the server becoming ready. Until it catches up, search runs lexical.
+  const semantic = new SemanticIndex(vaultPath, config.semantic);
+  attachSemanticIndex(graph, semantic);
+  await semantic.load();
+  if (config.semantic.enabled) {
+    console.error(
+      `[OIL] Semantic tier: ${semantic.stats.note_count} cached vector(s), model '${config.semantic.model}'. Refreshing in background.`,
+    );
+    setImmediate(() => {
+      void semantic.refresh(graph);
+    });
+  }
+
   // ── 4. Start file watcher ──────────────────────────────────────────────
   const watcher = new VaultWatcher(vaultPath, graph, cache);
   watcher.start();
   console.error("[OIL] File watcher started.");
+  void watcher.whenReady().then(() => {
+    console.error("[OIL] File watcher ready — vault changes are now observed.");
+  });
 
   // ── 5. Create MCP server and register tools ────────────────────────────
   const server = new McpServer({
