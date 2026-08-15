@@ -1,0 +1,102 @@
+{
+  "name": "fixture vault — committed golden set",
+  "vault": "bench/fixtures/vault",
+  "cases": [
+    {
+      "id": "tpid-northwind",
+      "scenario": "identifier",
+      "query": "TP-500600",
+      "relevant": ["Customers/Northwind.md"],
+      "primary": "Customers/Northwind.md",
+      "expectTiers": ["frontmatter"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "accountid-contoso",
+      "scenario": "identifier",
+      "query": "ACC-CONTOSO-001",
+      "relevant": ["Customers/Contoso.md"],
+      "primary": "Customers/Contoso.md",
+      "expectTiers": ["frontmatter"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-contoso",
+      "scenario": "exact-entity",
+      "query": "Contoso",
+      "relevant": ["Customers/Contoso.md"],
+      "primary": "Customers/Contoso.md",
+      "expectTiers": ["lexical"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-person",
+      "scenario": "exact-entity",
+      "query": "Dave Wilson",
+      "relevant": ["People/Dave Wilson.md"],
+      "primary": "People/Dave Wilson.md",
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "typo-northwind",
+      "scenario": "typo",
+      "query": "Nrothwind",
+      "relevant": ["Customers/Northwind.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "typo-fabrikam",
+      "scenario": "typo",
+      "query": "Fabrikm",
+      "relevant": ["Customers/Fabrikam.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "para-churn-risk",
+      "scenario": "paraphrase",
+      "query": "which client relationship is deteriorating",
+      "relevant": [
+        "Customers/Northwind.md",
+        "Meetings/2026-02-25-Northwind-Escalation.md"
+      ],
+      "expectTiers": ["semantic"]
+    },
+    {
+      "id": "para-datacentre-move",
+      "scenario": "paraphrase",
+      "query": "moving datacentre workloads to the cloud",
+      "relevant": [
+        "Projects/azure-migration.md",
+        "Meetings/2026-02-20-Contoso-Migration-Review.md"
+      ],
+      "expectTiers": ["semantic"]
+    },
+    {
+      "id": "para-assistant-rollout",
+      "scenario": "paraphrase",
+      "query": "who can help me with generative assistant rollouts",
+      "relevant": ["People/Dave Wilson.md", "Projects/ai-copilot-pilot.md"],
+      "expectTiers": ["semantic"]
+    },
+    {
+      "id": "para-raised-to-management",
+      "scenario": "paraphrase",
+      "query": "a situation that had to be raised to management",
+      "relevant": ["Meetings/2026-02-25-Northwind-Escalation.md"],
+      "expectTiers": ["semantic"]
+    },
+    {
+      "id": "attr-at-risk",
+      "scenario": "attribute",
+      "query": "at-risk",
+      "relevant": ["Customers/Northwind.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "attr-copilot-project",
+      "scenario": "attribute",
+      "query": "AI copilot",
+      "relevant": ["Projects/ai-copilot-pilot.md"]
+    }
+  ]
+}

@@ -19,7 +19,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { readFile, writeFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { GraphIndex } from "./graph.js";
-import type { SemanticConfig } from "./types.js";
+import { flattenFrontmatter } from "./frontmatter.js";
+import type { NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
 const INDEX_VERSION = 1;
@@ -119,22 +120,66 @@ function hashText(text: string): string {
 }
 
 /**
+ * Frontmatter values that describe plumbing rather than meaning. Identifiers,
+ * links and timestamps are precisely what the lexical tiers are good at, and in
+ * vector space they are noise that crowds out the fields a person would search.
+ */
+const NOISE_VALUE = /^(https?:\/\/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-|\d{4}-\d{2}-\d{2}T\d{2}:)/i;
+const NOISE_KEY = /(^|\.)(id|.*id|timestamp|generated|sources|resource|icon|sticker|.*link|.*sync|last_validated)$/i;
+/** Frontmatter share of the budget, so structured notes keep room for prose. */
+const FRONTMATTER_BUDGET = 600;
+
+/**
+ * Strip generated scaffolding from a note body.
+ *
+ * Vaults synced from a CRM or driven by dataview carry bodies that are mostly
+ * query blocks and HTML comments, identical across every note of a type. Left
+ * in, they consume the encoder's budget and make unrelated records look alike:
+ * measured on one such vault, every customer note sat at ~0.89 cosine to every
+ * other, and paraphrase retrieval found 1 of 5 target notes.
+ */
+function stripScaffolding(body: string): string {
+  return body
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/^\s*\|[-\s|:]+\|\s*$/gm, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * The text that represents a note in vector space.
  *
- * Title and tags are repeated ahead of the body because they are the note's own
- * statement of what it is about, and a lead-weighted document beats a raw dump
- * when the encoder only sees a couple of thousand characters.
+ * Title and tags lead because they are the note's own statement of what it is
+ * about, and a lead-weighted document beats a raw dump when the encoder only
+ * sees a couple of thousand characters. Frontmatter follows: in a structured
+ * vault, fields like `customer`, `status` and `owner` carry the meaning that
+ * prose would otherwise hold, and embedding the body alone misses it entirely.
  */
 function embeddingText(node: {
   title: string;
   tags: string[];
   headings: string[];
   bodySnippet: string;
+  frontmatter?: NoteFrontmatter;
 }): string {
   const parts = [node.title];
   if (node.tags.length > 0) parts.push(node.tags.join(", "));
+
+  const fields: string[] = [];
+  let fieldChars = 0;
+  for (const field of flattenFrontmatter(node.frontmatter)) {
+    if (NOISE_KEY.test(field.key) || NOISE_VALUE.test(field.value)) continue;
+    const rendered = `${field.key}: ${field.value}`;
+    if (fieldChars + rendered.length > FRONTMATTER_BUDGET) break;
+    fields.push(rendered);
+    fieldChars += rendered.length;
+  }
+  if (fields.length > 0) parts.push(fields.join("; "));
+
   if (node.headings.length > 0) parts.push(node.headings.join(" · "));
-  const body = node.bodySnippet.replace(/\s+/g, " ").trim();
+
+  const body = stripScaffolding(node.bodySnippet);
   if (body) parts.push(body.slice(0, BODY_BUDGET));
   return parts.join("\n");
 }

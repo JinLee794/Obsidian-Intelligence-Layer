@@ -26,3 +26,11 @@ npm-debug.log*
 
 # Temporary files
 .tmp/
+
+# Golden sets built from private vaults
+bench/datasets/*.local.json
+bench/datasets/*.local.baseline.json
+
+# Vault index artifacts
+_oil-vectors.json
+_oil-graph.json

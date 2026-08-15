@@ -513,11 +513,52 @@ Standalone harnesses (run against `dist/`, so build first):
 
 ```bash
 node bench/index-liveness.mjs [notes]   # End-to-end: watcher + tools + every index
+node bench/eval-golden.mjs              # Retrieval quality against a golden set
+node bench/semantic-probe.mjs           # Evaluate the semantic tier on a real vault
 node bench/semantic-eval.mjs [notes...] # Semantic tier at scale; recall@10 with live Ollama
 node bench/semantic-live-check.mjs      # Real MCP server + real Ollama, paraphrase queries
+node bench/embed-latency.mjs [vault]    # Embed cost by batch size, on your own notes
 node bench/rebuild-cost.mjs [notes]     # Index update overhead after a single edit
 node bench/tier-breakdown.mjs [notes]   # Per-tier query cost by query length
 ```
+
+### Measuring retrieval quality
+
+`bench/eval-golden.mjs` scores search against a static set of scenarios with
+known answers, so quality is a number that can be compared across changes rather
+than an impression formed from spot checks.
+
+```bash
+node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json
+node bench/eval-golden.mjs --dataset=... --baseline   # record current scores
+node bench/eval-golden.mjs --dataset=... --compare    # exit 1 on regression
+```
+
+Each case names a query, the notes that should answer it, and — importantly —
+which tiers may run. `forbidTiers` is what keeps the cheap path honest: an
+identifier lookup that quietly starts paying for an embedding round trip is a
+regression even when its results are unchanged.
+
+```json
+{
+  "id": "tpid-northwind",
+  "scenario": "identifier",
+  "query": "TP-500600",
+  "relevant": ["Customers/Northwind.md"],
+  "primary": "Customers/Northwind.md",
+  "expectTiers": ["frontmatter"],
+  "forbidTiers": ["semantic"]
+}
+```
+
+Scenarios are grouped so a change that helps paraphrase recall while breaking
+identifier lookups shows up as exactly that, instead of averaging out. Reported
+metrics are hit rate, MRR, recall, primary accuracy and tier routing.
+
+To score your own vault, copy the fixture dataset and point `vault` at it.
+Anything matching `bench/datasets/*.local.json` is gitignored, because a golden
+set built from a real vault contains note paths you probably do not want in a
+public repository.
 
 `semantic-live-check` is the one that needs Ollama actually running. It spawns
 the packaged stdio server against a copy of the fixture vault, waits for the
