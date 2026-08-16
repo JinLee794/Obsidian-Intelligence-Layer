@@ -11,6 +11,7 @@ import { GraphIndex } from "./graph.js";
 import { SessionCache } from "./cache.js";
 import { VaultWatcher } from "./watcher.js";
 import { SemanticIndex, attachSemanticIndex } from "./semantic.js";
+import { setExcludedFolders } from "./search.js";
 import { registerCoreTools } from "./tools/core.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
@@ -33,6 +34,12 @@ async function main(): Promise<void> {
   // ── 1. Load configuration ──────────────────────────────────────────────
   console.error("[OIL] Loading configuration...");
   const config = await loadConfig(vaultPath);
+  setExcludedFolders(config.search.excludeFolders);
+  if (config.search.excludeFolders.length > 0) {
+    console.error(
+      `[OIL] Search excludes: ${config.search.excludeFolders.join(", ")}`,
+    );
+  }
   console.error("[OIL] Configuration loaded.");
 
   // ── 2. Build graph index (with persistence + background indexing) ─────

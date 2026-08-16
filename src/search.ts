@@ -421,13 +421,19 @@ export async function cascadeSearch(
     [...semantic, ...fuzzy, ...lexical].map((hit) => [hit.path, hit.excerpt]),
   );
 
+  // Normalise to the top hit, matching the confident-lexical path above. Raw
+  // RRF sums are reciprocal ranks — a single-tier top hit is always 1/61 ≈ 0.016
+  // and two agreeing tiers 0.033 — so leaving them raw made the same field mean
+  // different things depending on whether the query happened to escalate.
+  const topScore = fused[0]?.score || 1;
+
   const results = fused.slice(0, limit).map((entry) => {
     const node = graph.getNode(entry.path);
     return {
       path: entry.path,
       title: node?.title ?? entry.path,
       excerpt: excerpts.get(entry.path) ?? (node?.tags ?? []).join(", "),
-      score: Number(entry.score.toFixed(6)),
+      score: Number((entry.score / topScore).toFixed(4)),
       heading: null,
       matchedBy: entry.sources,
     };
@@ -487,11 +493,35 @@ export interface SearchFilters {
   frontmatter?: Record<string, unknown>;
 }
 
+/**
+ * Folders kept out of search results.
+ *
+ * Applied here rather than at indexing time so graph traversal, frontmatter
+ * queries and the audit log still see every note — the goal is to stop tooling
+ * and archives competing with knowledge in a ranked list, not to make them
+ * invisible. Set through `search.exclude_folders` or `OIL_EXCLUDE_FOLDERS`.
+ */
+let excludedFolders: string[] = [];
+
+export function setExcludedFolders(folders: string[]): void {
+  excludedFolders = folders.filter((f) => f.trim() !== "").map((f) => f.replace(/\/*$/, "/"));
+}
+
+export function getExcludedFolders(): string[] {
+  return [...excludedFolders];
+}
+
 function passesFilters(
   path: string,
   graph: GraphIndex,
   filters?: SearchFilters,
 ): boolean {
+  // An explicit folder filter is the caller asking for that folder specifically,
+  // so it wins over the vault-level exclusion.
+  if (!filters?.folder && excludedFolders.some((prefix) => path.startsWith(prefix))) {
+    return false;
+  }
+
   if (!filters) return true;
 
   if (filters.folder && !path.startsWith(filters.folder)) {

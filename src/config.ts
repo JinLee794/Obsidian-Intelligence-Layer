@@ -35,13 +35,18 @@ const DEFAULTS: OilConfig = {
   search: {
     graphIndexFile: "_oil-graph.json",
     backgroundIndexThresholdMs: 3000,
+    excludeFolders: [],
   },
   semantic: {
     enabled: true,
     endpoint: "http://127.0.0.1:11434",
     model: "nomic-embed-text",
     indexFile: "_oil-vectors.json",
-    minScore: 0.45,
+    // Measured against nomic-embed-text on a 360-note vault: real queries score
+    // 0.554-0.749 against their best note, gibberish 0.451-0.531, and off-topic
+    // English 0.432-0.454. The previous 0.45 sat below every noise score, so the
+    // floor admitted everything and "no match" was unreachable.
+    minScore: 0.5,
     // Measured against CPU-only Ollama on real notes: four inputs per request
     // is both the fastest per note (~0.9s vs ~1.7s at sixteen) and the least
     // likely to trip a timeout.
@@ -131,6 +136,7 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     title_field: "titleField",
     graph_index_file: "graphIndexFile",
     background_index_threshold_ms: "backgroundIndexThresholdMs",
+    exclude_folders: "excludeFolders",
     index_file: "indexFile",
     min_score: "minScore",
     batch_size: "batchSize",
@@ -173,7 +179,14 @@ export function applyEnvOverrides(
   const minScore = parseNumber(env.OIL_SEMANTIC_MIN_SCORE, "OIL_SEMANTIC_MIN_SCORE");
   if (minScore !== undefined) semantic.minScore = minScore;
 
-  return { ...config, semantic };
+  const search = { ...config.search };
+  if (env.OIL_EXCLUDE_FOLDERS !== undefined && env.OIL_EXCLUDE_FOLDERS.trim() !== "") {
+    search.excludeFolders = env.OIL_EXCLUDE_FOLDERS.split(",")
+      .map((folder) => folder.trim())
+      .filter(Boolean);
+  }
+
+  return { ...config, search, semantic };
 }
 
 /** Accepts the spellings people actually type, and warns rather than guessing. */

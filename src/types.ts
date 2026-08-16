@@ -167,6 +167,8 @@ export interface FrontmatterSchemaConfig {
 export interface SearchConfig {
   graphIndexFile: string;
   backgroundIndexThresholdMs: number;
+  /** Folder prefixes kept out of search results, e.g. templates or agent logs. */
+  excludeFolders: string[];
 }
 
 /** Local-embedding tier. Every field has a working default; none is required. */

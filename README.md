@@ -110,7 +110,8 @@ An MCP client configures a server through `command`, `args` and `env` — not th
 | `--no-semantic` | `OIL_SEMANTIC=off` | Turn the semantic tier off entirely |
 | `--semantic-model=<name>` | `OIL_SEMANTIC_MODEL` | Embedding model (default `nomic-embed-text`) |
 | `--semantic-endpoint=<url>` | `OIL_SEMANTIC_ENDPOINT` | Ollama base URL (default `http://127.0.0.1:11434`) |
-| `--semantic-min-score=<n>` | `OIL_SEMANTIC_MIN_SCORE` | Cosine floor for a hit (default `0.45`) |
+| `--semantic-min-score=<n>` | `OIL_SEMANTIC_MIN_SCORE` | Cosine floor for a hit (default `0.5`) |
+| — | `OIL_EXCLUDE_FOLDERS` | Comma-separated folders kept out of results |
 
 So a user who wants lexical-only search adds one line to their client config, with no edit to the vault:
 
@@ -313,6 +314,9 @@ frontmatter_schema:
 search:
   graph_index_file: "_oil-graph.json"         # Persisted link graph
   background_index_threshold_ms: 3000         # Background rebuild threshold (ms)
+  exclude_folders:                            # Kept out of search results
+    - "_agent-log/"
+    - "Templates/"
 
 # Semantic tier (local Ollama embeddings) — optional, degrades silently
 semantic:
@@ -320,9 +324,9 @@ semantic:
   endpoint: "http://127.0.0.1:11434"          # Ollama base URL (loopback)
   model: "nomic-embed-text"                   # Pulled automatically on first run
   index_file: "_oil-vectors.json"             # Persisted vectors
-  min_score: 0.45                             # Cosine floor for a hit
-  batch_size: 16
-  timeout_ms: 20000
+  min_score: 0.5                              # Cosine floor for a hit
+  batch_size: 4
+  timeout_ms: 15000                           # Per input; a batch gets this x its size
 
 # Audit logging
 audit:
