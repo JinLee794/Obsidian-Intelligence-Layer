@@ -1,9 +1,11 @@
 /**
  * Performance regression — assertion-based latency ceilings.
  *
- * Unlike statistical benchmarks (vitest bench) that require human interpretation,
- * these tests fail CI when a latency ceiling is breached. Thresholds are generous
- * enough to avoid flakes, tight enough to catch 5–10× regressions.
+ * Opt-in via `OIL_PERF=1` (or `npm run test:perf`). These assert wall-clock
+ * ceilings, which are only meaningful on an otherwise idle machine: under load
+ * they fail on unmodified `main` too, and a gate that cries wolf is a gate
+ * people learn to ignore. Keeping them out of the default suite makes
+ * `check:release` deterministic without discarding the measurements.
  *
  * For profiling and ops/sec comparison, use: npx vitest bench bench/scale.bench.ts
  */
@@ -13,9 +15,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { GraphIndex } from "../graph.js";
 import { loadConfig } from "../config.js";
-import { cascadeSearch, invalidateSearchIndex, fuzzySearch } from "../search.js";import { setupHarness, FIXTURE_VAULT, type MockMcpServer } from "./harness.js";
+import { cascadeSearch, invalidateSearchIndex, fuzzySearch } from "../search.js";
+import { setupHarness, FIXTURE_VAULT, type MockMcpServer } from "./harness.js";
 import { generateVault } from "../../bench/fixtures/generate-vault.js";
 import type { OilConfig } from "../types.js";
+
+/** Wall-clock ceilings are only meaningful on an idle machine. */
+const describePerf = process.env.OIL_PERF === "1" ? describe : describe.skip;
 
 let server: MockMcpServer;
 let graph: GraphIndex;
@@ -43,7 +49,7 @@ async function medianMs(fn: () => unknown | Promise<unknown>, runs = 5): Promise
 // 1. Cold-start ceilings
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("Cold-start ceilings", () => {
+describePerf("Cold-start ceilings", () => {
   it("graph build on fixture vault ≤500ms", async () => {
     const ms = await medianMs(async () => {
       const g = new GraphIndex(FIXTURE_VAULT);
@@ -65,7 +71,7 @@ describe("Cold-start ceilings", () => {
 // 2. Search latency ceilings
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("Search latency ceilings", () => {
+describePerf("Search latency ceilings", () => {
   it("cascade search ≤50ms", async () => {
     // Warm up index
     await cascadeSearch(graph, "warmup", 5, undefined);
@@ -88,7 +94,7 @@ describe("Search latency ceilings", () => {
 // 3. Tool layer latency ceilings
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("Tool layer latency ceilings", () => {
+describePerf("Tool layer latency ceilings", () => {
   it("get_health ≤50ms", async () => {
     const ms = await medianMs(() => server.callToolRaw("get_health", {}));
     expect(ms).toBeLessThan(50);
@@ -123,7 +129,7 @@ describe("Tool layer latency ceilings", () => {
 // 4. Scaling regression — latency grows sub-linearly with vault size
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("Scaling regression", () => {
+describePerf("Scaling regression", () => {
   let smallDir: string | null = null;
   let largeDir: string | null = null;
 

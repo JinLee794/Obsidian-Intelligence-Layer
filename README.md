@@ -136,7 +136,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.5.5",
+        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.6.0",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -505,6 +505,7 @@ npm run dev           # Watch mode (recompiles on change)
 npm run lint          # Type-check without emitting
 npm start             # Run the server (needs OBSIDIAN_VAULT_PATH)
 npm test              # Run the vitest suite
+npm run test:perf     # Wall-clock latency ceilings (run on an idle machine)
 npm run test:package  # Pack, install, and smoke-test the release artifact
 npm run check:release # lint + test + package smoke (runs on publish)
 npm run bench         # Run benchmark suite (vitest bench)

@@ -1,6 +1,6 @@
 {
   "name": "@jinlee794/obsidian-intelligence-layer",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "description": "Obsidian Intelligence Layer — Knowledge Layer MCP Server for AI Agent Workflows",
   "type": "module",
   "publishConfig": {
@@ -25,6 +25,7 @@
     "prepare": "npm run build",
     "prepublishOnly": "npm run check:release",
     "test": "vitest run",
+    "test:perf": "vitest run src/__tests__/perf-regression.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
     "check:release": "npm run lint && npm test && npm run test:package",
     "lint": "tsc --noEmit -p tsconfig.check.json",

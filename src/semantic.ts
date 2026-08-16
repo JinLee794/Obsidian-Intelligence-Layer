@@ -203,6 +203,8 @@ export class SemanticIndex {
   /** In-flight refresh, so concurrent triggers coalesce instead of stacking. */
   private refreshing: Promise<void> | null = null;
   private modelPulled = false;
+  /** True once Ollama has actually answered this process. */
+  private verified = false;
 
   constructor(vaultPath: string, config: SemanticConfig) {
     this.vaultPath = vaultPath;
@@ -382,6 +384,35 @@ export class SemanticIndex {
     return this.refreshing;
   }
 
+  /**
+   * Confirm Ollama is actually answering.
+   *
+   * Skipped once an embedding call has already succeeded this process, so the
+   * common path costs nothing. Uses the tag listing rather than an embed so it
+   * does not load a model just to answer a health question.
+   */
+  private async verifyReachable(): Promise<boolean> {
+    if (this.verified) return true;
+    try {
+      const res = await fetch(`${this.endpoint}/api/tags`, {
+        signal: AbortSignal.timeout(this.config.timeoutMs),
+      });
+      if (!res.ok) throw new Error(`Ollama /api/tags returned HTTP ${res.status}`);
+      this.verified = true;
+      return true;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (this.state !== "unavailable") {
+        console.error(
+          `[OIL] Semantic tier unavailable (${reason}). Search continues on the lexical tiers.`,
+        );
+      }
+      this.state = "unavailable";
+      this.reason = reason;
+      return false;
+    }
+  }
+
   private async runRefresh(graph: GraphIndex): Promise<void> {
     const version = graph.version;
 
@@ -414,7 +445,15 @@ export class SemanticIndex {
 
     if (pending.length === 0) {
       this.indexedVersion = version;
-      if (this.state !== "unavailable") this.state = "ready";
+      // A complete sidecar is not the same as a working tier: ranking needs the
+      // note vectors we already have, but every query still has to be embedded.
+      // Reporting `ready` here made `get_health` claim health while searches
+      // silently returned nothing.
+      const reachable = await this.verifyReachable();
+      if (reachable) {
+        this.state = "ready";
+        this.reason = null;
+      }
       if (changed) await this.save();
       return;
     }
@@ -435,6 +474,7 @@ export class SemanticIndex {
 
       this.state = "ready";
       this.reason = null;
+      this.verified = true;
       this.indexedVersion = version;
       this.queryCache.clear();
       await this.save();

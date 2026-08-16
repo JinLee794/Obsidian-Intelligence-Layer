@@ -59,6 +59,12 @@ async function startStub(): Promise<Stub> {
         res.writeHead(500).end("stub failure");
         return;
       }
+      // Reachability probes hit the tag listing; only /api/embed is an embed.
+      if (req.url?.startsWith("/api/tags")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ models: [{ name: "stub-model" }] }));
+        return;
+      }
       const parsed = JSON.parse(body || "{}") as { input?: string[] };
       const inputs = parsed.input ?? [];
       stub.embedCalls!.push(inputs);
@@ -256,6 +262,25 @@ describe("SemanticIndex — degradation", () => {
     await index.refresh(graph);
 
     expect(index.status).toBe("ready");
+  });
+
+  it("does not report ready from a cached index alone", async () => {
+    // Every query still has to be embedded, so a complete sidecar with no
+    // reachable Ollama is not a working tier.
+    const first = new SemanticIndex(vaultRoot, makeConfig());
+    await first.refresh(graph);
+    expect(first.status).toBe("ready");
+
+    const offline = new SemanticIndex(
+      vaultRoot,
+      makeConfig({ endpoint: "http://127.0.0.1:1" }),
+    );
+    await offline.load();
+    expect(offline.stats.note_count).toBe(2);
+
+    await offline.refresh(graph);
+    expect(offline.status).toBe("unavailable");
+    expect(offline.stats.reason).toBeTruthy();
   });
 });
 
