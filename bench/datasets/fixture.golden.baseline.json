@@ -1,9 +1,11 @@
 {
   "dataset": "fixture vault — committed golden set",
+  "mode": "semantic",
   "cases": 12,
+  "skipped": 0,
   "semantic": "on",
   "hit_rate": 1,
-  "mrr": 0.9167,
+  "mrr": 0.875,
   "recall": 1,
   "primary_accuracy": 1,
   "tier_routing": 1,
@@ -21,7 +23,7 @@
     "typo": {
       "cases": 2,
       "hit_rate": 1,
-      "mrr": 1
+      "mrr": 0.75
     },
     "paraphrase": {
       "cases": 4,

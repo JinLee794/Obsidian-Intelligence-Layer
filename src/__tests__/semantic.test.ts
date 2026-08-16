@@ -282,6 +282,27 @@ describe("SemanticIndex — degradation", () => {
     expect(offline.status).toBe("unavailable");
     expect(offline.stats.reason).toBeTruthy();
   });
+
+  it("re-checks the endpoint after a query fails, rather than trusting an earlier success", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: -1 }));
+    await index.refresh(graph);
+    expect(index.status).toBe("ready");
+
+    // Ollama goes away after the index was already built and verified.
+    stub.failNext = true;
+    expect(await index.search("anything", 5)).toEqual([]);
+    expect(index.status).toBe("unavailable");
+
+    // Nothing needs embedding, so this refresh takes the cached-index path. It
+    // must still probe rather than assume the earlier success still holds.
+    stub.failNext = true;
+    await index.refresh(graph);
+    expect(index.status).toBe("unavailable");
+
+    stub.failNext = false;
+    await index.refresh(graph);
+    expect(index.status).toBe("ready");
+  });
 });
 
 // ─── Query ────────────────────────────────────────────────────────────────────

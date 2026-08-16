@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Known limitations
+
+Carried into 0.6.0 deliberately, with the evidence that justified each call.
+
+- **The semantic relevance floor is corpus- and model-specific.** The 0.5 default
+  was measured against `nomic-embed-text` on a 360-note vault. On the 12-note
+  fixture it costs one rank position on a typo query, and on a very different
+  corpus it may sit in the wrong place entirely. `bench/floor-analysis.mjs`
+  measures the real-versus-noise separation for a given vault; `OIL_SEMANTIC_MIN_SCORE`
+  applies the answer.
+- **The floor governs embeddings, not BM25.** A query that is off-topic but
+  real English can still match the lexical tier on a stray word, so "no match"
+  is reachable for gibberish but not guaranteed for everything irrelevant.
+- **Semantic hits often rank 8-9 rather than top-3.** Reciprocal rank fusion
+  weights every tier equally, so a page of BM25 partial-word matches crowds out
+  a semantically correct answer. Weighting the fusion when escalation was caused
+  by poor term coverage is the obvious next experiment, and the golden set can
+  score it.
+- **Notes whose meaning lives only in the title retrieve poorly.** Embeddings
+  average over tokens, so a long body dilutes a short title. Repeating the title
+  in the embedded text is the standard remedy and is untested here.
+- **The tier recovers from an Ollama outage on the next vault change, not
+  immediately.** A failed call marks it unavailable and forces re-verification,
+  but nothing re-probes on a fixed interval, so a restarted Ollama with an
+  otherwise idle vault stays unused until something is edited or the server
+  restarts.
+- **Shutdown does not drain an in-flight refresh.** A background embed can
+  complete after the server stops accepting requests. The sidecar write is
+  replace-by-rename, so the risk is a wasted write rather than a corrupt file.
+- **`_oil-vectors.json` lives in the vault** and grows with it — roughly 4 MB per
+  1,000 notes. Vaults under git or Obsidian Sync should ignore it; it is a cache
+  and is rebuilt from the notes.
+- **fuse.js is the most expensive component on every axis** — query cost, build
+  cost and update cost — for the narrow job of catching a misspelled name.
+  Measured at 5,000 notes it costs 360x BM25 for one word and 3,000x for four.
+  The query-shape gate bounds the damage; replacing it with an in-tree bounded
+  edit-distance match over the title vocabulary would be faster and one
+  dependency lighter.
+- **`graph.updateNote` still re-resolves every backlink** on a single edit,
+  which is now the largest per-edit cost. Fixing it needs a reverse target-to-
+  source map, and interacts with known `titleIndex` and `aliases` defects that
+  should be corrected first.
+
 ## [0.6.0] - 2026-08-16
 
 Semantic search, incremental indexing, and a measurable definition of "good
@@ -62,10 +105,12 @@ running behaves exactly as it did in 0.5.5. Worth knowing:
 
 ### Fixes
 
+- **The vector index only refreshed on queries that reached the semantic tier.** `ensureFresh` hung off the semantic tier itself, which the cascade only runs when the lexical tiers fail to cover a query — rare in an entity-keyed vault. A vault could be edited all day and stay stale until some query happened to need meaning, and that query then ranked against stale vectors. Reconciliation now happens on every search, at the cost of a version comparison when nothing changed
+- **A once-reachable Ollama was trusted forever.** The reachability check short-circuited after any success, so if Ollama stopped later and the index needed no new embeddings, `get_health` kept reporting `ready`. A failed call now clears the verification, so the next refresh re-probes
 - **Report the underlying cause of a failed Ollama call.** Node's fetch describes every transport failure as a bare "fetch failed" and puts the useful part on `cause`; that string now reaches users through `get_health`, `doctor` and search responses, so `ECONNREFUSED` is worth keeping
 - **The semantic tier reported `ready` from a cached index without ever reaching Ollama.** A complete vector sidecar lets the tier rank notes, but every *query* still has to be embedded — so `get_health` claimed health while searches silently returned nothing. Readiness now requires the endpoint to answer at least once. Caught by the packaged smoke test, which starts the server with the tier enabled and the endpoint unreachable
 - **`score` meant different things on different code paths.** A query answered by the lexical tier returned a BM25 score normalised to 1.0, while an escalated query returned a raw reciprocal-rank-fusion sum — which is always about 0.016 for a single-tier top hit and 0.033 when two tiers agree. Reported from real use as "scores cluster in 0.016-0.033 with no meaningful spread". Fused scores are now normalised to the top hit, so the field is comparable within a result set on either path. It remains a relative ranking signal, not an absolute confidence
-- **The semantic relevance floor never rejected anything.** Measured against `nomic-embed-text` on a 360-note vault, real queries score 0.554-0.749 against their best note, gibberish tops out at 0.531 and off-topic English at 0.454 — so the 0.45 default sat below every noise score and "no match" was unreachable. The default is now 0.5. Verified on the same vault: `zzxqq wibblewobble` returns nothing where it previously returned five results
+- **The semantic relevance floor never rejected anything.** Measured against `nomic-embed-text` on a 360-note vault, real queries score 0.554-0.749 against their best note, gibberish tops out at 0.531 and off-topic English at 0.454 — so the 0.45 default sat below every noise score and "no match" was unreachable. The default is now 0.5. Verified on the same vault: `zzxqq wibblewobble` returns nothing where it previously returned five results. The trade is one rank position on a typo query in the small fixture vault, with hit rate and recall unchanged
 - **Add `search.exclude_folders` / `OIL_EXCLUDE_FOLDERS`.** Vaults that keep tooling, templates or agent logs alongside knowledge had them competing for rank: on one vault, 4 of 10 results for a customer question were skill and prompt documents. Excluded folders are filtered out of every tier, while graph traversal, frontmatter queries and the audit log still see them — the goal is to stop them competing, not to hide them. An explicit `filter_folder` overrides the exclusion, since naming a folder is a deliberate request for it
 - **`npm run test:package` could not run under pnpm or on modern Node for Windows.** It drove the package manager named by `npm_execpath` — which is pnpm when a developer uses pnpm, and pnpm does not implement `pack --pack-destination` — and a `npm.cmd` fallback fails with `EINVAL` on current Node. It now resolves npm's own `npm-cli.js` and runs it under the active Node. The release gate was silently unrunnable for pnpm users
 - **Include Ollama's error body in the failure reason.** A bare `HTTP 400` is undiagnosable; the tier now reports what Ollama actually said, in `get_health` and in the startup log

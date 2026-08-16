@@ -496,6 +496,7 @@ export class SemanticIndex {
     } catch (err) {
       // A missing or broken Ollama is an expected deployment, not an error:
       // hold whatever vectors we already have and let the cascade run lexical.
+      this.verified = false;
       this.state = "unavailable";
       this.reason = describeError(err);
       if (previous !== "unavailable") {
@@ -534,6 +535,9 @@ export class SemanticIndex {
       this.queryCache.set(query, vector);
       return vector;
     } catch (err) {
+      // Ollama answered once but has stopped; the next refresh must re-check
+      // rather than trust the earlier success.
+      this.verified = false;
       this.state = "unavailable";
       this.reason = describeError(err);
       return null;

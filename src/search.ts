@@ -266,10 +266,6 @@ export async function semanticSearch(
   const index = getSemanticIndex(graph);
   if (!index) return [];
 
-  // Re-embeds notes the graph has changed since the last pass, in the
-  // background. This query runs against whatever is already indexed.
-  index.ensureFresh(graph);
-
   const hits = await index.search(query, limit, (path) =>
     passesFilters(path, graph, filters),
   );
@@ -342,6 +338,12 @@ export async function cascadeSearch(
   const accept = (path: string) => passesFilters(path, graph, filters);
   const candidateDepth = Math.max(limit * 3, 20);
   const tiersUsed: string[] = [];
+
+  // Reconcile vectors on every search, not just the ones that reach the semantic
+  // tier. Escalation is rare in an entity-keyed vault, so hanging re-embedding
+  // off it meant a vault could be edited all day and stay stale until some query
+  // happened to need meaning. Costs a version comparison when nothing changed.
+  getSemanticIndex(graph)?.ensureFresh(graph);
   // ── Tier 0: exact frontmatter value ────────────────────────────────
   // An identifier query is answered by whole-value equality or not at all;
   // letting term scoring handle it produces confident matches on a fragment
