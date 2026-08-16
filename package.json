@@ -27,6 +27,7 @@
     "test": "vitest run",
     "test:perf": "vitest run src/__tests__/perf-regression.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
+    "test:ux": "node scripts/consumer-ux-check.mjs",
     "check:release": "npm run lint && npm test && npm run test:package",
     "lint": "tsc --noEmit -p tsconfig.check.json",
     "bench": "vitest bench",

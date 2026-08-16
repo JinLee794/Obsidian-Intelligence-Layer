@@ -11,6 +11,7 @@
 
 import { stat } from "node:fs/promises";
 import { loadConfig } from "./config.js";
+import { describeError } from "./semantic.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 import type { SemanticConfig } from "./types.js";
 
@@ -77,7 +78,7 @@ async function checkOllama(semantic: SemanticConfig): Promise<Check[]> {
       {
         label: "ollama",
         ok: false,
-        detail: `not reachable at ${endpoint} (${err instanceof Error ? err.message : String(err)})`,
+        detail: `not reachable at ${endpoint} (${describeError(err)})`,
         remedy:
           "Install Ollama from https://ollama.com and make sure it is running, " +
           "or set OIL_SEMANTIC=off to silence this. Search still works without it.",

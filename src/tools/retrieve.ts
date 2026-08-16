@@ -21,6 +21,7 @@ import {
 import { validateVaultPath, validationError } from "../validation.js";
 import { readNote, securePath } from "../vault.js";
 import { cascadeSearch, type CascadeHit } from "../search.js";
+import { getSemanticIndex } from "../semantic.js";
 import { queryNotes } from "../query.js";
 import { flattenFrontmatter, normalizeValue } from "../frontmatter.js";
 
@@ -76,10 +77,45 @@ function getWordCount(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
+/**
+ * Tell the caller when meaning-based search would have run but could not.
+ *
+ * The semantic tier is optional and fails quietly by design, which leaves a user
+ * inside an MCP client with no way to discover that it exists or why it is off —
+ * startup logs go to stderr, which most clients hide. Reported only on a query
+ * the lexical tiers could not cover, so it costs nothing when search is working
+ * and never nags someone who turned the tier off deliberately.
+ */
+function semanticNotice(
+  graph: GraphIndex,
+  escalation: string | null,
+  tiersUsed: string[],
+): Record<string, string> {
+  if (!escalation || tiersUsed.includes("semantic")) return {};
+
+  const status = getSemanticIndex(graph)?.stats;
+  if (!status || status.status === "disabled" || status.status === "ready") return {};
+
+  // A search schedules its own background retry, which flips the tier to
+  // `indexing` before this runs. `reason` is only ever set by a failure, so it
+  // distinguishes a genuine first index from a retry after one.
+  if (status.reason) {
+    return {
+      semantic_status:
+        `Meaning-based search is unavailable (${status.reason}), so this used keyword matching only. ` +
+        "It needs Ollama running locally; run `obsidian-intelligence-layer doctor` to check, or set OIL_SEMANTIC=off to silence this.",
+    };
+  }
+
+  return {
+    semantic_status:
+      "Meaning-based search is still indexing this vault; keyword results only for now.",
+  };
+}
+
 function buildSnippet(content: string, query: string): string {
   const compact = content.replace(/\s+/g, " ").trim();
   if (!compact) return "";
-
   const terms = query
     .toLowerCase()
     .split(/\s+/)
@@ -157,6 +193,7 @@ export function registerRetrieveTools(
           : {}),
         tiers_used: tiersUsed,
         escalated: escalation,
+        ...semanticNotice(graph, escalation, tiersUsed),
         results: results.map(({ matchedBy, heading, ...rest }: CascadeHit) => ({
           ...rest,
           ref: noteRef(rest.path, heading || undefined),

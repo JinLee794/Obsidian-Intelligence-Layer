@@ -51,6 +51,16 @@ Without a smart interface, the agent does the dumb thing:
 
 - **Node.js ≥ 20**
 - An **Obsidian vault** on disk (Obsidian doesn't need to be running — OIL works directly on the files)
+- *Optional:* **[Ollama](https://ollama.com)**, running locally, to enable meaning-based search
+
+That last one is genuinely optional. Without it OIL searches by keyword, exactly
+as it always has; with it, `search_vault` can also answer questions phrased in
+words your notes never use. Nothing else to install — OIL fetches the embedding
+model itself on first run, in the background.
+
+```bash
+obsidian-intelligence-layer doctor --vault=/path/to/vault   # tells you where you stand
+```
 
 ### Install and Build
 
@@ -507,6 +517,7 @@ npm start             # Run the server (needs OBSIDIAN_VAULT_PATH)
 npm test              # Run the vitest suite
 npm run test:perf     # Wall-clock latency ceilings (run on an idle machine)
 npm run test:package  # Pack, install, and smoke-test the release artifact
+npm run test:ux       # Install the tarball and check the setup experience
 npm run check:release # lint + test + package smoke (runs on publish)
 npm run bench         # Run benchmark suite (vitest bench)
 npm run bench:watch   # Benchmarks in watch mode

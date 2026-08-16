@@ -120,6 +120,18 @@ function hashText(text: string): string {
 }
 
 /**
+ * Node's fetch reports every transport failure as a bare "fetch failed" and puts
+ * the useful part on `cause`. This string reaches users through `get_health` and
+ * search responses, so "ECONNREFUSED" versus "ENOTFOUND" is worth keeping.
+ */
+export function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+  const detail = cause?.code ?? cause?.message;
+  return detail && !err.message.includes(detail) ? `${err.message} (${detail})` : err.message;
+}
+
+/**
  * Frontmatter values that describe plumbing rather than meaning. Identifiers,
  * links and timestamps are precisely what the lexical tiers are good at, and in
  * vector space they are noise that crowds out the fields a person would search.
@@ -401,7 +413,7 @@ export class SemanticIndex {
       this.verified = true;
       return true;
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = describeError(err);
       if (this.state !== "unavailable") {
         console.error(
           `[OIL] Semantic tier unavailable (${reason}). Search continues on the lexical tiers.`,
@@ -485,7 +497,7 @@ export class SemanticIndex {
       // A missing or broken Ollama is an expected deployment, not an error:
       // hold whatever vectors we already have and let the cascade run lexical.
       this.state = "unavailable";
-      this.reason = err instanceof Error ? err.message : String(err);
+      this.reason = describeError(err);
       if (previous !== "unavailable") {
         console.error(
           `[OIL] Semantic tier unavailable (${this.reason}). Search continues on the lexical tiers.`,
@@ -523,7 +535,7 @@ export class SemanticIndex {
       return vector;
     } catch (err) {
       this.state = "unavailable";
-      this.reason = err instanceof Error ? err.message : String(err);
+      this.reason = describeError(err);
       return null;
     }
   }
