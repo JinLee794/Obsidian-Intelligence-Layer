@@ -317,6 +317,13 @@ export interface CascadeResult {
 const FUZZY_MAX_QUERY_TOKENS = 3;
 
 /**
+ * Floor on the lexical tier's vote once the cascade has escalated. Even a query
+ * it only partly matched carries signal, so it is down-weighted rather than
+ * silenced.
+ */
+const LEXICAL_MIN_WEIGHT = 0.3;
+
+/**
  * Tiered search with escalation on evidence of lexical failure.
  *
  * Escalation is driven by *coverage* rather than result count: BM25 happily
@@ -413,8 +420,18 @@ export async function cascadeSearch(
     : await semanticSearch(graph, query, candidateDepth, filters);
   if (semantic.length > 0) tiersUsed.push("semantic");
 
+  // Trust the lexical ranking in proportion to how much of the query it
+  // actually matched. A query it barely understood is exactly the case where its
+  // opinion should not outweigh a tier that did. Floored so a partial match
+  // still counts for something rather than being discarded outright.
+  const coverage =
+    lexical.length > 0 && queryTermCount > 0
+      ? lexical[0].matchedTerms.length / queryTermCount
+      : 0;
+  const lexicalWeight = Math.max(LEXICAL_MIN_WEIGHT, Math.min(1, coverage));
+
   const fused = reciprocalRankFusion([
-    { name: "lexical", paths: lexical.map((h) => h.path) },
+    { name: "lexical", paths: lexical.map((h) => h.path), weight: lexicalWeight },
     { name: "fuzzy", paths: fuzzy.map((h) => h.path) },
     { name: "semantic", paths: semantic.map((h) => h.path) },
   ]);
@@ -457,15 +474,22 @@ function toCascadeHit(hit: SearchResult): CascadeHit {
 }
 
 /**
- * Reciprocal Rank Fusion.
+ * Reciprocal Rank Fusion, weighted by how much of the query each tier understood.
  *
  * BM25 and fuse.js scores live on incomparable scales, so blending the raw
  * numbers lets whichever tier emits larger values dominate. RRF discards
  * magnitudes and combines ranks instead, needing no per-corpus tuning. k=60 is
  * the value from the original TREC work.
+ *
+ * Equal weights, however, let a tier that matched one word of a seven-word
+ * question outvote one that matched its meaning: two tiers agreeing at rank 0
+ * sum to ~0.033, beating a single confident hit at ~0.016. Measured on a
+ * 360-note vault, a note the semantic tier ranked first fell out of the top ten
+ * entirely because a dozen notes merely mentioned a query word. Each list now
+ * carries a weight, so a tier's say is proportional to its evidence.
  */
 function reciprocalRankFusion(
-  lists: Array<{ name: string; paths: string[] }>,
+  lists: Array<{ name: string; paths: string[]; weight?: number }>,
   k = 60,
 ): Array<{ path: string; score: number; sources: string[] }> {
   const scores = new Map<string, { score: number; sources: string[] }>();
@@ -476,7 +500,7 @@ function reciprocalRankFusion(
       if (seen.has(path)) return;
       seen.add(path);
       const entry = scores.get(path) ?? { score: 0, sources: [] };
-      entry.score += 1 / (k + index + 1);
+      entry.score += (list.weight ?? 1) / (k + index + 1);
       if (!entry.sources.includes(list.name)) entry.sources.push(list.name);
       scores.set(path, entry);
     });

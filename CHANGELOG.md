@@ -17,14 +17,22 @@ Carried into 0.6.0 deliberately, with the evidence that justified each call.
 - **The floor governs embeddings, not BM25.** A query that is off-topic but
   real English can still match the lexical tier on a stray word, so "no match"
   is reachable for gibberish but not guaranteed for everything irrelevant.
-- **Semantic hits often rank 8-9 rather than top-3.** Reciprocal rank fusion
-  weights every tier equally, so a page of BM25 partial-word matches crowds out
-  a semantically correct answer. Weighting the fusion when escalation was caused
-  by poor term coverage is the obvious next experiment, and the golden set can
-  score it.
-- **Notes whose meaning lives only in the title retrieve poorly.** Embeddings
-  average over tokens, so a long body dilutes a short title. Repeating the title
-  in the embedded text is the standard remedy and is untested here.
+- **Semantic hits still rank mid-page on some queries.** Weighting the fusion by
+  term coverage moved the worst cases up sharply, but a correct answer can still
+  land around rank 6-9 when many notes share query vocabulary. The remaining
+  lever is the `k` constant and the coverage floor, both of which the golden set
+  can score.
+- **A second "identity" vector per note does not help.** Tested on a 360-note
+  vault: embedding title, tags and headings separately and scoring
+  `max(full, identity)` left targets reachable in the top ten at 6 of 8, exactly
+  matching the single full-text vector, while regressing two cases. It is cheap
+  (41s versus ~6 minutes for a full pass), so it is worth retrying if the
+  embedding recipe changes — but on current evidence it buys nothing.
+- **Some notes are genuinely not retrievable by meaning.** One golden case
+  (`disaster recovery`) is absent from the semantic tier's results under every
+  representation tried, because its body is CRM metadata and its concept appears
+  only as an abbreviation in the title. Expanding known abbreviations before
+  embedding is the untested idea.
 - **The tier recovers from an Ollama outage on the next vault change, not
   immediately.** A failed call marks it unavailable and forces re-verification,
   but nothing re-probes on a fixed interval, so a restarted Ollama with an
@@ -55,6 +63,7 @@ never touches Ollama behaves as it did before.
 
 ### Features
 
+- **Weight rank fusion by how much of the query each tier understood.** Equal weights let a tier that matched one word of a seven-word question outvote one that matched its meaning — two tiers agreeing at rank 0 sum to ~0.033 and beat a single confident hit at ~0.016. Measured on a 360-note vault, a note the semantic tier ranked *first* fell out of the top ten entirely because a dozen notes merely mentioned a query word. The lexical tier's vote is now scaled by its term coverage, floored so a partial match still counts. Real-vault golden set: hit rate 87% → 93%, recall 72% → 78%; fixture MRR 0.875 → 0.917, with lexical-only scores, primary accuracy and tier routing unchanged
 - **Tell the caller when meaning-based search would have helped but could not.** The semantic tier fails quietly by design, which is right for reliability and wrong for discovery: a user inside an MCP client cannot see stderr, so they never learned the capability existed or why it was off. `search_vault` now returns a `semantic_status` line — but only on a query the lexical tiers could not cover, and never when the tier is deliberately disabled, so a working search stays silent
 - **Configure OIL from the MCP client.** An MCP client wires up a server through `command`, `args` and `env` — never through files inside the user's vault — so every semantic setting is now reachable from CLI flags (`--no-semantic`, `--semantic-model`, `--semantic-endpoint`, `--semantic-min-score`, `--vault`) and environment variables (`OIL_SEMANTIC`, `OIL_SEMANTIC_MODEL`, `OIL_SEMANTIC_ENDPOINT`, `OIL_SEMANTIC_MIN_SCORE`). Resolution order is flags → environment → `oil.config.yaml` → defaults. Turning the tier off is now one line in a client config rather than an edit to the vault
 - **Add `obsidian-intelligence-layer doctor`.** Reports whether the vault resolves, whether Ollama is reachable, whether the model is present, and the *effective* settings after all three configuration layers are merged — so "why is the semantic tier off?" is answerable without reading server logs through an MCP client. Exits non-zero when something needs attention

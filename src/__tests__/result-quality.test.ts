@@ -166,3 +166,29 @@ describe("semantic relevance floor", () => {
     expect(DEFAULT_CONFIG.semantic.minScore).toBeLessThan(0.554);
   });
 });
+
+describe("weighted rank fusion", () => {
+  it("keeps a note only one tier found ahead of notes several tiers merely mention", async () => {
+    // Equal-weight fusion let two tiers agreeing at rank 0 (~0.033) outvote a
+    // single confident hit (~0.016), so a correct answer the semantic tier
+    // ranked first could fall out of the results entirely.
+    const { results, escalation } = await cascadeSearch(graph, "planning", 10, undefined);
+    expect(escalation).not.toBeNull();
+
+    const single = results.filter((r) => r.matchedBy.length === 1);
+    expect(single.length).toBeGreaterThan(0);
+  });
+
+  it("still lets the lexical tier lead when it covered the query", async () => {
+    // Down-weighting is tied to coverage, so a query the lexical tier did
+    // understand must not be demoted.
+    const { results } = await cascadeSearch(graph, "Northwind renewal", 10, undefined);
+    expect(results[0].path).toBe("Customers/Northwind.md");
+  });
+
+  it("does not disturb a confident lexical answer", async () => {
+    const { results, escalation } = await cascadeSearch(graph, "Contoso", 1, undefined);
+    expect(escalation).toBeNull();
+    expect(results[0].path).toBe("Customers/Contoso.md");
+  });
+});
