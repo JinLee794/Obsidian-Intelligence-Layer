@@ -17,11 +17,11 @@ Carried into 0.6.0 deliberately, with the evidence that justified each call.
 - **The floor governs embeddings, not BM25.** A query that is off-topic but
   real English can still match the lexical tier on a stray word, so "no match"
   is reachable for gibberish but not guaranteed for everything irrelevant.
-- **Semantic hits still rank mid-page on some queries.** Weighting the fusion by
-  term coverage moved the worst cases up sharply, but a correct answer can still
-  land around rank 6-9 when many notes share query vocabulary. The remaining
-  lever is the `k` constant and the coverage floor, both of which the golden set
-  can score.
+- **Semantic hits can still rank mid-page on some queries.** Coverage weighting
+  and the smaller `k` between them moved the worst cases up sharply — the worst
+  observed first-relevant rank fell from 9 to 7 — but a correct answer can still
+  land around rank 6-7 when many notes share query vocabulary. The remaining
+  lever is the coverage floor, which the golden set can score.
 - **A second "identity" vector per note does not help.** Tested on a 360-note
   vault: embedding title, tags and headings separately and scoring
   `max(full, identity)` left targets reachable in the top ten at 6 of 8, exactly
@@ -64,6 +64,8 @@ never touches Ollama behaves as it did before.
 ### Features
 
 - **Weight rank fusion by how much of the query each tier understood.** Equal weights let a tier that matched one word of a seven-word question outvote one that matched its meaning — two tiers agreeing at rank 0 sum to ~0.033 and beat a single confident hit at ~0.016. Measured on a 360-note vault, a note the semantic tier ranked *first* fell out of the top ten entirely because a dozen notes merely mentioned a query word. The lexical tier's vote is now scaled by its term coverage, floored so a partial match still counts. Real-vault golden set: hit rate 87% → 93%, recall 72% → 78%; fixture MRR 0.875 → 0.917, with lexical-only scores, primary accuracy and tier routing unchanged
+- **Lower the rank-fusion damping constant from 60 to 10.** The classic value assumes many systems of similar quality, where flattening each one's ordering stops any single system from dominating. These tiers differ in quality by design and are now weighted by evidence, so damping their internal ordering as well discards signal twice. Real-vault golden set MRR 0.664 → 0.707 with hit rate, recall, primary accuracy and tier routing unchanged; four of fifteen cases improved and none regressed, the clearest being a note the semantic tier ranked first that moved from rank 9 to rank 1. Fixture scores are identical in both modes
+- **Add `bench/ranking-strategies.mjs`.** The golden set scores the shipped configuration but cannot compare alternatives, because swapping the combining rule mixes ranking changes with retrieval changes. This harness runs each tier once per query and then scores nine combining rules over that fixed candidate set, isolating ranking policy. It is what established that fusing beats standardising on any single tier — 93% hit rate versus 60% for the best tier alone — and that normalising scores onto a common scale performs identically to fusing ranks, so the weighting was doing the work rather than the fusion mechanism. `--detail` prints per-case ranks, so a small headline gap can be attributed before a constant is tuned on it
 - **Tell the caller when meaning-based search would have helped but could not.** The semantic tier fails quietly by design, which is right for reliability and wrong for discovery: a user inside an MCP client cannot see stderr, so they never learned the capability existed or why it was off. `search_vault` now returns a `semantic_status` line — but only on a query the lexical tiers could not cover, and never when the tier is deliberately disabled, so a working search stays silent
 - **Configure OIL from the MCP client.** An MCP client wires up a server through `command`, `args` and `env` — never through files inside the user's vault — so every semantic setting is now reachable from CLI flags (`--no-semantic`, `--semantic-model`, `--semantic-endpoint`, `--semantic-min-score`, `--vault`) and environment variables (`OIL_SEMANTIC`, `OIL_SEMANTIC_MODEL`, `OIL_SEMANTIC_ENDPOINT`, `OIL_SEMANTIC_MIN_SCORE`). Resolution order is flags → environment → `oil.config.yaml` → defaults. Turning the tier off is now one line in a client config rather than an edit to the vault
 - **Add `obsidian-intelligence-layer doctor`.** Reports whether the vault resolves, whether Ollama is reachable, whether the model is present, and the *effective* settings after all three configuration layers are merged — so "why is the semantic tier off?" is answerable without reading server logs through an MCP client. Exits non-zero when something needs attention

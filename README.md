@@ -536,6 +536,7 @@ node bench/semantic-live-check.mjs      # Real MCP server + real Ollama, paraphr
 node bench/embed-latency.mjs [vault]    # Embed cost by batch size, on your own notes
 node bench/rebuild-cost.mjs [notes]     # Index update overhead after a single edit
 node bench/tier-breakdown.mjs [notes]   # Per-tier query cost by query length
+node bench/ranking-strategies.mjs       # Compare fusion policies on one set of candidates
 ```
 
 ### Measuring retrieval quality
@@ -572,6 +573,47 @@ identifier lookups shows up as exactly that, instead of averaging out. Reported
 metrics are hit rate, MRR, recall, primary accuracy and tier routing.
 
 To score your own vault, copy the fixture dataset and point `vault` at it.
+
+### Comparing ranking policies
+
+The golden set scores whatever the server currently does. It cannot say whether
+a *different* combining rule would do better, because changing one means
+rebuilding and re-running everything — and any difference then mixes up ranking
+changes with retrieval changes.
+
+`bench/ranking-strategies.mjs` separates the two. It runs each tier once per
+query, then scores several combining rules over that one fixed candidate set, so
+the only variable is the ranking policy:
+
+```bash
+node bench/ranking-strategies.mjs --dataset=bench/datasets/fixture.golden.json
+node bench/ranking-strategies.mjs --dataset=... "--detail=a,b"  # per-case ranks
+```
+
+Use `--detail` before acting on a small gap. A headline MRR difference of a few
+points can be one lucky case, and the per-case ranks say which it is.
+
+What it measured on a 360-note vault, against the same 15 queries:
+
+| strategy | hit rate | MRR | recall |
+| --- | --- | --- | --- |
+| rrf coverage (k=10) | 93% | 0.707 | 78% |
+| rrf coverage (k=60) | 93% | 0.665 | 78% |
+| score blend coverage | 93% | 0.665 | 78% |
+| rrf equal (k=60) | 87% | 0.655 | 72% |
+| lexical only | 60% | 0.522 | 57% |
+| semantic only | 60% | 0.419 | 45% |
+| fuzzy only | 40% | 0.400 | 40% |
+
+Three things follow. Fusing beats standardising on any single tier by a wide
+margin — the best single tier finds an answer for 60% of queries where fusion
+finds one for 93%, and the tiers fail on *different* queries, which is the whole
+reason combining them pays. Normalising scores onto a common scale performs
+identically to fusing ranks, so it buys nothing for the extra assumption that
+the scores are comparable at all. And weighting by query coverage beats treating
+the tiers as equals, which is what motivated the smaller `k`: once tiers are
+weighted by evidence, damping their internal ordering as well discards signal
+twice.
 Anything matching `bench/datasets/*.local.json` is gitignored, because a golden
 set built from a real vault contains note paths you probably do not want in a
 public repository.
