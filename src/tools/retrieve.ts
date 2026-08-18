@@ -20,7 +20,7 @@ import {
 } from "../tool-responses.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { readNote, securePath } from "../vault.js";
-import { cascadeSearch, type CascadeHit } from "../search.js";
+import { cascadeSearch, semanticSearch, type CascadeHit } from "../search.js";
 import { getSemanticIndex } from "../semantic.js";
 import { queryNotes } from "../query.js";
 import { flattenFrontmatter, normalizeValue } from "../frontmatter.js";
@@ -204,11 +204,84 @@ export function registerRetrieveTools(
     },
   );
 
+  // ── semantic_search ───────────────────────────────────────────────────
+
+  server.registerTool(
+    "semantic_search",
+    {
+      description:
+        "Meaning-based search only, with no keyword tier mixed in. Use this when a query shares no vocabulary with the notes that answer it — conceptual questions, paraphrases, or 'what have we discussed like X'. For ordinary lookups prefer search_vault, which already consults this tier and outranks it on most queries. Requires a local Ollama; returns guidance instead of results when it is unavailable.",
+      inputSchema: {
+        query: z.string().describe("Natural-language description of the idea to match"),
+        limit: z.number().optional().describe("Max results (default: 10)"),
+        filter_folder: z.string().optional().describe("Restrict to this folder prefix"),
+        filter_tags: z.array(z.string()).optional().describe("Restrict to notes with these tags"),
+      },
+    },
+    async ({ query, limit, filter_folder, filter_tags }) => {
+      if (!query || !query.trim()) {
+        return validationError("semantic_search: query must be a non-empty string");
+      }
+      if (filter_folder) {
+        const folderErr = validateVaultPath(filter_folder);
+        if (folderErr) return validationError(`semantic_search: filter_folder — ${folderErr}`);
+      }
+
+      const index = getSemanticIndex(graph);
+      index?.ensureFresh(graph);
+
+      const results = await semanticSearch(graph, query, limit ?? 10, {
+        folder: filter_folder,
+        tags: filter_tags,
+      });
+
+      // An empty list is ambiguous here in a way it never is inside the cascade:
+      // this tool has no other tier to fall back on, so say which it was.
+      if (results.length === 0) {
+        const status = index?.stats.status;
+        if (status !== "ready") {
+          // semanticNotice stays silent for a deliberately disabled tier, which is
+          // right for search_vault and wrong here — the caller asked for this tier.
+          const notice = semanticNotice(graph, "explicit", []);
+          return jsonResponse({
+            count: 0,
+            results: [],
+            ...(Object.keys(notice).length > 0
+              ? notice
+              : {
+                  semantic_status:
+                    "Meaning-based search is turned off for this server, so this tool has nothing to search.",
+                }),
+            next_step: "Retry with search_vault, which answers from the keyword tiers.",
+          });
+        }
+      }
+
+      return jsonResponse({
+        count: results.length,
+        tiers_used: ["semantic"],
+        results: results.map((hit) => ({
+          path: hit.path,
+          ref: noteRef(hit.path),
+          title: hit.title,
+          excerpt: hit.excerpt,
+          score: hit.score,
+          matched_by: ["semantic"],
+        })),
+        ...(results.length === 0
+          ? {
+              next_step:
+                "Nothing cleared the similarity floor. Try search_vault, which also matches on wording.",
+            }
+          : {}),
+      });
+    },
+  );
+
   // ── query_notes ───────────────────────────────────────────────────────
 
   server.registerTool(
-    "get_note_metadata",
-    {
+    "get_note_metadata",    {
       description:
         "Peek at note metadata before loading full content. Returns frontmatter, creation/modification timestamps, word count, and headings.",
       inputSchema: {

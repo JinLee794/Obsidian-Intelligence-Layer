@@ -145,8 +145,18 @@ const STRATEGIES = {
 
 const LEXICAL_MIN_WEIGHT = 0.3;
 
+/**
+ * Upper bound on splitting the tiers into separate tools: for each query, take
+ * whichever single tier scored best. No caller can beat this, because it is
+ * allowed to know the answer before choosing.
+ */
+const ORACLE = "oracle tier choice (ceiling)";
+
 const totals = Object.fromEntries(
-  Object.keys(STRATEGIES).map((name) => [name, { hit: 0, rr: 0, recall: 0, cases: 0 }]),
+  [...Object.keys(STRATEGIES), ORACLE].map((name) => [
+    name,
+    { hit: 0, rr: 0, recall: 0, cases: 0 },
+  ]),
 );
 const perCase = [];
 
@@ -183,6 +193,23 @@ for (const testCase of dataset.cases) {
       row.ranks[name] = firstIdx;
     }
   }
+
+  // Each metric maximised independently, so this is generous even for an oracle.
+  const singles = [lex, fuz, sem].map((hits) => {
+    const ranked = hits.map((h) => h.path).slice(0, LIMIT);
+    const found = relevant.filter((p) => ranked.includes(p));
+    const firstIdx = ranked.findIndex((p) => relevant.includes(p));
+    return {
+      hit: found.length > 0 ? 1 : 0,
+      rr: firstIdx >= 0 ? 1 / (firstIdx + 1) : 0,
+      recall: found.length / relevant.length,
+    };
+  });
+  const oracle = totals[ORACLE];
+  oracle.cases += 1;
+  oracle.hit += Math.max(...singles.map((s) => s.hit));
+  oracle.rr += Math.max(...singles.map((s) => s.rr));
+  oracle.recall += Math.max(...singles.map((s) => s.recall));
 }
 
 // ─── Report ───────────────────────────────────────────────────────────────────

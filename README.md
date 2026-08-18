@@ -222,7 +222,8 @@ All read-only. No confirmation needed.
 
 | Tool | What It Does |
 |---|---|
-| `search_vault` | The single search tool. Cascades **exact frontmatter value → BM25 → fuzzy → semantic**, escalating only when a cheaper tier fails to cover the query. Optional `filter_folder`, `filter_tags`, `limit` (default 10). Response reports `tiers_used`, `escalated`, and `matched_by` per result — including which frontmatter field matched, e.g. `frontmatter:tpid`. |
+| `search_vault` | The default search tool. Cascades **exact frontmatter value → BM25 → fuzzy → semantic**, escalating only when a cheaper tier fails to cover the query, then fuses whatever ran. Optional `filter_folder`, `filter_tags`, `limit` (default 10). Response reports `tiers_used`, `escalated`, and `matched_by` per result — including which frontmatter field matched, e.g. `frontmatter:tpid`. |
+| `semantic_search` | The semantic tier on its own, for when the caller *knows* it wants meaning rather than wording — conceptual questions, or "what have we discussed like this". Same filters as `search_vault`. Prefer `search_vault` unless the query deliberately shares no vocabulary with its answer; it consults this tier anyway and outranks it on most queries. Because it has no fallback tier, an empty result says whether nothing matched or the tier never ran. |
 | `query_frontmatter` | Structured lookup over frontmatter and tags, resolved from the in-memory graph — no disk scan. Four modes: **no args** lists every key with counts (schema discovery); **`key`** lists that key's distinct values; **`key`+`value_fragment`** matches a substring; **`where`** filters on several fields at once (`{ status: "at-risk", tags: ["enterprise"] }`). Supports `folder`, `order_by` (`-` prefix for descending), `limit`. Reports `total_matched` before truncation. |
 | `get_note_metadata` | Peek at a note before loading full content — returns frontmatter, timestamps, word count, heading list, and `mtime_ms` (needed for writes). |
 | `read_note_section` | Read only a specific heading section from a note. The most token-efficient read — request `## Team` instead of loading a 5,000-word note. If the heading is missing, the error lists `available_headings`. |
@@ -711,7 +712,9 @@ No. OIL reads/writes the vault folder directly on disk. Obsidian will pick up ch
 
 ### What happened to `semantic_search`?
 
-It was removed in favour of a single `search_vault`. You lost nothing: despite the name, `semantic_search` never did meaning-based retrieval — it ran fuzzy title matching plus a substring scan over the first 10 KB of each note. Real semantic retrieval now lives *inside* `search_vault` as the last tier (see below), so there is no separate tool to choose between.
+It was removed, then reinstated — as a different tool. The old one was a misnomer: despite the name it ran fuzzy title matching plus a substring scan over the first 10 KB of each note, with no notion of meaning. That version is gone for good, and real semantic retrieval now lives *inside* `search_vault` as the last tier (see below).
+
+`semantic_search` now exposes that tier directly, for queries where you know you want meaning rather than wording. It is not the default, and deliberately so: an oracle allowed to pick the single best tier per query scores the same hit rate and recall as fusing all of them, so choosing a tier yourself cannot surface notes the cascade would miss — while choosing *wrong* drops hit rate from 93% to 60%.
 
 `search_vault` cascades through four tiers, escalating only when a cheaper one fails:
 

@@ -54,7 +54,7 @@ describe("core tools — get_health", () => {
 
     expect(result.server.name).toBe("obsidian-intelligence-layer");
     expect(result.server.version).toBe(SERVER_VERSION);
-    expect(result.tool_surface.total).toBe(13);
+    expect(result.tool_surface.total).toBe(14);
     expect(result.index.note_count).toBeGreaterThan(0);
     expect(result.cache.cachedNotes).toBe(0);
     expect(result.watcher.active).toBe(false);

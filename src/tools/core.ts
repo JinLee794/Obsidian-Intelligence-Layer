@@ -11,9 +11,9 @@ import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
 const LIVE_TOOL_SURFACE = {
   core: 1,
-  primitives: 9,
+  primitives: 10,
   aggregators: 3,
-  total: 13,
+  total: 14,
 } as const;
 
 export function registerCoreTools(

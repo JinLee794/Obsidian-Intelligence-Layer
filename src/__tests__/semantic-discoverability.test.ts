@@ -108,3 +108,49 @@ describe("semantic tier discoverability", () => {
     }
   });
 });
+
+/**
+ * The dedicated tool has no second tier to fall back on, so an empty result is
+ * ambiguous in a way it never is inside the cascade: "nothing matched" and "the
+ * tier never ran" look identical to a caller. These pin that it says which.
+ */
+describe("semantic_search — empty results are explained", () => {
+  it("reports an unreachable tier rather than an unexplained zero", async () => {
+    const index = new SemanticIndex(vault, {
+      ...DEFAULT_CONFIG.semantic,
+      endpoint: "http://127.0.0.1:1",
+    });
+    attachSemanticIndex(graph, index);
+    await index.refresh(graph);
+
+    try {
+      const result = await server.callToolJson("semantic_search", { query: ESCALATING });
+      expect(result.count).toBe(0);
+      expect(result.semantic_status).toContain("Ollama");
+      expect(result.next_step).toContain("search_vault");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("still explains itself when the tier is deliberately disabled", async () => {
+    // search_vault stays silent here on purpose; this tool cannot, because the
+    // caller asked for the one tier that is switched off.
+    const index = new SemanticIndex(vault, { ...DEFAULT_CONFIG.semantic, enabled: false });
+    attachSemanticIndex(graph, index);
+
+    try {
+      const result = await server.callToolJson("semantic_search", { query: ESCALATING });
+      expect(result.count).toBe(0);
+      expect(result.semantic_status).toBeTruthy();
+      expect(result.next_step).toContain("search_vault");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("rejects an empty query", async () => {
+    const result = await server.callToolJson("semantic_search", { query: "  " });
+    expect(JSON.stringify(result)).toContain("non-empty");
+  });
+});

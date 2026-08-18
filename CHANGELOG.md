@@ -58,7 +58,7 @@ Carried into 0.6.0 deliberately, with the evidence that justified each call.
 ## [0.6.0] - 2026-08-16
 
 Semantic search, incremental indexing, and a measurable definition of "good
-results". The tool surface is unchanged at 13 tools; an existing install that
+results". The tool surface is 14 tools; an existing install that
 never touches Ollama behaves as it did before.
 
 ### Features
@@ -87,7 +87,7 @@ never touches Ollama behaves as it did before.
 
 ### Changes
 
-- **Removed the `semantic_search` tool**, folding it into `search_vault`; the tool surface is now 13 tools. Despite its name, `semantic_search` never did meaning-based retrieval — it ran fuzzy title matching plus a substring scan over the first 10 KB of each note, which `search_vault` now covers with better ranking. Meaning-based retrieval now exists for the first time, as a tier of `search_vault` rather than a separate tool
+- **Reinstated `semantic_search` as a real tool.** The old tool of that name was removed earlier in this release because it was a misnomer — it ran fuzzy title matching and a substring scan, not meaning-based retrieval. Now that the capability genuinely exists, it gets its own entry point for the queries that need it deliberately: conceptual questions, and "what have we discussed like this". `search_vault` remains the default and still consults the tier itself. Measured on a 360-note vault, splitting the tiers cannot find *more* notes — an oracle allowed to pick the best tier per query scores the same 93% hit rate and 78% recall as fusing them, differing only in ordering — so the fused path stays primary and the specialist is for when the caller knows what it wants. Unlike `search_vault`, it reports why a result set is empty, since it has no second tier to fall back on
 - **Removed `searchVault()`**, a second cascade implementation that duplicated `cascadeSearch()` but was unreachable from the tool layer. It survived only in tests and benchmarks, which now exercise the production path
 - **The fuzzy tier no longer indexes note bodies.** BM25 already indexes them with term statistics and prefix expansion, so fuse.js was making a slower second pass over the same text — and it was the dominant cost of the tier. The three tiers now have disjoint jobs: BM25 owns exact terms and identifiers, fuzzy owns misspelled names, semantic owns meaning
 - Give fuzzy and semantic hits a leading excerpt from the note body instead of a bare tag list, so a result explains why it was returned
