@@ -227,9 +227,9 @@ All read-only. No confirmation needed.
 | `query_frontmatter` | Structured lookup over frontmatter and tags, resolved from the in-memory graph — no disk scan. Four modes: **no args** lists every key with counts (schema discovery); **`key`** lists that key's distinct values; **`key`+`value_fragment`** matches a substring; **`where`** filters on several fields at once (`{ status: "at-risk", tags: ["enterprise"] }`). Supports `folder`, `order_by` (`-` prefix for descending), `limit`. Reports `total_matched` before truncation. |
 | `get_note_metadata` | Peek at a note before loading full content — returns frontmatter, timestamps, word count, heading list, and `mtime_ms` (needed for writes). |
 | `read_note_section` | Read only a specific heading section from a note. The most token-efficient read — request `## Team` instead of loading a 5,000-word note. If the heading is missing, the error lists `available_headings`. |
-| `get_related_entities` | Graph traversal from a note — returns linked notes up to `max_hops` away (default 2), as paths and titles only, never content. |
+| `get_related_entities` | Graph traversal from a note — returns linked notes up to `max_hops` away (default 2), as paths and titles only, never content. Each entry carries `hops` (distance) and `via` (`out`, `in`, or `both`), nearest first, so a caller can truncate without losing the closest notes. |
 
-### Safe Writes (3 tools) — Atomic writes with mtime concurrency
+### Safe Writes (4 tools) — Atomic writes with mtime concurrency
 
 All write tools require `expected_mtime` (from `get_note_metadata`) or check for file existence. If the file has changed since you last read it, the write is rejected immediately.
 
@@ -240,7 +240,8 @@ All write tools require `expected_mtime` (from `get_note_metadata`) or check for
 | Tool | What It Does |
 |---|---|
 | `atomic_append` | Append content under a specific heading. Requires `expected_mtime`. Rejected if the file changed since you read it. Returns new `mtime_ms`. |
-| `atomic_replace` | Replace entire note content. Same `expected_mtime` check. Use for full-file rewrites when section-level append isn't enough. Returns new `mtime_ms`. |
+| `atomic_replace_section` | Overwrite the body of one heading, leaving the rest of the note untouched. Same `expected_mtime` check. Prefer this over `atomic_replace` for partial edits — it does not require you to reconstruct the whole file. A missing heading is a `NOT_FOUND` listing `available_headings`, never a silent new section. |
+| `atomic_replace` | Replace entire note content. Same `expected_mtime` check. Use for full-file rewrites. Returns new `mtime_ms`. |
 | `create_note` | Create a new note at a given path. Fails cleanly if the note already exists — use `atomic_replace` to update existing notes. |
 
 ### Customer Workflows (3 tools) — Domain-specific assembly
@@ -372,7 +373,7 @@ src/
 └── tools/
     ├── core.ts       # 1 tool  — get_health
     ├── retrieve.ts   # 5 tools — search cascade, query, metadata, section reads, related
-    ├── write.ts      # 4 tools — atomic_append, atomic_replace, create_note, get_agent_log
+    ├── write.ts      # 5 tools — atomic_append, atomic_replace_section, atomic_replace, create_note, get_agent_log
     └── domain.ts     # 3 tools — get_customer_context, prepare_crm_prefetch, check_vault_health
 ```
 
@@ -500,7 +501,7 @@ Every tool response minimizes tokens while maximizing usability:
 - **Bounded results:** search tools default to 10 results; `query_frontmatter` returns at most 20 paths; graph traversal returns refs only
 - **Response profiles:** `get_customer_context` supports `brief`/`full`/`write` so the agent pays only for the detail it needs
 - **mtime in every metadata read:** Included so the agent can chain read → write without an extra round-trip
-- **Stable references:** every result carries a `ref` (`path` or `path#heading`) and writes/reads return `version` (= `mtime_ms`)
+- **Stable references:** `path` *is* the reference; a `ref` (`path#heading`) appears only when a result is scoped to a heading, and writes/reads return `version` (= `mtime_ms`)
 - **Structured errors:** failures return an `error_code` (`INVALID_INPUT`, `NOT_FOUND`, `CONFLICT`, `PERMISSION_DENIED`, …) plus `agent_guidance` with `retryable`, `next_step`, and `suggested_tools`
 
 ---
@@ -685,9 +686,7 @@ server.registerTool(
    - Return the new `mtime_ms` so the agent can chain further writes
    - Call `logWrite()` for the audit trail
 
-5. Update the tool-surface counters, which are asserted in tests:
-   - `LIVE_TOOL_SURFACE` in [src/tools/core.ts](src/tools/core.ts) (reported by `get_health`)
-   - The inline snapshot and count in [src/__tests__/tool-surface.test.ts](src/__tests__/tool-surface.test.ts)
+5. Update the inline snapshot and count in [src/__tests__/tool-surface.test.ts](src/__tests__/tool-surface.test.ts), which assert the exact tool list.
 
 6. Rebuild and verify: `npm run build && npm test`
 

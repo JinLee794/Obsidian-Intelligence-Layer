@@ -191,31 +191,37 @@ describe("GraphIndex — queries", () => {
     expect(paths).toContain("Meetings/2026-03-01 - Contoso Sync.md");
   });
 
-  it("NoteRef results include stable ref field", () => {
-    const backlinks = graph.getBacklinks("Customers/Contoso.md");
-    for (const note of backlinks) {
-      expect(note.ref).toBe(note.path);
-    }
+  it("NoteRef results carry path as the reference, without duplicating it as ref", () => {
+    const sources = [
+      graph.getBacklinks("Customers/Contoso.md"),
+      graph.getForwardLinks("Customers/Contoso.md"),
+      graph.getNotesByFolder("Customers/"),
+      graph.getRelatedNotes("Customers/Contoso.md", 1),
+      graph.getStats().mostLinkedNotes,
+    ];
 
-    const forward = graph.getForwardLinks("Customers/Contoso.md");
-    for (const note of forward) {
-      expect(note.ref).toBe(note.path);
+    for (const refs of sources) {
+      expect(refs.length).toBeGreaterThan(0);
+      for (const note of refs) {
+        expect(typeof note.path).toBe("string");
+        expect(note.ref).toBeUndefined();
+      }
     }
+  });
 
-    const folder = graph.getNotesByFolder("Customers/");
-    for (const note of folder) {
-      expect(note.ref).toBe(note.path);
-    }
+  it("getRelatedNotes reports hop distance and link direction", () => {
+    const related = graph.getRelatedNotes("Customers/Contoso.md", 2);
+    expect(related.length).toBeGreaterThan(0);
 
-    const related = graph.getRelatedNotes("Customers/Contoso.md", 1);
     for (const note of related) {
-      expect(note.ref).toBe(note.path);
+      expect(note.hops).toBeGreaterThanOrEqual(1);
+      expect(note.hops).toBeLessThanOrEqual(2);
+      expect(["out", "in", "both"]).toContain(note.via);
     }
 
-    const stats = graph.getStats();
-    for (const note of stats.mostLinkedNotes) {
-      expect(note.ref).toBe(note.path);
-    }
+    // Nearest first, so a caller can truncate without losing the closest notes.
+    const hops = related.map((n) => n.hops);
+    expect([...hops].sort((a, b) => a - b)).toEqual(hops);
   });
 
   it("getForwardLinks returns notes linked FROM a note", () => {

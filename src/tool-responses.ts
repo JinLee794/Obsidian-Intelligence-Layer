@@ -1,5 +1,3 @@
-import type { NoteRef } from "./types.js";
-
 export type ToolErrorCode =
   | "INVALID_INPUT"
   | "NOT_FOUND"
@@ -17,8 +15,10 @@ export interface ToolErrorGuidance {
 }
 
 export function jsonResponse(payload: unknown) {
+  // Compact, not pretty-printed: indentation was ~25% of every payload and no
+  // consumer of an MCP tool result renders it.
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(payload) }],
   };
 }
 
@@ -48,6 +48,15 @@ export function errorResponse(
 
 export function noteRef(path: string, heading?: string): string {
   return heading ? `${path}#${heading}` : path;
+}
+
+/**
+ * Spread into a response to carry an anchored reference. Omitted entirely when
+ * there is no heading, because then `ref` is byte-for-byte the `path` already
+ * in the payload — `path` is itself the addressable reference.
+ */
+export function refField(path: string, heading?: string): { heading?: string; ref?: string } {
+  return heading ? { heading, ref: `${path}#${heading}` } : {};
 }
 
 // ─── Payload budgets ──────────────────────────────────────────────────────────
@@ -95,17 +104,6 @@ export function truncateList<T>(items: T[], max: number = MAX_LIST_ITEMS): Trunc
     truncated: items.length > max,
     total_count: items.length,
   };
-}
-
-export function enrichNoteRef<T extends Pick<NoteRef, "path">>(ref: T): T & { ref: string } {
-  return {
-    ...ref,
-    ref: noteRef(ref.path),
-  };
-}
-
-export function enrichNoteRefs<T extends Pick<NoteRef, "path">>(refs: T[]): Array<T & { ref: string }> {
-  return refs.map((ref) => enrichNoteRef(ref));
 }
 
 export function errorCodeFromUnknown(

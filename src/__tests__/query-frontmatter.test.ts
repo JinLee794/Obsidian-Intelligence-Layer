@@ -153,12 +153,12 @@ describe("query_frontmatter — predicate mode", () => {
     expect(paths[0]).toContain("2026-02-25");
   });
 
-  it("returns each result as a ref the agent can read directly", async () => {
+  it("returns each result as a path the agent can read directly", async () => {
     const result = await server.callToolJson("query_frontmatter", {
       where: { status: "at-risk" },
     });
 
-    expect(result.results[0].ref).toBeTruthy();
+    expect(result.results[0].path).toBeTruthy();
     expect(result.results[0].title).toBeTruthy();
   });
 });

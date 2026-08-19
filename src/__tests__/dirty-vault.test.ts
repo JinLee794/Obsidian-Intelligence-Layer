@@ -132,7 +132,9 @@ describe("dirty-vault robustness", () => {
         path: "Reference/Circle B.md",
         title: "Circle B",
         tags: [],
-        ref: "Reference/Circle B.md",
+        hops: 1,
+        // A→B and B→A, so the pair is reachable in both directions at one hop.
+        via: "both",
       },
     ]);
   });

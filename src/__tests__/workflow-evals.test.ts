@@ -57,9 +57,9 @@ describe("workflow evals", () => {
     ]);
     expect(brief.customer).toBe("Contoso");
     expect(brief.view).toBe("brief");
-    expect(brief.customer_ref).toBe("Customers/Contoso.md");
+    expect(brief.customer_path).toBe("Customers/Contoso.md");
     expect(prefetch.prefetch[0].customer).toBe("Contoso");
-    expect(prefetch.prefetch[0].customer_ref).toBe("Customers/Contoso.md");
+    expect(prefetch.prefetch[0].customer_path).toBe("Customers/Contoso.md");
     expect(typeof health.summary).toBe("string");
     expect(Array.isArray(health.issues)).toBe(true);
   });

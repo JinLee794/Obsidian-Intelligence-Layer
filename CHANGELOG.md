@@ -4,9 +4,53 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0-beta.1] - 2026-08-19
+
+Pre-release for cross-machine testing. Tool-surface audit: responses got 31%
+cheaper, and partial note edits became possible for the first time.
+
+### Changed
+
+- **Responses are compact JSON.** `jsonResponse` no longer pretty-prints. Measured
+  across ten representative calls, indentation was 25% of every payload
+  (17,377 → 13,055 chars) and nothing on the receiving end renders it.
+- **`path` is the reference; `ref` only appears when it adds information.**
+  `noteRef(path)` returned `path` unchanged, so every list item and envelope
+  carried the same string twice — about a third of a `get_related_entities`
+  payload. `ref` is now emitted only for section-scoped results, as
+  `path#heading`, alongside `heading`. Removed `customer_ref` (duplicated
+  `customer_path`), `orphaned_meeting_refs` (duplicated
+  `report.orphanedMeetings`), and the `matches` array from `query_frontmatter`
+  match mode (duplicated `paths`).
+- **`semantic_search` description tightened.** Trimmed from 396 to 322 chars — it
+  spent most of its budget arguing against its own use. It remains a distinct
+  tool: `search_vault` fuses the semantic tier with the keyword tiers, which is
+  a different operation from querying that tier alone.
+- **`get_related_entities` reports `hops` and `via` per entry, nearest first.**
+  The traversal collapsed every hop into one flat set, so a caller had no way to
+  rank or safely truncate the result.
+- **`get_health` no longer reports `tool_surface`.** It was a hand-maintained
+  literal restating a tool list the client already holds from `tools/list`.
+
+### Added
+
+- **`atomic_replace_section`** — overwrite one heading's body under the same
+  `expected_mtime` check. Editing part of a note previously required
+  `atomic_replace` with the full file, which no read tool could produce: nothing
+  in the surface returns whole-note content. A missing heading is a `NOT_FOUND`
+  listing `available_headings`, never a silently created section.
+
+### Fixed
+
+- **The idle-schema guard measured the wrong string.** `totalSchemaChars()`
+  stringified raw zod internals and silently dropped every `.describe()`, so it
+  could not catch description bloat. It now sizes the JSON Schema the client
+  actually receives. Real measured surface: 15 tools, 9,708 chars
+  (`node bench/tool-surface-cost.mjs`).
+
 ### Known limitations
 
-Carried into 0.6.0 deliberately, with the evidence that justified each call.
+Carried into 0.7.0-beta.1 deliberately, with the evidence that justified each call.
 
 - **The semantic relevance floor is corpus- and model-specific.** The 0.5 default
   was measured against `nomic-embed-text` on a 360-note vault. On the 12-note

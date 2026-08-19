@@ -14,6 +14,12 @@ export interface NoteRef {
   version?: number;
 }
 
+/** A NoteRef reached by graph traversal, carrying distance and link direction. */
+export interface RelatedNoteRef extends NoteRef {
+  hops: number;
+  via: "out" | "in" | "both";
+}
+
 export interface NoteFrontmatter {
   [key: string]: unknown;
 }

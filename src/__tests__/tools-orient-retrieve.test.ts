@@ -88,7 +88,8 @@ describe("retrieve v2 — get_note_metadata", () => {
     expect(typeof result.word_count).toBe("number");
     expect(result.headings).toContain("CRM Updates");
     expect(typeof result.mtime_ms).toBe("number");
-    expect(result.ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.path).toBe("Customers/Contoso/Contoso.md");
+    expect(result.ref).toBeUndefined();
     expect(result.version).toBe(result.mtime_ms);
   });
 
@@ -121,7 +122,7 @@ describe("retrieve v2 — get_note_metadata", () => {
     });
 
     expect(result.view).toBe("write");
-    expect(result.customer_ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.customer_path).toBe("Customers/Contoso/Contoso.md");
     expect(typeof result.customer_mtime_ms).toBe("number");
     expect(result.write_targets.customer_note).toBe("Customers/Contoso/Contoso.md");
     expect(result.write_targets.headings.agent_insights).toBe("Agent Insights");
@@ -134,7 +135,7 @@ describe("retrieve v2 — get_note_metadata", () => {
     });
 
     expect(result.view).toBe("brief");
-    expect(result.customer_ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.customer_path).toBe("Customers/Contoso/Contoso.md");
     expect(result.frontmatter).toBeDefined();
     expect(result.summary).toBeDefined();
     expect(typeof result.summary.agent_insight_count).toBe("number");
@@ -149,7 +150,7 @@ describe("retrieve v2 — get_note_metadata", () => {
 
     expect(result.view).toBe("full");
     expect(result.customer).toBe("Contoso");
-    expect(result.customer_ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.customer_path).toBe("Customers/Contoso/Contoso.md");
     expect(typeof result.customer_mtime_ms).toBe("number");
     expect(result.customer_version).toBe(result.customer_mtime_ms);
     // Full view includes the inline data
@@ -205,7 +206,7 @@ describe("retrieve v2 — get_related_entities", () => {
     registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
-  it("returns linked note refs without content", async () => {
+  it("returns linked note refs with hop distance and direction, without content", async () => {
     const result = await server.callToolJson("get_related_entities", {
       path: "Customers/Contoso/Contoso.md",
       max_hops: 1,
@@ -214,7 +215,9 @@ describe("retrieve v2 — get_related_entities", () => {
     expect(Array.isArray(result.related)).toBe(true);
     expect(result.related.length).toBeGreaterThan(0);
     expect(result.related[0].content).toBeUndefined();
-    expect(result.related[0].ref).toBe(result.related[0].path);
+    expect(result.related[0].ref).toBeUndefined();
+    expect(result.related[0].hops).toBe(1);
+    expect(["out", "in", "both"]).toContain(result.related[0].via);
   });
 });
 
@@ -229,7 +232,7 @@ describe("retrieve v2 — search_vault cascade", () => {
     registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
   });
 
-  it("returns ranked results with excerpts and refs", async () => {
+  it("returns ranked results with excerpts and paths", async () => {
     const result = await server.callToolJson("search_vault", {
       query: "migration SOW",
       limit: 3,
@@ -237,7 +240,7 @@ describe("retrieve v2 — search_vault cascade", () => {
 
     expect(result.count).toBeGreaterThan(0);
     expect(result.results[0].excerpt).toBeTruthy();
-    expect(result.results[0].ref).toBeTruthy();
+    expect(result.results[0].path).toBeTruthy();
   });
 
   it("reports which tiers ran", async () => {
@@ -279,17 +282,20 @@ describe("retrieve v2 — query_frontmatter", () => {
     });
 
     expect(result.paths).toContain("Customers/Contoso/Contoso.md");
-    expect(result.matches[0].ref).toBe("Customers/Contoso/Contoso.md");
+    // `paths` is the only carrier — a parallel `matches` array of the same
+    // strings was pure duplication.
+    expect(result.matches).toBeUndefined();
   });
 
-  it("returns ref on search_vault results", async () => {
+  it("does not duplicate path as ref on search_vault results", async () => {
     const result = await server.callToolJson("search_vault", {
       query: "Contoso",
       limit: 3,
     });
 
     expect(result.results.length).toBeGreaterThan(0);
-    expect(result.results[0].ref).toBe(result.results[0].path);
+    expect(result.results[0].path).toBeTruthy();
+    expect(result.results[0].ref).toBeUndefined();
   });
 
   it("reflects index on new tool registration", async () => {

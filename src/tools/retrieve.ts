@@ -14,7 +14,7 @@ import {
   errorCodeFromUnknown,
   errorResponse,
   jsonResponse,
-  noteRef,
+  refField,
   truncateList,
   truncateText,
 } from "../tool-responses.js";
@@ -143,6 +143,63 @@ function buildSnippet(content: string, query: string): string {
 }
 
 /**
+ * Shared body of the `semantic_search` tool.
+ *
+ * An empty list is ambiguous here in a way it never is inside the cascade:
+ * there is no other tier to fall back on, so say which case it was.
+ */
+async function semanticOnlySearch(
+  graph: GraphIndex,
+  query: string,
+  limit: number,
+  filters: { folder?: string; tags?: string[] },
+) {
+  const index = getSemanticIndex(graph);
+  index?.ensureFresh(graph);
+
+  const results = await semanticSearch(graph, query, limit, filters);
+
+  if (results.length === 0) {
+    const status = index?.stats.status;
+    if (status !== "ready") {
+      // semanticNotice stays silent for a deliberately disabled tier, which is
+      // right for search_vault and wrong here — the caller asked for this tier.
+      const notice = semanticNotice(graph, "explicit", []);
+      return jsonResponse({
+        count: 0,
+        tiers_used: [],
+        results: [],
+        ...(Object.keys(notice).length > 0
+          ? notice
+          : {
+              semantic_status:
+                "Meaning-based search is turned off for this server, so this tool has nothing to search.",
+            }),
+        next_step: "Retry with search_vault, which answers from the keyword tiers.",
+      });
+    }
+  }
+
+  return jsonResponse({
+    count: results.length,
+    tiers_used: ["semantic"],
+    results: results.map((hit) => ({
+      path: hit.path,
+      title: hit.title,
+      excerpt: hit.excerpt,
+      score: hit.score,
+      matched_by: ["semantic"],
+    })),
+    ...(results.length === 0
+      ? {
+          next_step:
+            "Nothing cleared the similarity floor. Try search_vault, which also matches on wording.",
+        }
+      : {}),
+  });
+}
+
+/**
  * Register all Retrieve tools on the MCP server.
  */
 export function registerRetrieveTools(
@@ -156,7 +213,7 @@ export function registerRetrieveTools(
     "search_vault",
     {
       description:
-        "Primary search over vault notes. Cascades BM25 keyword ranking → fuzzy matching, escalating only when the cheaper tier fails to cover the query. Use for any 'find notes about X' request.",
+        "Primary search over vault notes. Cascades BM25 keyword ranking → fuzzy → meaning-based matching, escalating only when the cheaper tier fails to cover the query. Use for any 'find notes about X' request.",
       inputSchema: {
         query: z.string().describe("Search query text or natural-language description"),
         limit: z.number().optional().describe("Max results (default: 10)"),
@@ -196,8 +253,7 @@ export function registerRetrieveTools(
         ...semanticNotice(graph, escalation, tiersUsed),
         results: results.map(({ matchedBy, heading, ...rest }: CascadeHit) => ({
           ...rest,
-          ref: noteRef(rest.path, heading || undefined),
-          heading,
+          ...refField(rest.path, heading || undefined),
           matched_by: matchedBy,
         })),
       });
@@ -210,7 +266,7 @@ export function registerRetrieveTools(
     "semantic_search",
     {
       description:
-        "Meaning-based search only, with no keyword tier mixed in. Use this when a query shares no vocabulary with the notes that answer it — conceptual questions, paraphrases, or 'what have we discussed like X'. For ordinary lookups prefer search_vault, which already consults this tier and outranks it on most queries. Requires a local Ollama; returns guidance instead of results when it is unavailable.",
+        "Meaning-based search only, with no keyword tier mixed in. Use when a query shares no vocabulary with the notes that answer it — conceptual questions, paraphrases, or 'what have we discussed like X'. For ordinary lookups prefer search_vault. Requires a local Ollama; returns guidance instead of results when unavailable.",
       inputSchema: {
         query: z.string().describe("Natural-language description of the idea to match"),
         limit: z.number().optional().describe("Max results (default: 10)"),
@@ -227,53 +283,9 @@ export function registerRetrieveTools(
         if (folderErr) return validationError(`semantic_search: filter_folder — ${folderErr}`);
       }
 
-      const index = getSemanticIndex(graph);
-      index?.ensureFresh(graph);
-
-      const results = await semanticSearch(graph, query, limit ?? 10, {
+      return semanticOnlySearch(graph, query, limit ?? 10, {
         folder: filter_folder,
         tags: filter_tags,
-      });
-
-      // An empty list is ambiguous here in a way it never is inside the cascade:
-      // this tool has no other tier to fall back on, so say which it was.
-      if (results.length === 0) {
-        const status = index?.stats.status;
-        if (status !== "ready") {
-          // semanticNotice stays silent for a deliberately disabled tier, which is
-          // right for search_vault and wrong here — the caller asked for this tier.
-          const notice = semanticNotice(graph, "explicit", []);
-          return jsonResponse({
-            count: 0,
-            results: [],
-            ...(Object.keys(notice).length > 0
-              ? notice
-              : {
-                  semantic_status:
-                    "Meaning-based search is turned off for this server, so this tool has nothing to search.",
-                }),
-            next_step: "Retry with search_vault, which answers from the keyword tiers.",
-          });
-        }
-      }
-
-      return jsonResponse({
-        count: results.length,
-        tiers_used: ["semantic"],
-        results: results.map((hit) => ({
-          path: hit.path,
-          ref: noteRef(hit.path),
-          title: hit.title,
-          excerpt: hit.excerpt,
-          score: hit.score,
-          matched_by: ["semantic"],
-        })),
-        ...(results.length === 0
-          ? {
-              next_step:
-                "Nothing cleared the similarity floor. Try search_vault, which also matches on wording.",
-            }
-          : {}),
       });
     },
   );
@@ -309,7 +321,6 @@ export function registerRetrieveTools(
 
         const result = {
           path: parsed.path,
-          ref: noteRef(parsed.path),
           title: parsed.title,
           frontmatter: parsed.frontmatter,
           created_at: fileStats.birthtime.toISOString(),
@@ -327,7 +338,7 @@ export function registerRetrieveTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to read note metadata: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path) },
+          { path },
         );
       }
     },
@@ -370,7 +381,6 @@ export function registerRetrieveTools(
             `Section \"${heading}\" not found in ${path}`,
             {
               path,
-              ref: noteRef(path),
               available_headings: headings.items,
               ...(headings.truncated ? { heading_count: headings.total_count } : {}),
             },
@@ -388,8 +398,7 @@ export function registerRetrieveTools(
 
         return jsonResponse({
           path,
-          ref: noteRef(path, heading),
-          heading,
+          ...refField(path, heading),
           content: body.text,
           ...(body.truncated
             ? {
@@ -405,7 +414,7 @@ export function registerRetrieveTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to read section: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path, heading) },
+          { path, ...refField(path, heading) },
         );
       }
     },
@@ -454,7 +463,6 @@ export function registerRetrieveTools(
           ...(matched.length > boundedLimit ? { truncated: true } : {}),
           results: matched.slice(0, boundedLimit).map((ref) => ({
             path: ref.path,
-            ref: noteRef(ref.path),
             title: ref.title,
             tags: ref.tags,
           })),
@@ -541,7 +549,6 @@ export function registerRetrieveTools(
         returned: Math.min(paths.length, boundedLimit),
         ...(paths.length > boundedLimit ? { truncated: true } : {}),
         paths: paths.slice(0, boundedLimit),
-        matches: paths.slice(0, boundedLimit).map((path) => ({ path, ref: noteRef(path) })),
       });
     },
   );
@@ -576,7 +583,6 @@ export function registerRetrieveTools(
 
       return jsonResponse({
         path,
-        ref: noteRef(path),
         max_hops: max_hops ?? 2,
         count: related.total_count,
         ...(related.truncated ? { truncated: true } : {}),

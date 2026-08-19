@@ -93,6 +93,48 @@ export async function appendToSection(
   await writeFile(fullPath, eol === "\r\n" ? result.replace(/\n/g, "\r\n") : result, "utf-8");
 }
 
+/**
+ * Replace the body of one heading section, leaving the heading line and the
+ * rest of the note untouched. Returns false if the heading does not exist.
+ *
+ * Section boundaries follow the same "next heading of any level" rule as
+ * appendToSection and parseSections, so what is replaced is exactly what
+ * read_note_section reports.
+ */
+export async function replaceSection(
+  vaultPath: string,
+  path: string,
+  heading: string,
+  content: string,
+): Promise<boolean> {
+  const fullPath = securePath(vaultPath, path);
+  const { readFile: readFileFs } = await import("node:fs/promises");
+  const original = await readFileFs(fullPath, "utf-8");
+
+  const eol = detectLineEnding(original);
+  const raw = normalizeLineEndings(original);
+  const body = normalizeLineEndings(content);
+
+  const headingPattern = new RegExp(
+    `^(#{1,6})\\s+${escapeRegExp(heading)}\\s*$`,
+    "m",
+  );
+  const match = headingPattern.exec(raw);
+  if (!match) return false;
+
+  const insertPos = match.index + match[0].length;
+  const rest = raw.slice(insertPos);
+  const nextMatch = /^#{1,6}\s+/m.exec(rest);
+  const sectionEnd = nextMatch ? insertPos + nextMatch.index : raw.length;
+
+  const tail = raw.slice(sectionEnd);
+  const result =
+    raw.slice(0, insertPos) + "\n\n" + body.trim() + (tail ? "\n\n" + tail : "\n");
+
+  await writeFile(fullPath, eol === "\r\n" ? result.replace(/\n/g, "\r\n") : result, "utf-8");
+  return true;
+}
+
 // ─── Audit Logging ────────────────────────────────────────────────────────────
 
 /**

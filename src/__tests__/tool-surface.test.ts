@@ -20,6 +20,7 @@ describe("Tool surface", () => {
       [
         "atomic_append",
         "atomic_replace",
+        "atomic_replace_section",
         "check_vault_health",
         "create_note",
         "get_agent_log",
@@ -37,7 +38,7 @@ describe("Tool surface", () => {
   });
 
   it("tool count matches snapshot", () => {
-    expect(server.tools.size).toBe(14);
+    expect(server.tools.size).toBe(15);
   });
 
   // Spec §10.1 — Idle context cost: schema injected into every conversation.

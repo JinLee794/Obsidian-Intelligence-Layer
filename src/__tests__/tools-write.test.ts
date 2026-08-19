@@ -186,7 +186,8 @@ describe("write v2 — atomic_replace", () => {
     });
 
     expect(result.status).toBe("executed");
-    expect(result.ref).toBe("Customers/Contoso/Contoso.md");
+    expect(result.path).toBe("Customers/Contoso/Contoso.md");
+    expect(result.ref).toBeUndefined();
     expect(result.version).toBe(result.mtime_ms);
 
     const content = await readFile(join(vaultRoot, "Customers/Contoso/Contoso.md"), "utf-8");
@@ -211,6 +212,100 @@ describe("write v2 — atomic_replace", () => {
     expect(result.error).toContain("Stale write rejected");
     expect(result.error_code).toBe("CONFLICT");
     expect(result.agent_guidance.suggested_tools).toContain("get_note_metadata");
+  });
+});
+
+describe("write v2 — atomic_replace_section", () => {
+  let server: MockMcpServer;
+  const notePath = "Customers/Sectioned.md";
+
+  beforeEach(async () => {
+    await writeFile(
+      join(vaultRoot, notePath),
+      `# Sectioned\n\n## Keep\n\nkeep body\n\n## Target\n\nold body\n\n### Sub\n\nsub body\n\n## Tail\n\ntail body\n`,
+      "utf-8",
+    );
+
+    server = new MockMcpServer();
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const cache = new SessionCache();
+    registerRetrieveTools(server as any, vaultRoot, graph, cache, config);
+    registerWriteTools(server as any, vaultRoot, graph, cache, config);
+  });
+
+  it("replaces one section and leaves the rest of the note intact", async () => {
+    const meta = await server.callToolJson("get_note_metadata", { path: notePath });
+
+    const result = await server.callToolJson("atomic_replace_section", {
+      path: notePath,
+      heading: "Target",
+      content: "new body",
+      expected_mtime: meta.mtime_ms,
+    });
+
+    expect(result.status).toBe("executed");
+    expect(result.ref).toBe(`${notePath}#Target`);
+    expect(result.version).toBe(result.mtime_ms);
+
+    const content = await readFile(join(vaultRoot, notePath), "utf-8");
+    expect(content).toContain("new body");
+    expect(content).not.toContain("old body");
+    expect(content).toContain("keep body");
+    expect(content).toContain("tail body");
+    expect(content).toContain("## Target");
+  });
+
+  // Section bounds must match parseSections, or an agent cannot verify its write.
+  it("writes where read_note_section will find it", async () => {
+    const meta = await server.callToolJson("get_note_metadata", { path: notePath });
+    await server.callToolJson("atomic_replace_section", {
+      path: notePath,
+      heading: "Target",
+      content: "new body",
+      expected_mtime: meta.mtime_ms,
+    });
+
+    const section = await server.callToolJson("read_note_section", {
+      path: notePath,
+      heading: "Target",
+    });
+    expect(section.content).toContain("new body");
+    expect(section.content).not.toContain("old body");
+  });
+
+  it("reports available headings instead of inventing a section", async () => {
+    const meta = await server.callToolJson("get_note_metadata", { path: notePath });
+
+    const result = await server.callToolJson("atomic_replace_section", {
+      path: notePath,
+      heading: "Nonexistent",
+      content: "nope",
+      expected_mtime: meta.mtime_ms,
+    });
+
+    expect(result.error_code).toBe("NOT_FOUND");
+    expect(result.available_headings).toContain("Target");
+    expect(result.agent_guidance.suggested_tools).toContain("atomic_append");
+
+    const content = await readFile(join(vaultRoot, notePath), "utf-8");
+    expect(content).not.toContain("nope");
+  });
+
+  it("rejects a stale section write", async () => {
+    const meta = await server.callToolJson("get_note_metadata", { path: notePath });
+    await writeFile(join(vaultRoot, notePath), "# Concurrent\n\n## Target\n\nother\n", "utf-8");
+
+    const result = await server.callToolJson("atomic_replace_section", {
+      path: notePath,
+      heading: "Target",
+      content: "should not write",
+      expected_mtime: meta.mtime_ms,
+    });
+
+    expect(result.error_code).toBe("CONFLICT");
+    const content = await readFile(join(vaultRoot, notePath), "utf-8");
+    expect(content).not.toContain("should not write");
   });
 });
 
@@ -329,7 +424,7 @@ describe("write v2 — create_note", () => {
 
     expect(result.status).toBe("created");
     expect(result.path).toBe("Daily/2026-03-19.md");
-    expect(result.ref).toBe("Daily/2026-03-19.md");
+    expect(result.ref).toBeUndefined();
     expect(result.mtime_ms).toBeGreaterThan(0);
     expect(result.version).toBe(result.mtime_ms);
 
@@ -372,7 +467,6 @@ describe("write v2 — create_note", () => {
     const log = await server.callToolJson("get_agent_log", { date });
 
     expect(log.path).toBe(`_agent-log/${date}.md`);
-    expect(log.ref).toBe(`_agent-log/${date}.md`);
     expect(log.log).toContain("create_note");
     expect(log.log).toContain("Daily/2026-03-20.md");
   });

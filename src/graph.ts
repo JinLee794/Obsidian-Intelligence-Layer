@@ -9,7 +9,7 @@ import { readFile, writeFile, rename, unlink, readdir, stat } from "node:fs/prom
 import { randomUUID } from "node:crypto";
 import { join, dirname, basename, extname } from "node:path";
 import matter from "gray-matter";
-import type { GraphNode, GraphStats, NoteRef, TagCount } from "./types.js";
+import type { GraphNode, GraphStats, NoteRef, RelatedNoteRef, TagCount } from "./types.js";
 import { listAllNotes, extractWikilinks, isAllowedFile, normalizeLineEndings } from "./vault.js";
 
 // ─── Persisted Graph Format ───────────────────────────────────────────────────
@@ -596,9 +596,14 @@ export class GraphIndex {
       folder?: string;
       frontmatter?: Record<string, unknown>;
     },
-  ): NoteRef[] {
+  ): RelatedNoteRef[] {
     const visited = new Set<string>();
     visited.add(notePath);
+
+    // Distance and direction are what let a caller rank a traversal result;
+    // without them every hop looks equally relevant.
+    const hopOf = new Map<string, number>();
+    const directionOf = new Map<string, "out" | "in" | "both">();
 
     let frontier = new Set<string>([notePath]);
 
@@ -608,11 +613,20 @@ export class GraphIndex {
         const node = this.nodes.get(current);
         if (!node) continue;
 
-        for (const linked of [...node.outLinks, ...node.inLinks]) {
-          if (!visited.has(linked)) {
-            visited.add(linked);
-            nextFrontier.add(linked);
+        for (const [linked, direction] of [
+          ...[...node.outLinks].map((p) => [p, "out"] as const),
+          ...[...node.inLinks].map((p) => [p, "in"] as const),
+        ]) {
+          if (visited.has(linked)) {
+            if (hopOf.get(linked) === hop + 1 && directionOf.get(linked) !== direction) {
+              directionOf.set(linked, "both");
+            }
+            continue;
           }
+          visited.add(linked);
+          hopOf.set(linked, hop + 1);
+          directionOf.set(linked, direction);
+          nextFrontier.add(linked);
         }
       }
       frontier = nextFrontier;
@@ -642,12 +656,15 @@ export class GraphIndex {
       );
     }
 
-    return results.map((n) => ({
-      path: n.path,
-      title: n.title,
-      tags: n.tags,
-      ref: n.path,
-    }));
+    return results
+      .map((n) => ({
+        path: n.path,
+        title: n.title,
+        tags: n.tags,
+        hops: hopOf.get(n.path) ?? hops,
+        via: directionOf.get(n.path) ?? "out",
+      }))
+      .sort((a, b) => a.hops - b.hops || a.path.localeCompare(b.path));
   }
 
   /**
@@ -668,7 +685,7 @@ export class GraphIndex {
     const results: NoteRef[] = [];
     for (const [path, node] of this.nodes) {
       if (path.startsWith(folder)) {
-        results.push({ path: node.path, title: node.title, tags: node.tags, ref: node.path });
+        results.push({ path: node.path, title: node.title, tags: node.tags });
       }
     }
     return results;
@@ -729,7 +746,6 @@ export class GraphIndex {
       path: node.path,
       title: node.title,
       tags: node.tags,
-      ref: node.path,
     }));
   }
 
@@ -782,6 +798,6 @@ export class GraphIndex {
   private toNoteRef(path: string): NoteRef | null {
     const node = this.nodes.get(path);
     if (!node) return null;
-    return { path: node.path, title: node.title, tags: node.tags, ref: node.path };
+    return { path: node.path, title: node.title, tags: node.tags };
   }
 }

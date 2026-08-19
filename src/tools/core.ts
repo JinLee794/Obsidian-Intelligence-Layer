@@ -9,13 +9,6 @@ import { getSemanticIndex } from "../semantic.js";
 import { jsonResponse } from "../tool-responses.js";
 import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
-const LIVE_TOOL_SURFACE = {
-  core: 1,
-  primitives: 10,
-  aggregators: 3,
-  total: 14,
-} as const;
-
 export function registerCoreTools(
   server: McpServer,
   vaultPath: string,
@@ -28,7 +21,7 @@ export function registerCoreTools(
     "get_health",
     {
       description:
-        "Summary-level runtime visibility for OIL. Returns server identity, live tool surface, index freshness, cache stats, watcher status, and audit availability without loading full logs.",
+        "Summary-level runtime visibility for OIL. Returns server identity, index freshness, cache stats, watcher status, and audit availability without loading full logs.",
       inputSchema: {},
     },
     async () => {
@@ -41,7 +34,6 @@ export function registerCoreTools(
           version: SERVER_VERSION,
           runtime_profile: "current-client-optimized",
         },
-        tool_surface: LIVE_TOOL_SURFACE,
         index: {
           note_count: graphStats.noteCount,
           link_count: graphStats.linkCount,

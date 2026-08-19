@@ -24,8 +24,8 @@ describe("version metadata", () => {
     expect(manifest.name.endsWith(SERVER_NAME)).toBe(true);
   });
 
-  it("is a plain semver triple", () => {
-    expect(SERVER_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  it("is a semver triple, optionally with a prerelease tag", () => {
+    expect(SERVER_VERSION).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
   });
 
   it("has a changelog entry for the current version", async () => {

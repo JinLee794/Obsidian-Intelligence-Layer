@@ -169,18 +169,25 @@ afterAll(async () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Response contract conformance", () => {
-  it("read tools return stable ref fields", async () => {
-    const checks: Array<{ tool: string; args: Record<string, unknown> }> = [
+  it("read tools return a stable path, and an anchored ref only when scoped to a heading", async () => {
+    const unanchored: Array<{ tool: string; args: Record<string, unknown> }> = [
       { tool: "get_note_metadata", args: { path: "Customers/Contoso/Contoso.md" } },
-      { tool: "read_note_section", args: { path: "Customers/Contoso/Contoso.md", heading: "Team" } },
       { tool: "get_related_entities", args: { path: "Customers/Contoso/Contoso.md" } },
     ];
 
-    for (const { tool, args } of checks) {
+    for (const { tool, args } of unanchored) {
       const result = await server.callToolJson(tool, args);
-      expect(typeof result.ref).toBe("string");
-      expect(result.ref.length).toBeGreaterThan(0);
+      expect(typeof result.path).toBe("string");
+      expect(result.path.length).toBeGreaterThan(0);
+      // `ref` would be byte-for-byte `path` here, so it is omitted.
+      expect(result.ref).toBeUndefined();
     }
+
+    const section = await server.callToolJson("read_note_section", {
+      path: "Customers/Contoso/Contoso.md",
+      heading: "Team",
+    });
+    expect(section.ref).toBe("Customers/Contoso/Contoso.md#Team");
   });
 
   it("read tools return version/freshness on mutable data", async () => {
@@ -199,21 +206,23 @@ describe("Response contract conformance", () => {
     expect(typeof section.mtime_ms).toBe("number");
   });
 
-  it("search results carry ref on every hit", async () => {
+  it("search results carry a usable path on every hit", async () => {
     const vault = await server.callToolJson("search_vault", { query: "Contoso", limit: 5 });
 
     expect(vault.results.length).toBeGreaterThan(0);
-    expect(vault.results.every((r: any) => typeof r.ref === "string")).toBe(true);
+    expect(vault.results.every((r: any) => typeof r.path === "string")).toBe(true);
+    expect(vault.results.every((r: any) => r.ref === undefined || r.ref.includes("#"))).toBe(true);
   });
 
-  it("query_frontmatter returns ref in matches array", async () => {
+  it("query_frontmatter returns paths without a duplicate matches array", async () => {
     const result = await server.callToolJson("query_frontmatter", {
       key: "tpid",
       value_fragment: "100",
     });
 
-    expect(result.matches.length).toBeGreaterThan(0);
-    expect(result.matches.every((m: any) => typeof m.ref === "string")).toBe(true);
+    expect(result.paths.length).toBeGreaterThan(0);
+    expect(result.paths.every((p: any) => typeof p === "string")).toBe(true);
+    expect(result.matches).toBeUndefined();
   });
 });
 
@@ -369,7 +378,6 @@ describe("Visibility contract", () => {
     const health = await server.callToolJson("get_health", {});
 
     expect(health.server.version).toBeDefined();
-    expect(health.tool_surface.total).toBeGreaterThan(0);
     expect(typeof health.index.note_count).toBe("number");
     expect(typeof health.cache.cachedNotes).toBe("number");
     expect(typeof health.watcher.active).toBe("boolean");
@@ -379,7 +387,6 @@ describe("Visibility contract", () => {
   it("get_health includes all structural sections", async () => {
     const health = await server.callToolJson("get_health", {});
     expect(health.server).toBeDefined();
-    expect(health.tool_surface).toBeDefined();
     expect(health.index).toBeDefined();
     expect(health.cache).toBeDefined();
     expect(health.watcher).toBeDefined();
@@ -514,7 +521,7 @@ describe("TPID resolution fidelity", () => {
     const byTpid = await server.callToolJson("get_customer_context", { customer: "100200" });
 
     expect(byTpid.customer).toBe("Contoso");
-    expect(byTpid.customer_ref).toBe(byName.customer_ref);
+    expect(byTpid.customer_path).toBe(byName.customer_path);
     expect(byTpid.frontmatter.tpid).toBe("100200");
   });
 
