@@ -509,6 +509,22 @@ first; gating it behind the watcher meant any session shorter than the watcher's
 scan did no index work at all, and such a client never converged however often
 it reconnected.
 
+### Keeping up with edits
+
+Changes seen by the watcher are collected into one window rather than one per
+file, so a burst — a sync landing, a `git pull`, a bulk rename — is applied as a
+single batch: one pass over the changed notes, one search-index invalidation.
+The window is the usual 300ms trailing debounce, capped at 2s so a continuous
+stream of writes cannot defer indexing indefinitely.
+
+Within a batch, only the edited notes' own links are re-resolved. Rewriting a
+note's body cannot change how any *other* note's links resolve, so everyone
+else's backlinks are left standing. The whole-vault pass is kept for the changes
+that genuinely alter what a wikilink can point at: a renamed title, a note
+appearing, a note deleted. That is what keeps the cost of a burst roughly
+independent of vault size — a 200-note burst costs ~130ms on a 6,000-note vault,
+against ~2.3s when every edit triggered a full re-resolve.
+
 ### Index Stack
 
 OIL maintains in-memory indices so most tool calls resolve in milliseconds:

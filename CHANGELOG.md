@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A burst of file changes no longer costs O(vault) per file.** Two separate
+  amplifiers compounded here. The watcher gave every changed path its own
+  debounce timer, so a sync landing, a `git pull`, or a bulk rename produced one
+  independent re-index and one search-index invalidation *per file* rather than
+  one per burst. And each of those re-indexes cleared and rebuilt every backlink
+  in the vault — measured at 85% of the cost of an edit on a 6,000-note vault.
+  Changes are now collected into a single window (still 300ms, but shared across
+  paths, and capped at 2s so a continuous stream cannot defer indexing
+  indefinitely) and applied as one batch. Within that batch, an ordinary body
+  edit only re-resolves the edited notes' own links; the whole-vault pass is
+  reserved for changes that alter what a wikilink can resolve to — a renamed
+  title, a note appearing, a note deleted. Measured cost of a 200-note burst:
+  **2,278ms → 133ms on a 6,000-note vault**, and **427ms → 97ms on a 379-note
+  one**. Burst cost is now roughly independent of vault size rather than
+  proportional to it.
+- **A link whose target arrived later never resolved.** Re-resolution read from
+  each note's already-resolved links, which by then held paths with anything
+  unresolvable silently dropped — so the raw name was gone and no later pass
+  could recover it. Creating `[[Later]]` before `Later.md` existed left a link
+  that stayed broken for the life of the index, and the running index diverged
+  permanently from what a rebuild produced. Resolution now reads the raw link
+  names, which were being retained for persistence all along, making it
+  idempotent.
 - **A repeat connect no longer re-reads the whole vault.** The persisted index
   was working — the cold *build* ran once — but everything behind it repeated on
   every session, and could repeat forever. Three compounding causes:

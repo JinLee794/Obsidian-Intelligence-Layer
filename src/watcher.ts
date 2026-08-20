@@ -27,9 +27,24 @@ export class VaultWatcher {
   /** Most recent watch fault, surfaced through get_health rather than thrown. */
   private lastError: string | null = null;
 
-  /** Debounce timer for batching rapid changes */
-  private pendingUpdates = new Map<string, NodeJS.Timeout>();
+  /**
+   * Changes seen but not yet applied, keyed by path so repeated events for the
+   * same note collapse. Last event wins: an add followed by an unlink is an
+   * unlink.
+   */
+  private pendingChanges = new Map<string, "add" | "change" | "unlink">();
+  private flushTimer: NodeJS.Timeout | null = null;
+  private flushDeadline: NodeJS.Timeout | null = null;
   private readonly debounceMs = 300;
+  /**
+   * Longest a steady stream of events may defer a flush.
+   *
+   * The debounce restarts on every event, so a sync or a `git pull` writing
+   * files continuously would otherwise postpone indexing until it finished.
+   */
+  private readonly maxDeferMs = 2000;
+  /** Tail of the in-flight flush, so windows apply one after another. */
+  private flushChain: Promise<void> = Promise.resolve();
 
   constructor(
     vaultPath: string,
@@ -102,10 +117,15 @@ export class VaultWatcher {
     this._ready = false;
     this.readyPromise = Promise.resolve();
     // Clear any pending debounced updates
-    for (const timer of this.pendingUpdates.values()) {
-      clearTimeout(timer);
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
     }
-    this.pendingUpdates.clear();
+    if (this.flushDeadline) {
+      clearTimeout(this.flushDeadline);
+      this.flushDeadline = null;
+    }
+    this.pendingChanges.clear();
   }
 
   getStatus(): {
@@ -119,7 +139,7 @@ export class VaultWatcher {
       backend: "chokidar",
       active: this.watcher !== null,
       ready: this._ready,
-      pendingUpdates: this.pendingUpdates.size,
+      pendingUpdates: this.pendingChanges.size,
       last_error: this.lastError,
     };
   }
@@ -142,6 +162,11 @@ export class VaultWatcher {
 
   /**
    * Handle a file change event with debouncing.
+   *
+   * Events are collected into a single window rather than each path getting its
+   * own timer. A burst — a sync landing, a `git pull`, a bulk rename — then costs
+   * one pass over the changed notes and one search invalidation, instead of one
+   * of each per file.
    */
   private handleChange(
     fullPath: string,
@@ -153,36 +178,70 @@ export class VaultWatcher {
     // are both keyed on POSIX-style vault paths, so normalize before dispatch.
     const notePath = normalizeNotePath(relative(this.vaultPath, fullPath));
 
-    // Cancel any pending update for this path
-    const existing = this.pendingUpdates.get(notePath);
-    if (existing) clearTimeout(existing);
+    this.pendingChanges.set(notePath, event);
 
-    // Debounce the update
-    const timer = setTimeout(() => {
-      this.pendingUpdates.delete(notePath);
-      this.processChange(notePath, event);
-    }, this.debounceMs);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => void this.flushChanges(), this.debounceMs);
 
-    this.pendingUpdates.set(notePath, timer);
+    // A continuous stream keeps resetting the debounce above, so cap how long
+    // the vault is allowed to stay stale.
+    if (!this.flushDeadline) {
+      this.flushDeadline = setTimeout(() => void this.flushChanges(), this.maxDeferMs);
+    }
   }
 
   /**
-   * Process a debounced file change.
+   * Apply every change collected in the current window.
+   *
+   * Serialized: a burst arriving mid-flush queues behind the one in flight
+   * rather than mutating the graph underneath it.
    */
-  private async processChange(
-    notePath: string,
-    event: "add" | "change" | "unlink",
-  ): Promise<void> {
-    if (event !== "unlink" && (await this.isOwnEcho(notePath))) return;
+  private flushChanges(): Promise<void> {
+    this.flushChain = this.flushChain.then(
+      () => this.runFlush(),
+      () => this.runFlush(),
+    );
+    return this.flushChain;
+  }
+
+  private async runFlush(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.flushDeadline) {
+      clearTimeout(this.flushDeadline);
+      this.flushDeadline = null;
+    }
+
+    const batch = [...this.pendingChanges];
+    this.pendingChanges.clear();
+    if (batch.length === 0) return;
+
+    const removed: string[] = [];
+    const updated: string[] = [];
+
+    for (const [notePath, event] of batch) {
+      if (event === "unlink") {
+        removed.push(notePath);
+        continue;
+      }
+      if (await this.isOwnEcho(notePath)) continue;
+      updated.push(notePath);
+    }
+
+    if (removed.length === 0 && updated.length === 0) return;
 
     // Invalidate session cache first (always safe)
-    this.cache.invalidateNote(notePath);
+    for (const notePath of [...removed, ...updated]) {
+      this.cache.invalidateNote(notePath);
+    }
 
-    if (event === "unlink") {
+    for (const notePath of removed) {
       this.graph.removeNote(notePath);
-    } else {
-      // add or change — re-index the note
-      await this.graph.updateNote(notePath);
+    }
+    if (updated.length > 0) {
+      await this.graph.updateNotes(updated);
     }
 
     // Invalidate search index AFTER graph is current,

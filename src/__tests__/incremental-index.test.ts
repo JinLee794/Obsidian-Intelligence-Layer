@@ -195,17 +195,17 @@ describe("GraphIndex.changesSince", () => {
 
   it("forces a rebuild once the delta history has been discarded", async () => {
     const before = graph.version;
-    // Each update logs two entries (remove + re-index), so this comfortably
-    // overruns the bounded log and evicts the caller's starting point.
-    for (let i = 0; i < 1200; i++) {
+    // One entry per update — an in-place re-index, no remove-then-re-add — so
+    // this has to clear the 2,048-entry bound on its own to evict the caller's
+    // starting point.
+    for (let i = 0; i < 2100; i++) {
       await graph.updateNote("Customers/Contoso.md");
     }
 
     expect(graph.changesSince(before)).toBeNull();
     expect(graph.changesSince(graph.version)).toEqual([]);
-    // 1,200 real read-and-parse cycles land just under the default timeout on an
-    // idle machine, which means they land just over it on a busy one. The count
-    // is load-bearing — it has to exceed the log bound — so the budget gives way
-    // rather than the coverage.
+    // Thousands of real read-and-parse cycles land well past the default
+    // timeout on a busy machine. The count is load-bearing — it has to exceed
+    // the log bound — so the budget gives way rather than the coverage.
   }, 60_000);
 });
