@@ -407,13 +407,20 @@ When `node dist/index.js` runs:
 ```
 1. Read OBSIDIAN_VAULT_PATH env var
 2. Load oil.config.yaml (or use defaults)
-3. Load graph index from _oil-graph.json (or full-build if first run)
-4. Start incremental graph rebuild in background (if persisted index found)
-5. Initialize session cache (in-memory, 200-note LRU)
-6. Start chokidar file watcher (invalidates caches on vault changes)
-7. Register 13 MCP tools (core + retrieve + write + domain)
-8. Connect stdio transport → server ready
+3. Register the MCP tools (core + retrieve + write + domain)
+4. Connect stdio transport → client sees a live server
+
+   ...then, in the background (the "hydration gate"):
+
+5. Preflight the vault path
+6. Load graph index from _oil-graph.json (or full-build if first run)
+7. Load persisted vectors for the semantic tier
+8. Revalidate notes that changed since the index was written
+9. Start chokidar file watcher (invalidates caches on vault changes)
 ```
+
+Steps 5-9 do not block the handshake. See
+[Startup: the handshake comes first](#startup-the-handshake-comes-first).
 
 ### Request Flow (Example: read the Team section from a customer note)
 

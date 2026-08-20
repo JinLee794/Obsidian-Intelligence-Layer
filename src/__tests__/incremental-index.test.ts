@@ -205,7 +205,10 @@ describe("GraphIndex.changesSince", () => {
     expect(graph.changesSince(before)).toBeNull();
     expect(graph.changesSince(graph.version)).toEqual([]);
     // Thousands of real read-and-parse cycles land well past the default
-    // timeout on a busy machine. The count is load-bearing — it has to exceed
-    // the log bound — so the budget gives way rather than the coverage.
-  }, 60_000);
+    // timeout on a busy machine. Measured, the graph work is free: one
+    // `updateNote` costs less than the bare `readFile` it has to do (3.7ms vs
+    // 4.3ms at the same moment), so this is filesystem contention, not index
+    // cost, and it swings ~6x run to run. The count is load-bearing — it has to
+    // exceed the log bound — so the budget gives way rather than the coverage.
+  }, 120_000);
 });
