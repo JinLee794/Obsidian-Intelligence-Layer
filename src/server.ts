@@ -111,6 +111,16 @@ export async function createOilServer(
     shutdown: async () => {
       hydration.stop();
       await watcher.stop();
+      // Indexing that is not persisted is indexing the next session repeats.
+      // A session that ends mid-rebuild used to discard everything it had just
+      // read, so a client whose sessions are shorter than a full re-index never
+      // converged — it paid the same cost on every connect.
+      await graph
+        .flush(config.search.graphIndexFile)
+        .then((saved) => {
+          if (saved) console.error("[OIL] Index progress saved on shutdown.");
+        })
+        .catch((err) => console.error("[OIL] Could not save index on shutdown:", err));
       await server.close();
     },
   };
@@ -141,9 +151,6 @@ async function hydrate(
     console.error(
       `[OIL] Graph loaded from disk — ${stats.noteCount} notes. Incremental update in background.`,
     );
-    deferred(async () => {
-      await graph.buildIncremental(graphFile);
-    }, "Background incremental rebuild");
   } else {
     console.error("[OIL] No persisted graph index — full build...");
     const startTime = Date.now();
@@ -175,6 +182,18 @@ async function hydrate(
       .whenReady()
       .then(() => console.error("[OIL] File watcher ready — vault changes are now observed."))
       .catch((err) => console.error("[OIL] File watcher never became ready:", err));
+  }
+
+  if (loaded) {
+    // Revalidation is deferred past readiness — the loaded index already serves
+    // — and past the watcher's own recursive scan. Both traverse the whole
+    // vault, and running them together doubles the IO a session costs at
+    // exactly the moment it is least idle. The watcher is *started* first
+    // regardless, so a note changed during the walk is still observed.
+    deferred(async () => {
+      if (watch) await watcher.whenReady().catch(() => undefined);
+      await graph.buildIncremental(graphFile);
+    }, "Background incremental rebuild");
   }
 }
 

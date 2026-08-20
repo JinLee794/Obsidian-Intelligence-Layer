@@ -473,6 +473,31 @@ This contract is enforced by tests, not convention: `npm run test:startup`
 covers the ordering over an in-memory transport, and `npm run test:startup:e2e`
 spawns the built artifact over real stdio and fails a handshake budget.
 
+### Startup: the vault is read once, not once per connect
+
+Hydration is cheap on a repeat connect because the graph index is persisted to
+`_oil-graph.json` in the vault. A warm start loads it and then revalidates
+against disk — one `stat` per note, issued in parallel — re-reading only what
+actually moved:
+
+| Connect | Path | Notes re-read |
+|---|---|---|
+| First, or after the index is lost | full build | all |
+| Repeat, vault unchanged | load from disk | none |
+| Repeat, a few notes edited | load from disk | those notes |
+| After a sync, restore or `git pull` | load from disk | all, **once** |
+
+That last row is the case worth naming. Anything that rewrites mtimes without
+changing content invalidates every entry at once. It costs one re-index — and
+that result is *kept*: the index checkpoints every 500 notes during a long
+rebuild and flushes on shutdown, including when the client simply closes stdin.
+Without that, a session ending mid-rebuild discarded its work and the next
+connect started over, so a vault slow enough that re-indexing outlasts a typical
+session would never converge and would pay the full cost forever.
+
+Revalidation also waits for the file watcher's own recursive scan rather than
+running alongside it, so a connect traverses the vault once rather than twice.
+
 ### Index Stack
 
 OIL maintains in-memory indices so most tool calls resolve in milliseconds:

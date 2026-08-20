@@ -6,6 +6,30 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A repeat connect no longer re-reads the whole vault.** The persisted index
+  was working — the cold *build* ran once — but everything behind it repeated on
+  every session, and could repeat forever. Three compounding causes:
+  - `buildIncremental` stat'd every note one at a time, and chokidar's own
+    recursive scan ran concurrently with it, so each connect traversed the vault
+    twice at once. Stats are now issued with bounded parallelism (measured 8x
+    faster locally, and far more on latency-bound synced or network storage) and
+    the revalidation waits for the watcher's scan to finish rather than
+    competing with it.
+  - **Indexing was never persisted unless it finished before the client
+    disconnected.** `shutdown()` closed the watcher and the server but never
+    saved, and it was only wired to SIGINT/SIGTERM — not to the client closing
+    stdin, which is how an MCP session actually ends. A session that ended
+    mid-rebuild discarded the work and the next one started over, so any vault
+    slow enough that re-indexing outlasts a session *never converged*. The index
+    now tracks whether it is dirty, checkpoints every 500 notes during a long
+    rebuild, and flushes on the way out.
+  - A mass mtime change — sync, restore, `git pull`, switching machines —
+    invalidates every entry at once. That is now a one-time cost that persists,
+    rather than a cost repaid on every connect.
+- **Cold builds read notes in parallel.** `build()` awaited each note in turn,
+  and `indexNote` did its `readFile` and `stat` sequentially. Time to a
+  hydrated 2,000-note index dropped from **4,989ms to 1,004ms**.
+
 - **The server no longer fails to start on a cold or slow vault.** The stdio
   transport was connected *last*, after the graph build, semantic load, watcher
   and tool registration had all completed. A client's `initialize` therefore sat
@@ -33,8 +57,19 @@ All notable changes to this project will be documented in this file.
   `void semantic.refresh(graph)` rejection terminates the process on Node 20+.
   A degraded server that reports its own state beats a dead one.
 
+### Changed
+
+- `GraphIndex` exposes `dirty` and `flush()`, and reads are split into a
+  parallel `readNote` and a synchronous `applyNote` applied in vault order, so
+  concurrency cannot make an ambiguous wikilink resolve differently run to run.
+
 ### Added
 
+- **`src/__tests__/warm-start.test.ts`** — asserts the complementary half of the
+  startup contract: that the work behind the handshake happens once. Covers
+  re-reading nothing on an unchanged second connect, converging in one pass
+  after a mass mtime change, flushing on shutdown, and deterministic output
+  under parallel reads.
 - **`get_health` reports a `startup` block** — `phase` (`warming` / `ready` /
   `failed`), `attempts`, `duration_ms`, and a `reason` when it isn't ready.
   `get_health` is deliberately ungated, so it is how a caller learns *why* other

@@ -31,6 +31,55 @@ interface PersistedGraph {
   nodes: PersistedGraphNode[];
 }
 
+/** A note read from disk, not yet folded into the index. */
+interface ParsedNote {
+  path: string;
+  mtimeMs: number;
+  title: string;
+  wikilinks: string[];
+  tags: string[];
+  headings: string[];
+  bodySnippet: string;
+  frontmatter: Record<string, unknown>;
+}
+
+/**
+ * How many vault files to have open at once.
+ *
+ * Indexing is latency-bound rather than CPU-bound — on a synced or network
+ * vault a single stat or read costs tens of milliseconds — so the work wants to
+ * be overlapped. Bounded because an unbounded fan-out over a large vault
+ * exhausts file descriptors (EMFILE), which is the failure this server is least
+ * able to afford.
+ */
+const IO_CONCURRENCY = 32;
+
+/**
+ * Notes to re-index between checkpoint saves.
+ *
+ * Small enough that a session ending mid-rebuild loses seconds of work rather
+ * than all of it; large enough that the save itself stays a rounding error.
+ */
+const CHECKPOINT_EVERY = 500;
+
+/** Run `fn` over `items` with at most `limit` in flight, preserving order. */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 // ─── Graph Index ──────────────────────────────────────────────────────────────
 
 /**
@@ -58,6 +107,8 @@ export class GraphIndex {
   private _lastIndexed: Date = new Date();
   private _building = false;
   private _version = 0;
+  /** Mutations not yet persisted. Drives save-on-shutdown. */
+  private _dirty = false;
 
   /**
    * Recent per-note mutations, so a derived index can refresh only what moved.
@@ -94,7 +145,25 @@ export class GraphIndex {
     return this._building;
   }
 
+  /**
+   * True when the in-memory index holds work that is not on disk.
+   *
+   * Indexing that is never persisted is indexing that runs again next session,
+   * so callers save on the way out rather than discarding it.
+   */
+  get dirty(): boolean {
+    return this._dirty;
+  }
+
+  /** Persist only if there is something to persist. */
+  async flush(graphIndexFile: string): Promise<boolean> {
+    if (!this._dirty) return false;
+    await this.saveToDisk(graphIndexFile);
+    return true;
+  }
+
   private recordMutation(path: string): void {
+    this._dirty = true;
     this.mutationLog.push({ version: this._version, path });
     if (this.mutationLog.length > GraphIndex.MUTATION_LOG_LIMIT) {
       const dropped = this.mutationLog.splice(
@@ -146,9 +215,13 @@ export class GraphIndex {
 
     const notePaths = await listAllNotes(this.vaultPath);
 
-    // Phase 1: Parse all notes, collect outlinks and metadata
-    for (const notePath of notePaths) {
-      await this.indexNote(notePath);
+    // Phase 1: Read all notes in parallel, then fold them in list order so the
+    // result does not depend on which read finished first.
+    const parsed = await mapWithConcurrency(notePaths, IO_CONCURRENCY, (notePath) =>
+      this.readNote(notePath),
+    );
+    for (const note of parsed) {
+      if (note) this.applyNote(note);
     }
 
     // Phase 2: Resolve wikilinks → paths and compute backlinks
@@ -162,64 +235,90 @@ export class GraphIndex {
    * Parse a single note and add it to the index.
    */
   private async indexNote(notePath: string): Promise<void> {
+    const parsed = await this.readNote(notePath);
+    if (parsed) this.applyNote(parsed);
+  }
+
+  /**
+   * Read and parse a note without touching the index.
+   *
+   * Split from the mutation half so many notes can be read at once: vault IO is
+   * latency-bound, and doing it one note at a time is what made indexing scale
+   * with vault size. Returns null for anything unreadable — a file that
+   * disappeared mid-walk is normal, not an error.
+   */
+  private async readNote(notePath: string): Promise<ParsedNote | null> {
     try {
       const fullPath = join(this.vaultPath, notePath);
-      const raw = await readFile(fullPath, "utf-8");
+      const [raw, fileStat] = await Promise.all([
+        readFile(fullPath, "utf-8"),
+        stat(fullPath).catch(() => null),
+      ]);
       // Normalize CRLF up front — heading/tag regexes below use `.` and `$`,
       // neither of which tolerates a trailing "\r".
       const { data: frontmatter, content } = matter(normalizeLineEndings(raw));
 
-      // Track mtime for incremental rebuild
-      try {
-        const fileStat = await stat(fullPath);
-        this.fileMtimes.set(notePath, fileStat.mtimeMs);
-      } catch {
-        // Use current time if stat fails
-        this.fileMtimes.set(notePath, Date.now());
-      }
-
-      const title = this.extractTitle(notePath, content);
-      const wikilinks = extractWikilinks(content);
-      const tags = this.extractTags(frontmatter, content);
-      const headings = this.extractHeadings(content);
-      const bodySnippet = content.slice(0, 10_000);
-
-      this._version++;
-      this.recordMutation(notePath);
-
-      // Store raw wikilink targets for persistence
-      this.rawOutLinks.set(notePath, wikilinks);
-
-      const node: GraphNode = {
+      return {
         path: notePath,
-        title,
-        tags,
-        headings,
-        bodySnippet,
+        mtimeMs: fileStat?.mtimeMs ?? Date.now(),
+        title: this.extractTitle(notePath, content),
+        wikilinks: extractWikilinks(content),
+        tags: this.extractTags(frontmatter, content),
+        headings: this.extractHeadings(content),
+        bodySnippet: content.slice(0, 10_000),
         frontmatter: frontmatter as Record<string, unknown>,
-        outLinks: new Set(wikilinks), // Temporarily stores link targets (names)
-        inLinks: new Set(),
       };
-
-      this.nodes.set(notePath, node);
-
-      // Index by title for wikilink resolution
-      this.titleIndex.set(title.toLowerCase(), notePath);
-      // Also index by filename without extension
-      const fileName = basename(notePath, extname(notePath));
-      this.titleIndex.set(fileName.toLowerCase(), notePath);
-
-      // Build tag index
-      for (const tag of tags) {
-        let paths = this.tagIndex.get(tag);
-        if (!paths) {
-          paths = new Set();
-          this.tagIndex.set(tag, paths);
-        }
-        paths.add(notePath);
-      }
     } catch {
-      // Skip files that can't be parsed
+      // Skip files that can't be read or parsed
+      return null;
+    }
+  }
+
+  /**
+   * Fold a parsed note into the index.
+   *
+   * Synchronous on purpose: callers apply in a stable order so that a title
+   * collision between two notes resolves the same way on every run, whichever
+   * read happened to finish first.
+   */
+  private applyNote(parsed: ParsedNote): void {
+    const notePath = parsed.path;
+
+    this.fileMtimes.set(notePath, parsed.mtimeMs);
+
+    this._version++;
+    this.recordMutation(notePath);
+
+    // Store raw wikilink targets for persistence
+    this.rawOutLinks.set(notePath, parsed.wikilinks);
+
+    const node: GraphNode = {
+      path: notePath,
+      title: parsed.title,
+      tags: parsed.tags,
+      headings: parsed.headings,
+      bodySnippet: parsed.bodySnippet,
+      frontmatter: parsed.frontmatter,
+      outLinks: new Set(parsed.wikilinks), // Temporarily stores link targets (names)
+      inLinks: new Set(),
+    };
+
+    this.nodes.set(notePath, node);
+
+    // Index by title for wikilink resolution
+    this.titleIndex.set(parsed.title.toLowerCase(), notePath);
+    // Also index by filename without extension
+    const fileName = basename(notePath, extname(notePath));
+    this.titleIndex.set(fileName.toLowerCase(), notePath);
+
+    // Build tag index
+    for (const tag of parsed.tags) {
+      let paths = this.tagIndex.get(tag);
+      if (!paths) {
+        paths = new Set();
+        this.tagIndex.set(tag, paths);
+      }
+      paths.add(notePath);
     }
   }
 
@@ -379,6 +478,7 @@ export class GraphIndex {
       throw err;
     }
     await this.sweepStaleTemps(fullPath);
+    this._dirty = false;
     console.error(`[OIL] Graph index saved: ${persistedNodes.length} nodes.`);
   }
 
@@ -514,34 +614,62 @@ export class GraphIndex {
         }
       }
 
-      const vaultNotes = new Set(await listAllNotes(this.vaultPath));
+      const vaultNotes = await listAllNotes(this.vaultPath);
+      const present = new Set(vaultNotes);
       let reindexed = 0;
 
       // Remove notes that no longer exist in the vault
       for (const path of [...this.nodes.keys()]) {
-        if (!vaultNotes.has(path)) {
+        if (!present.has(path)) {
           this.removeNote(path);
           reindexed++;
         }
       }
 
-      // Check each vault note against persisted mtime
-      for (const notePath of vaultNotes) {
-        const fullPath = join(this.vaultPath, notePath);
-        let currentMtime: number;
+      // Revalidate against disk. One stat per note, but issued in parallel:
+      // sequentially this is the single most expensive thing a warm start does,
+      // and on a synced or network vault each stat carries real latency.
+      const mtimes = await mapWithConcurrency(vaultNotes, IO_CONCURRENCY, async (notePath) => {
         try {
-          const fileStat = await stat(fullPath);
-          currentMtime = fileStat.mtimeMs;
+          return (await stat(join(this.vaultPath, notePath))).mtimeMs;
         } catch {
-          continue; // file disappeared
+          return null; // file disappeared
+        }
+      });
+
+      const changed = vaultNotes.filter((notePath, i) => {
+        const currentMtime = mtimes[i];
+        if (currentMtime === null) return false;
+        const cachedMtime = this.fileMtimes.get(notePath);
+        return cachedMtime === undefined || Math.abs(currentMtime - cachedMtime) > 1;
+      });
+
+      // Re-read changed notes in batches, persisting as we go. A mass
+      // invalidation — a sync, a restore, a `git pull`, any of which rewrites
+      // mtimes wholesale — can take longer than the session that discovered it.
+      // Without checkpoints that work is lost on disconnect and repeated in
+      // full next time, so a short-session client never converges.
+      for (let offset = 0; offset < changed.length; offset += CHECKPOINT_EVERY) {
+        const batch = changed.slice(offset, offset + CHECKPOINT_EVERY);
+        const parsed = await mapWithConcurrency(batch, IO_CONCURRENCY, (notePath) =>
+          this.readNote(notePath),
+        );
+        for (let i = 0; i < batch.length; i++) {
+          this.removeNote(batch[i]);
+          const note = parsed[i];
+          if (note) this.applyNote(note);
+          reindexed++;
         }
 
-        const cachedMtime = this.fileMtimes.get(notePath);
-        if (cachedMtime === undefined || Math.abs(currentMtime - cachedMtime) > 1) {
-          // Note is new or changed — re-index it
-          this.removeNote(notePath);
-          await this.indexNote(notePath);
-          reindexed++;
+        const isLastBatch = offset + CHECKPOINT_EVERY >= changed.length;
+        if (!isLastBatch) {
+          this.resolveAllBacklinks();
+          await this.saveToDisk(graphIndexFile).catch((err) =>
+            console.error("[OIL] Index checkpoint failed (continuing):", err),
+          );
+          console.error(
+            `[OIL] Re-indexing ${offset + batch.length}/${changed.length} — progress saved.`,
+          );
         }
       }
 

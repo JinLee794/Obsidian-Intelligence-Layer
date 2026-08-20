@@ -49,6 +49,10 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  // The ordinary end of an MCP session is the client closing stdin, which
+  // raises no signal at all. Without this the shutdown path — and the index
+  // save it performs — only ran when someone killed the process by hand.
+  oil.server.server.onclose = () => void shutdown();
 }
 
 /**
