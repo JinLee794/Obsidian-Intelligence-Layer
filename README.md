@@ -489,14 +489,25 @@ actually moved:
 
 That last row is the case worth naming. Anything that rewrites mtimes without
 changing content invalidates every entry at once. It costs one re-index — and
-that result is *kept*: the index checkpoints every 500 notes during a long
-rebuild and flushes on shutdown, including when the client simply closes stdin.
-Without that, a session ending mid-rebuild discarded its work and the next
-connect started over, so a vault slow enough that re-indexing outlasts a typical
-session would never converge and would pay the full cost forever.
+that result is *kept*, because the rebuild persists as it goes: every 500 notes,
+and at least every two seconds, so progress survives even on a slow vault where
+500 notes is a long way off.
 
-Revalidation also waits for the file watcher's own recursive scan rather than
-running alongside it, so a connect traverses the vault once rather than twice.
+Checkpointing carries that guarantee on its own, deliberately. Clients do not
+ask a stdio server to stop, they kill it — the MCP SDK's own client sends
+`SIGTERM` and follows with `SIGKILL` two seconds later, and on Windows that
+first signal is a `TerminateProcess` that runs no handler at all. OIL does still
+flush on the way out, and does watch stdin for the hangup so that a graceful
+disconnect is both noticed and terminal (before that it hung until the client
+escalated to `SIGKILL`). But nothing on the shutdown path is *relied* on: only
+what is already on disk is guaranteed to survive.
+
+Revalidation runs *before* the file watcher's recursive scan rather than after
+it, so a connect traverses the vault once rather than twice — and in the order
+that matters. Revalidation is what lets a stale index converge, so it goes
+first; gating it behind the watcher meant any session shorter than the watcher's
+scan did no index work at all, and such a client never converged however often
+it reconnected.
 
 ### Index Stack
 

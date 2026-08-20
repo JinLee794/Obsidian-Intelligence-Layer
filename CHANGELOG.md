@@ -13,19 +13,35 @@ All notable changes to this project will be documented in this file.
     recursive scan ran concurrently with it, so each connect traversed the vault
     twice at once. Stats are now issued with bounded parallelism (measured 8x
     faster locally, and far more on latency-bound synced or network storage) and
-    the revalidation waits for the watcher's scan to finish rather than
-    competing with it.
+    the two walks are serialised — revalidation first, then the watcher.
   - **Indexing was never persisted unless it finished before the client
     disconnected.** `shutdown()` closed the watcher and the server but never
-    saved, and it was only wired to SIGINT/SIGTERM — not to the client closing
-    stdin, which is how an MCP session actually ends. A session that ended
-    mid-rebuild discarded the work and the next one started over, so any vault
-    slow enough that re-indexing outlasts a session *never converged*. The index
-    now tracks whether it is dirty, checkpoints every 500 notes during a long
-    rebuild, and flushes on the way out.
+    saved. A session that ended mid-rebuild discarded the work and the next one
+    started over, so any vault slow enough that re-indexing outlasts a session
+    *never converged*. The index now tracks whether it is dirty and persists
+    during the rebuild — every 500 notes, and at least every two seconds.
   - A mass mtime change — sync, restore, `git pull`, switching machines —
     invalidates every entry at once. That is now a one-time cost that persists,
     rather than a cost repaid on every connect.
+- **The server now notices, and survives, the end of a session.** A stdio client
+  does not ask the server to stop, it kills it: the MCP SDK's client sends
+  `SIGTERM` then `SIGKILL` two seconds later, and on Windows the first is a
+  `TerminateProcess` that runs no handler. `StdioServerTransport` subscribes
+  only to stdin's `data` and `error`, so its `onclose` never fires for a
+  disconnect either. The upshot was a server that hung on stdin EOF until the
+  client escalated to `SIGKILL`, holding a watcher over the whole vault the
+  entire time — observed leaking across sessions. stdin's hangup is now watched
+  directly, so a graceful disconnect is both noticed and terminal, and the flush
+  on the way out actually runs. Durability does not depend on it: checkpointing
+  is the guarantee, because no shutdown path can be relied on.
+- **Revalidation no longer waits for the file watcher.** Serialising the two
+  vault walks was right; the order was not. Revalidation is what lets a stale
+  index converge, and gating it behind the watcher's recursive scan meant any
+  session shorter than that scan did no index work whatsoever — such a client
+  never converged, however often it reconnected. Measured on a 6,000-note vault
+  after a mass invalidation: outstanding work now falls monotonically to zero
+  across short sessions (4592 → 4080 → 3056 → 2032 → 1008 → 0) where before it
+  did not move at all.
 - **Cold builds read notes in parallel.** `build()` awaited each note in turn,
   and `indexNote` did its `readFile` and `stat` sequentially. Time to a
   hydrated 2,000-note index dropped from **4,989ms to 1,004ms**.
@@ -68,8 +84,15 @@ All notable changes to this project will be documented in this file.
 - **`src/__tests__/warm-start.test.ts`** — asserts the complementary half of the
   startup contract: that the work behind the handshake happens once. Covers
   re-reading nothing on an unchanged second connect, converging in one pass
-  after a mass mtime change, flushing on shutdown, and deterministic output
-  under parallel reads.
+  after a mass mtime change, persisting mid-rebuild so an abandoned session
+  still leaves progress, convergence across repeated rebuilds, and deterministic
+  output under parallel reads.
+- **`scripts/verify-observed.mjs`** — an end-to-end diagnostic that checks these
+  claims against the built artifact over real stdio, rather than in-process:
+  how a session actually ends, whether checkpoints actually fire, whether the
+  walks are ordered as intended, and whether repeated short sessions actually
+  converge. It exists because the shutdown claim above was written from the code
+  and turned out to be false in the runtime a client drives.
 - **`get_health` reports a `startup` block** — `phase` (`warming` / `ready` /
   `failed`), `attempts`, `duration_ms`, and a `reason` when it isn't ready.
   `get_health` is deliberately ungated, so it is how a caller learns *why* other

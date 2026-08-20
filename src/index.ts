@@ -49,10 +49,15 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  // The ordinary end of an MCP session is the client closing stdin, which
-  // raises no signal at all. Without this the shutdown path — and the index
-  // save it performs — only ran when someone killed the process by hand.
-  oil.server.server.onclose = () => void shutdown();
+
+  // The ordinary end of an MCP session is the client closing stdin, and nothing
+  // else notices it: StdioServerTransport subscribes only to `data` and
+  // `error`, so its `onclose` never fires for a disconnect, and on Windows a
+  // client's SIGTERM is a TerminateProcess that runs no handler at all. Left
+  // alone the server simply hung on EOF until the client escalated to SIGKILL.
+  // Watching stdin directly is the only signal that actually arrives.
+  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("close", () => void shutdown());
 }
 
 /**

@@ -62,6 +62,25 @@ const IO_CONCURRENCY = 32;
  */
 const CHECKPOINT_EVERY = 500;
 
+/**
+ * Longest a rebuild may run without persisting anything.
+ *
+ * The note threshold alone assumes a rebuild rate. Where that assumption fails
+ * — large notes, a slow disk, an on-access virus scanner — a short session can
+ * end having saved nothing at all, and repeat the same work on every connect.
+ * Two seconds is well inside the window a client allows between disconnecting
+ * and killing the process.
+ */
+const CHECKPOINT_INTERVAL_MS = 2000;
+
+/**
+ * Notes re-read per batch.
+ *
+ * Decoupled from the checkpoint thresholds so that progress can be measured
+ * often enough for a time-based checkpoint to be responsive.
+ */
+const BATCH_SIZE = 128;
+
 /** Run `fn` over `items` with at most `limit` in flight, preserving order. */
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -649,8 +668,15 @@ export class GraphIndex {
       // mtimes wholesale — can take longer than the session that discovered it.
       // Without checkpoints that work is lost on disconnect and repeated in
       // full next time, so a short-session client never converges.
-      for (let offset = 0; offset < changed.length; offset += CHECKPOINT_EVERY) {
-        const batch = changed.slice(offset, offset + CHECKPOINT_EVERY);
+      //
+      // Checkpoints are triggered by elapsed time as well as note count,
+      // because count alone assumes a rebuild rate. A vault of large notes on a
+      // slow or scanned disk can spend an entire short session without reaching
+      // the note threshold, save nothing, and so repeat that work forever.
+      let sinceCheckpoint = 0;
+      let lastCheckpoint = Date.now();
+      for (let offset = 0; offset < changed.length; offset += BATCH_SIZE) {
+        const batch = changed.slice(offset, offset + BATCH_SIZE);
         const parsed = await mapWithConcurrency(batch, IO_CONCURRENCY, (notePath) =>
           this.readNote(notePath),
         );
@@ -659,14 +685,20 @@ export class GraphIndex {
           const note = parsed[i];
           if (note) this.applyNote(note);
           reindexed++;
+          sinceCheckpoint++;
         }
 
-        const isLastBatch = offset + CHECKPOINT_EVERY >= changed.length;
-        if (!isLastBatch) {
+        const isLastBatch = offset + BATCH_SIZE >= changed.length;
+        const due =
+          sinceCheckpoint >= CHECKPOINT_EVERY ||
+          Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS;
+        if (!isLastBatch && due) {
           this.resolveAllBacklinks();
           await this.saveToDisk(graphIndexFile).catch((err) =>
             console.error("[OIL] Index checkpoint failed (continuing):", err),
           );
+          sinceCheckpoint = 0;
+          lastCheckpoint = Date.now();
           console.error(
             `[OIL] Re-indexing ${offset + batch.length}/${changed.length} — progress saved.`,
           );

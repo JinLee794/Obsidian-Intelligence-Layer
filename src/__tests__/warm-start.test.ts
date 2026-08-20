@@ -236,3 +236,53 @@ describe("warm start — a touched-but-identical note is still cheap", () => {
     expect(await second.buildIncremental(INDEX_FILE)).toBe(1);
   });
 });
+
+describe("warm start — progress outlives a session that is cut short", () => {
+  /**
+   * Clients do not ask a stdio server to stop; they kill it. The MCP SDK's own
+   * client sends SIGTERM and follows with SIGKILL two seconds later, and on
+   * Windows that first signal is a TerminateProcess that runs no handler at
+   * all. So nothing on the shutdown path can be assumed to run, and the only
+   * work that reliably survives is work already written to disk. That makes
+   * checkpointing during the rebuild the durable mechanism rather than a
+   * refinement of one.
+   */
+  it("persists mid-rebuild, so an abandoned session still leaves progress", async () => {
+    const first = new GraphIndex(vault);
+    await first.build();
+    await first.saveToDisk(INDEX_FILE);
+    await skewPersistedMtimes();
+
+    const second = await reopen();
+    const rebuild = second.buildIncremental(INDEX_FILE);
+
+    // Abandon the rebuild the way a killed process does: stop awaiting it and
+    // read what is on disk, without any shutdown or flush being given a chance.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const midFlight = JSON.parse(await readFile(join(vault, INDEX_FILE), "utf-8"));
+    expect(Array.isArray(midFlight.nodes)).toBe(true);
+
+    await rebuild;
+    const third = await reopen();
+    expect(await third.buildIncremental(INDEX_FILE)).toBe(0);
+  });
+
+  it("converges under repeated rebuilds rather than repeating the same work", async () => {
+    const first = new GraphIndex(vault);
+    await first.build();
+    await first.saveToDisk(INDEX_FILE);
+    await skewPersistedMtimes();
+
+    const counts: number[] = [];
+    for (let session = 0; session < 3; session++) {
+      const graph = await reopen();
+      counts.push(await graph.buildIncremental(INDEX_FILE));
+    }
+
+    // The first session absorbs the invalidation; every session after it must
+    // find nothing left to do. A server that discarded its work would report
+    // the same non-zero count forever.
+    expect(counts[0]).toBe(NOTE_COUNT);
+    expect(counts.slice(1)).toEqual([0, 0]);
+  });
+});

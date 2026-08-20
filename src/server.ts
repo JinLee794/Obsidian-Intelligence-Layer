@@ -175,25 +175,33 @@ async function hydrate(
     deferred(() => semantic.refresh(graph), "Semantic refresh");
   }
 
-  if (watch) {
+  const startWatcher = (): void => {
+    if (!watch) return;
     watcher.start();
     console.error("[OIL] File watcher started.");
     void watcher
       .whenReady()
       .then(() => console.error("[OIL] File watcher ready — vault changes are now observed."))
       .catch((err) => console.error("[OIL] File watcher never became ready:", err));
-  }
+  };
 
   if (loaded) {
     // Revalidation is deferred past readiness — the loaded index already serves
-    // — and past the watcher's own recursive scan. Both traverse the whole
-    // vault, and running them together doubles the IO a session costs at
-    // exactly the moment it is least idle. The watcher is *started* first
-    // regardless, so a note changed during the walk is still observed.
+    // — but it runs *before* the watcher's recursive scan, not after it. Both
+    // traverse the whole vault, so they are kept apart; the order matters
+    // because only one of them is load-bearing. Revalidation is what lets a
+    // stale index converge, and it checkpoints as it goes, so a session shorter
+    // than the walk still makes permanent progress. Gating it behind the
+    // watcher meant any session shorter than the watcher's scan did no index
+    // work whatsoever — such a client never converged, however often it
+    // reconnected. Live changes during the rebuild are the smaller loss: the
+    // rebuild is itself re-reading the vault, and the watcher follows directly.
     deferred(async () => {
-      if (watch) await watcher.whenReady().catch(() => undefined);
       await graph.buildIncremental(graphFile);
+      startWatcher();
     }, "Background incremental rebuild");
+  } else {
+    startWatcher();
   }
 }
 

@@ -203,5 +203,9 @@ describe("GraphIndex.changesSince", () => {
 
     expect(graph.changesSince(before)).toBeNull();
     expect(graph.changesSince(graph.version)).toEqual([]);
-  });
+    // 1,200 real read-and-parse cycles land just under the default timeout on an
+    // idle machine, which means they land just over it on a busy one. The count
+    // is load-bearing — it has to exceed the log bound — so the budget gives way
+    // rather than the coverage.
+  }, 60_000);
 });

@@ -30,6 +30,7 @@
     "test:startup": "vitest run src/__tests__/startup-contract.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
     "test:startup:e2e": "node scripts/startup-contract.mjs",
+    "verify:observed": "node scripts/verify-observed.mjs",
     "test:ux": "node scripts/consumer-ux-check.mjs",
     "check:release": "npm run lint && npm test && npm run test:package && npm run test:startup:e2e",
     "lint": "tsc --noEmit -p tsconfig.check.json",
