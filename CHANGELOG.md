@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The server no longer fails to start on a cold or slow vault.** The stdio
+  transport was connected *last*, after the graph build, semantic load, watcher
+  and tool registration had all completed. A client's `initialize` therefore sat
+  behind a full vault index — measured at 6,441ms cold for 2,000 notes on a
+  local SSD, and unbounded on a synced or network vault. Past the SDK's 60s
+  request timeout, the client gives up and the server appears dead. That is the
+  mechanism behind "OIL just fails sometimes": warm sessions were fine, cold
+  ones (index deleted or corrupt, config change, post-sync, several sessions
+  starting at once) were a race against the clock. The transport now connects
+  first and vault work runs behind a hydration gate: cold handshake is **695ms**
+  and no longer scales with vault size.
+- **A file-watcher error no longer kills the process.** `VaultWatcher` attached
+  `add`/`change`/`unlink` handlers but no `error` handler, and a chokidar
+  instance with zero `error` listeners *throws* on `emit("error")`. EMFILE,
+  ENOSPC and EPERM are routine on Windows with OneDrive or antivirus in the
+  path. The watcher now records the error in `get_health.watcher.last_error`
+  and keeps serving.
+- **A missing or unreachable vault is diagnosed, not fatal.** A nonexistent
+  vault path exited 1 with a raw `ENOENT ... scandir` stack. Startup now
+  preflights the vault, completes the handshake regardless, and retries with
+  backoff — so a vault on a drive that mounts late heals itself instead of
+  requiring a restart.
+- **Unhandled rejections and uncaught exceptions no longer end the session.**
+  There were no process-level guards anywhere, and a background
+  `void semantic.refresh(graph)` rejection terminates the process on Node 20+.
+  A degraded server that reports its own state beats a dead one.
+
+### Added
+
+- **`get_health` reports a `startup` block** — `phase` (`warming` / `ready` /
+  `failed`), `attempts`, `duration_ms`, and a `reason` when it isn't ready.
+  `get_health` is deliberately ungated, so it is how a caller learns *why* other
+  tools are waiting rather than guessing at a hang.
+- **Startup-contract regression coverage.** `src/__tests__/startup-contract.test.ts`
+  asserts the ordering contract over an in-memory transport;
+  `scripts/startup-contract.mjs` (`npm run test:startup:e2e`) spawns the built
+  artifact over real stdio and fails the handshake budget, run from a working
+  directory outside the repo to prove cwd-independence. Both are wired into
+  `check:release`.
+- **CI on pull requests** (`.github/workflows/ci.yml`) — lint, tests, startup
+  contract and package smoke on Linux and Windows. Previously nothing ran until
+  a push to `main`.
+
 ## [0.7.0-beta.1] - 2026-08-19
 
 Pre-release for cross-machine testing. Tool-surface audit: responses got 31%

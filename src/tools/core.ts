@@ -6,6 +6,7 @@ import type { SessionCache } from "../cache.js";
 import type { VaultWatcher } from "../watcher.js";
 import type { OilConfig } from "../types.js";
 import { getSemanticIndex } from "../semantic.js";
+import type { Hydration } from "../hydration.js";
 import { jsonResponse } from "../tool-responses.js";
 import { SERVER_NAME, SERVER_VERSION } from "../version.js";
 
@@ -16,12 +17,13 @@ export function registerCoreTools(
   cache: SessionCache,
   watcher: VaultWatcher,
   config: OilConfig,
+  hydration?: Hydration,
 ): void {
   server.registerTool(
     "get_health",
     {
       description:
-        "Summary-level runtime visibility for OIL. Returns server identity, index freshness, cache stats, watcher status, and audit availability without loading full logs.",
+        "Summary-level runtime visibility for OIL. Returns server identity, startup state, index freshness, cache stats, watcher status, and audit availability without loading full logs.",
       inputSchema: {},
     },
     async () => {
@@ -33,6 +35,14 @@ export function registerCoreTools(
           name: SERVER_NAME,
           version: SERVER_VERSION,
           runtime_profile: "current-client-optimized",
+        },
+        // Never gated: this is how a caller learns why the other tools are
+        // waiting, so it has to answer while the vault is still warming.
+        startup: hydration?.snapshot ?? {
+          phase: "ready",
+          attempts: 0,
+          reason: null,
+          duration_ms: null,
         },
         index: {
           note_count: graphStats.noteCount,

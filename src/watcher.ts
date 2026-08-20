@@ -24,6 +24,8 @@ export class VaultWatcher {
    */
   private _ready = false;
   private readyPromise: Promise<void> = Promise.resolve();
+  /** Most recent watch fault, surfaced through get_health rather than thrown. */
+  private lastError: string | null = null;
 
   /** Debounce timer for batching rapid changes */
   private pendingUpdates = new Map<string, NodeJS.Timeout>();
@@ -64,7 +66,17 @@ export class VaultWatcher {
     this.watcher
       .on("add", (fullPath) => this.handleChange(fullPath, "add"))
       .on("change", (fullPath) => this.handleChange(fullPath, "change"))
-      .on("unlink", (fullPath) => this.handleChange(fullPath, "unlink"));
+      .on("unlink", (fullPath) => this.handleChange(fullPath, "unlink"))
+      // chokidar emits `error` for EMFILE, ENOSPC and permission failures —
+      // routine on a synced or virus-scanned vault. An EventEmitter with no
+      // `error` listener *throws*, so omitting this turns a recoverable watch
+      // fault into a dead MCP server. Degrade to a stale-but-serving index.
+      .on("error", (err: unknown) => {
+        this.lastError = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[OIL] File watcher error (${this.lastError}) — vault changes may be missed until the next restart.`,
+        );
+      });
 
     this.readyPromise = new Promise((resolve) => {
       this.watcher?.on("ready", () => {
@@ -101,12 +113,14 @@ export class VaultWatcher {
     active: boolean;
     ready: boolean;
     pendingUpdates: number;
+    last_error: string | null;
   } {
     return {
       backend: "chokidar",
       active: this.watcher !== null,
       ready: this._ready,
       pendingUpdates: this.pendingUpdates.size,
+      last_error: this.lastError,
     };
   }
 

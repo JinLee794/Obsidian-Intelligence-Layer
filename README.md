@@ -210,7 +210,7 @@ Use this first when a client needs fast runtime state without paying the cost of
 
 | Tool | What It Does |
 |---|---|
-| `get_health` | Returns server identity, live tool-surface counts, index freshness, cache stats, watcher state, and whether audit logs are available. This is the summary visibility tool; use `get_agent_log` only when you need detailed write history. |
+| `get_health` | Returns server identity, startup phase, live tool-surface counts, index freshness, cache stats, watcher state, and whether audit logs are available. This is the summary visibility tool, and the one tool that answers during startup — use it to find out why other calls are waiting. Use `get_agent_log` only when you need detailed write history. |
 
 ### Search & Inspect (5 tools) — Token-efficient reads
 
@@ -351,7 +351,9 @@ audit:
 
 ```
 src/
-├── index.ts          # Entry point — startup sequence, tool registration, shutdown
+├── index.ts          # Process entry — crash guards, transport connect, shutdown
+├── server.ts         # Server assembly — tool registration, hydration gating, startup order
+├── hydration.ts      # Hydration gate — background vault load with backoff retry
 ├── cli.ts            # CLI wrapper — .env loading, subcommand routing
 ├── types.ts          # Shared TypeScript types (NoteRef, OilConfig, etc.)
 ├── config.ts         # Reads oil.config.yaml from vault root; merges with defaults
@@ -435,6 +437,41 @@ The agent gets **just the section it needs** — not the entire note.
 ---
 
 ## Architecture Deep Dive
+
+### Startup: the handshake comes first
+
+An MCP client can't tell "still indexing" apart from "dead" — it only sees an
+`initialize` that hasn't answered, and it gives up at 60s. So OIL connects the
+transport *before* it touches the vault:
+
+```
+connect stdio transport  ──▶  client sees a live server (~700ms, any vault size)
+        │
+        └─ hydration gate (background)
+             ├─ preflight vault path
+             ├─ load or build the graph index
+             ├─ load persisted vectors
+             └─ start the file watcher
+```
+
+Tool calls arriving during hydration **await the gate** rather than failing, so a
+caller sees a slower first call and never a dead server. `get_health` is
+deliberately ungated — it is how you find out what the others are waiting on:
+
+```json
+{ "startup": { "phase": "warming", "attempts": 1, "duration_ms": 1840 } }
+```
+
+If hydration fails — vault not mounted yet, a synced folder mid-sync, a
+transient FS error — it retries with backoff (1s, 2s, 5s, 15s, 30s) and the
+failure reason is reported rather than thrown. A vault that appears late heals
+itself without a restart. Watcher errors (EMFILE, ENOSPC, EPERM — routine with
+OneDrive and antivirus on Windows) are recorded in
+`get_health.watcher.last_error` instead of killing the process.
+
+This contract is enforced by tests, not convention: `npm run test:startup`
+covers the ordering over an in-memory transport, and `npm run test:startup:e2e`
+spawns the built artifact over real stdio and fails a handshake budget.
 
 ### Index Stack
 
