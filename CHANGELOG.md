@@ -6,8 +6,11 @@ All notable changes to this project will be documented in this file.
 
 Semantic search, incremental indexing, and reliable startup — plus a measurable
 definition of "good results". The tool surface grows by one to 15 tools. With no
-Ollama running everything behaves as it did in 0.5.5 except `semantic_search`,
-which now returns an explained zero instead of lexical hits.
+Ollama running, lexical and fuzzy search behave as they did in 0.5.5 —
+including for misspellings that appear only in body prose, which is verified
+with the semantic tier switched off — and `semantic_search` returns an explained
+zero instead of lexical hits. Response *shapes* have changed, though: see
+Migration, where four tools return a different container than in 0.5.5.
 
 ### Added
 
@@ -117,13 +120,22 @@ which now returns an explained zero instead of lexical hits.
   `get_related_entities` payload (measured 26.7–27.2%). `ref` is now emitted only for section-scoped
   results, as `path#heading`. Removed `customer_ref`, `orphaned_meeting_refs`,
   and `query_frontmatter`'s duplicate `matches` array.
-- **The fuzzy tier no longer indexes note bodies.** BM25 already indexes them with
-  term statistics, so fuse.js was making a slower second pass over the same text —
-  the dominant cost of the tier. The three tiers are now weighted toward different
-  jobs rather than split cleanly between them: BM25 leads on exact terms and
-  identifiers, fuzzy on misspelled names, semantic on meaning. They still overlap —
-  a result routinely matches on more than one tier, which is why `matched_by` is a
-  list.
+- **The fuzzy tier no longer indexes note bodies by default.** BM25 already
+  indexes them with term statistics, so fuse.js was making a slower second pass
+  over the same text — 87–97% of that tier's work on a 1,200-note vault. But
+  "BM25 already indexes them" only holds for words spelled *correctly*: BM25
+  looks terms up exactly, so during development a misspelling whose target
+  appeared nowhere but body prose had no tier left to catch it. That is repaired
+  before release by a last-resort pass, gated on the same `fullCoverage === false`
+  primitive the semantic tier uses, over a deduplicated term list rather than raw
+  prose. It is built lazily, so a process whose queries never trip the gate never
+  builds it, and it fires on about 6% of realistic queries. The cost win is kept
+  and body-prose misspellings resolve again — verified over stdio with the
+  semantic tier switched off, so the recovery cannot be attributed to embeddings.
+  The three tiers are weighted toward different jobs rather than split cleanly
+  between them: BM25 leads on exact terms and identifiers, fuzzy on misspelled
+  names, semantic on meaning. They still overlap — a result routinely matches on
+  more than one tier, which is why `matched_by` is a list.
 - **`score` is comparable across code paths.** Escalated queries returned raw
   reciprocal-rank sums (~0.016–0.033) while direct answers returned a 0–1 value.
   Both now normalise to the top hit. Rank order is unaffected; it remains a
