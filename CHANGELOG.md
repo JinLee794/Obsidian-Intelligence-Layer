@@ -7,10 +7,12 @@ All notable changes to this project will be documented in this file.
 Semantic search, incremental indexing, and reliable startup — plus a measurable
 definition of "good results". The tool surface grows by one to 15 tools. With no
 Ollama running, lexical and fuzzy search behave as they did in 0.5.5 —
-including for misspellings that appear only in body prose, which is verified
-with the semantic tier switched off — and `semantic_search` returns an explained
-zero instead of lexical hits. Response *shapes* have changed, though: see
-Migration, where four tools return a different container than in 0.5.5.
+including for terms that appear only in body prose, which is verified
+with the semantic tier switched off — with one known exception noted under the
+fuzzy tier below, where a query joins a word across a hyphen. `semantic_search`
+returns an explained zero instead of lexical hits. Response *shapes* have
+changed, though: see Migration, where four tools return a different container
+than in 0.5.5.
 
 ### Added
 
@@ -137,15 +139,28 @@ Migration, where four tools return a different container than in 0.5.5.
 - **The fuzzy tier no longer indexes note bodies by default.** BM25 already
   indexes them with term statistics, so fuse.js was making a slower second pass
   over the same text — 87–97% of that tier's work on a 1,200-note vault. But
-  "BM25 already indexes them" only holds for words spelled *correctly*: BM25
-  looks terms up exactly, so during development a misspelling whose target
-  appeared nowhere but body prose had no tier left to catch it. That is repaired
-  before release by a last-resort pass, gated on the same `fullCoverage === false`
-  primitive the semantic tier uses, over a deduplicated term list rather than raw
-  prose. It is built lazily, so a process whose queries never trip the gate never
-  builds it, and it fires on about 6% of realistic queries. The cost win is kept
-  and body-prose misspellings resolve again — verified over stdio with the
-  semantic tier switched off, so the recovery cannot be attributed to embeddings.
+  "BM25 already indexes them" holds only for words the query spells the way BM25
+  stored them, and that is a narrower guarantee than it sounds. BM25 looks terms
+  up exactly, so during development anything whose target appeared nowhere but
+  body prose had no tier left to catch it. Misspellings were the obvious casualty
+  — measured at **54.8%** of typo queries lost outright over an N=442 probe, or
+  **78.6%** counting only those 0.5.5 could find. But **correctly spelled**
+  queries were affected too, wherever BM25 tokenises differently than the reader
+  types: `kube-proxy` is stored as two tokens so `kubeproxy` misses,
+  `getUserById` is stored as one so `userById` misses, there is no stemming so
+  `analysis` does not reach `analyses`, and prefix expansion is forward-only so
+  an infix like `netes` does not reach `kubernetes`. Of 18 such probes, 7
+  regressed and 4 of those were spelled correctly.
+  This is repaired before release by a last-resort pass, gated on the same
+  `fullCoverage === false` primitive the semantic tier uses, over a deduplicated
+  term list rather than raw prose. It is built lazily, so a process whose queries
+  never trip the gate never builds it, and it fires on about 6% of realistic
+  queries. The cost win is kept and body-prose recall resolves again — verified
+  over stdio with the semantic tier switched off, so the recovery cannot be
+  attributed to embeddings. It repairs 6 of the 7 regressed probes; **`kubeproxy`
+  still misses `kube-proxy`**, because joining a word across a hyphen is beyond
+  what edit-distance fuzzy matching can reach. That case is a genuine remaining
+  gap, not a rounding error.
   The three tiers are weighted toward different jobs rather than split cleanly
   between them: BM25 leads on exact terms and identifiers, fuzzy on misspelled
   names, semantic on meaning. They still overlap — a result routinely matches on
@@ -455,6 +470,13 @@ Also worth knowing:
 
 Shipped deliberately, with the evidence that justified each call.
 
+- **A query that joins a word across a hyphen does not reach its target.**
+  `kubeproxy` still misses `kube-proxy`. BM25 stores the target as two tokens, and
+  the last-resort fuzzy pass works by edit distance, which cannot concatenate
+  across the boundary. It was one of 7 regressed probes out of 18; the other 6 are
+  repaired. Concatenation-aware matching is a different mechanism than edit
+  distance, so it is left for a release that can measure it rather than bolted on
+  here.
 - **The semantic relevance floor is corpus- and model-specific.** The 0.5 default
   was measured against `nomic-embed-text` on a 360-note vault; on the 12-note
   fixture it costs one rank position on a typo query, and on a very different
