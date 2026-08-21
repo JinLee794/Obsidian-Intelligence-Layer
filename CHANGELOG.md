@@ -284,9 +284,10 @@ than in 0.5.5.
 - Taken together these were the dominant source of `check:release` flakiness.
   With them gated, `npm run check:release` completed green end to end — lint,
   38 test files, the package smoke test, the E2E startup contract and
-  `verify:observed` — which it had not previously managed on this machine. That
-  is one observed pass, not a determinism claim: a handful of watcher tests
-  remain timing-sensitive and are declared with `{ retry: 2 }`, so
+  `verify:observed` — which it had not previously managed on this machine, and
+  it did so on two consecutive runs, the second with 57 new fixture files in
+  scope. That is two observations rather than a determinism claim: a handful of
+  watcher tests remain timing-sensitive and are declared with `{ retry: 2 }`, so
   "deterministic" is still the goal rather than a measured guarantee.
 - **`npm run verify:observed` is now release-gating.** It runs nine assertions
   against a real server over stdio — the claims in these notes that are about
