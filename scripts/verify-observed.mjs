@@ -224,7 +224,7 @@ if (realVault) {
   observe(
     !rw.fullBuild && rw.upToDate,
     "the real vault re-reads nothing on a second connect",
-    `cold ${rc.readyMs}ms -> warm ${rw.readyMs}ms`,
+    "index reused: no full build and the server reported the vault up to date",
   );
 }
 
@@ -234,3 +234,5 @@ console.log(
 for (const r of results.filter((x) => !x.ok)) console.log(`  CONTRADICTED: ${r.claim}`);
 
 await rm(tempRoot, { recursive: true, force: true });
+
+if (results.some((r) => !r.ok)) process.exitCode = 1;

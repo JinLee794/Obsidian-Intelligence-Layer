@@ -32,7 +32,7 @@
     "test:startup:e2e": "node scripts/startup-contract.mjs",
     "verify:observed": "node scripts/verify-observed.mjs",
     "test:ux": "node scripts/consumer-ux-check.mjs",
-    "check:release": "npm run lint && npm test && npm run test:package && npm run test:startup:e2e",
+    "check:release": "npm run lint && npm test && npm run test:package && npm run test:startup:e2e && npm run verify:observed",
     "lint": "tsc --noEmit -p tsconfig.check.json",
     "bench": "vitest bench",
     "bench:watch": "vitest bench --watch",
