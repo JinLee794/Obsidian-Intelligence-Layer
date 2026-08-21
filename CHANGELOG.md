@@ -105,8 +105,8 @@ which now returns an explained zero instead of lexical hits.
   (17,377 → 13,055 chars across ten representative calls) and nothing on the
   receiving end renders it.
 - **`path` is the reference; `ref` appears only when it adds information.** Every
-  list item and envelope carried the same string twice — about a third of a
-  `get_related_entities` payload. `ref` is now emitted only for section-scoped
+  list item and envelope carried the same string twice — about a quarter of a
+  `get_related_entities` payload (measured 26.7–27.2%). `ref` is now emitted only for section-scoped
   results, as `path#heading`. Removed `customer_ref`, `orphaned_meeting_refs`,
   and `query_frontmatter`'s duplicate `matches` array.
 - **The fuzzy tier no longer indexes note bodies.** BM25 already indexes them with
@@ -127,9 +127,9 @@ which now returns an explained zero instead of lexical hits.
   cannot make an ambiguous wikilink resolve differently run to run.
 - `get_health` no longer reports `tool_surface` — a hand-maintained literal
   restating a list the client already holds from `tools/list`.
-- Removed `searchVault()` (an unreachable duplicate of `cascadeSearch()` that
-  survived only in tests), the unregistered `orient` and `composite` modules, and
-  the superseded write-approval gate.
+- Removed `searchVault()` — live production code that `cascadeSearch()`
+  superseded, not a dead test-only duplicate — along with the unregistered
+  `orient` and `composite` modules and the superseded write-approval gate.
 - `bench/`, `scripts/` and `src/__tests__/` are type-checked by `npm run lint`
   via `tsconfig.check.json`. They were excluded, which is how a benchmark kept
   calling a deleted API unnoticed.
@@ -152,21 +152,32 @@ which now returns an explained zero instead of lexical hits.
   connects first and vault work runs behind a hydration gate.
 - **A burst of file changes no longer costs O(vault) per file.** The watcher gave
   every changed path its own debounce timer, so a sync, a `git pull` or a bulk
-  rename produced one re-index and one search invalidation *per file* — and each
-  of those rebuilt every backlink in the vault, 85% of the cost of an edit at
-  6,000 notes. Changes now collect into one window (300 ms trailing, shared across
-  paths, capped at 2 s so a continuous stream cannot defer indexing indefinitely)
-  and apply as a batch that re-resolves only the edited notes' own links. The
-  whole-vault pass is reserved for changes that alter what a wikilink can point
-  at: a renamed title, a note appearing, a note deleted. A 200-note burst:
-  **2,278 ms → 133 ms at 6,000 notes**, **427 ms → 97 ms at 379**.
+  rename produced one re-index and one search invalidation per filesystem
+  *event* — in practice more than one per file, since a newly synced note arrives
+  as both an `add` and a `change`: a 12-file burst produced 18 of each, against 3
+  now. Each of those rebuilt every backlink in the vault, 85% of the cost of an
+  edit at 6,000 notes. Changes now collect into one window (300 ms trailing,
+  shared across paths, capped at 2 s — measured from the first change of a
+  window, not from the previous flush — so a continuous stream cannot defer
+  indexing indefinitely) and apply as a batch that re-resolves only the edited
+  notes' own links. The whole-vault pass is reserved for changes that alter what
+  a wikilink can point at: a renamed title, a note appearing, a note deleted; a
+  bulk delete costs one pass, not one per note. The durable result is the shape:
+  a 200-note burst used to resolve 200 × vault-size notes (75,800 at 379 notes,
+  1,200,000 at 6,000) and now resolves exactly 200 at every vault size. Wall
+  clock on one machine, where the absolutes are I/O-bound: **2,278 ms → 133 ms at
+  6,000 notes**, **427 ms → 97 ms at 379**.
 - **A link whose target arrived later never resolved.** Re-resolution read from
   each note's already-resolved links, which by then held paths with anything
   unresolvable silently dropped — so the raw name was gone and no later pass could
   recover it. `[[Later]]` written before `Later.md` existed stayed broken for the
   life of the index, and the running index diverged permanently from what a
   rebuild produced. Resolution now reads the raw names that were being retained
-  for persistence all along, making it idempotent.
+  for persistence all along, making it idempotent. One divergence from a rebuild
+  remains and predates this release: where several notes answer to the same name,
+  which one an ambiguous link resolves to can still depend on the order the
+  changes arrived in. Every link resolves, and always to a note that legitimately
+  holds the name. See `KNOWN_ISSUES.md`.
 - **A repeat connect no longer re-reads the whole vault.** The persisted index was
   working, but everything behind it repeated every session and could repeat
   forever. `buildIncremental` stat'd notes one at a time while chokidar's
@@ -174,9 +185,12 @@ which now returns an explained zero instead of lexical hits.
   once — stats now issue with bounded parallelism and the two walks are
   serialised. Worse, indexing was never persisted unless it finished before the
   client disconnected, so any vault slow enough that re-indexing outlasts a
-  session *never converged*; the index now checkpoints during the rebuild, every
-  500 notes and at least every two seconds. Time to a hydrated 2,000-note index:
-  **4,989 ms → 1,004 ms**.
+  session *never converged*; the index now checkpoints during the rebuild, at the
+  128-note batch boundary that follows every 500 notes indexed or two seconds
+  elapsed — so a logged checkpoint lands at 512, not 500. Time to a hydrated
+  2,000-note index fell about **5x** (measured 4,989 ms → 1,004 ms on one
+  machine; the ratio is the durable result, the absolutes are I/O-bound and vary
+  with the storage under the vault).
 - **Revalidation no longer waits for the file watcher.** Serialising the two vault
   walks was right; the order was not. Gating revalidation behind the watcher's
   recursive scan meant any session shorter than that scan did no index work at
@@ -190,13 +204,25 @@ which now returns an explained zero instead of lexical hits.
   so its `onclose` never fires for a disconnect either. The server hung on stdin
   EOF until the client escalated, holding a watcher over the whole vault the
   entire time — observed leaking across sessions. stdin's hangup is now watched
-  directly. Durability does not depend on it: checkpointing is the guarantee,
+  directly, and the exit is prompt: measured across adversarial closes at every
+  point in the startup lifecycle, the process exits code 0 having run its
+  shutdown path, typically within 60–230 ms and at worst around half a second
+  mid-build. The one thing to know is that the clock starts when the transport
+  connects, not when stdin closes: a client that closes stdin before the
+  handshake completes waits for startup to reach the connect, then exits.
+  Durability does not depend on any of this: checkpointing is the guarantee,
   because no shutdown path can be relied on.
 - **A file-watcher error no longer kills the process.** `VaultWatcher` attached
   `add`/`change`/`unlink` handlers but no `error` handler, and a chokidar instance
   with zero `error` listeners *throws* on `emit("error")` — EMFILE, ENOSPC and
   EPERM are routine on Windows with OneDrive or antivirus in the path. The error
   is recorded in `get_health.watcher.last_error` and the watcher keeps serving.
+- **A corrupt persisted index is rebuilt rather than fatal.** A truncated or
+  malformed `_oil-graph.json` is discarded and the vault re-indexed; the server
+  reaches `ready` and answers normally. Note that a *truncated* file is discarded
+  silently — the "index corrupt, will rebuild" diagnostic covers version
+  mismatches and bad node shapes, so do not rely on a log line to tell you a
+  rebuild happened.
 - **A missing or unreachable vault is diagnosed, not fatal.** A nonexistent path
   exited 1 with a raw `ENOENT ... scandir` stack. Startup now preflights the
   vault, completes the handshake regardless, and retries with backoff, so a drive
@@ -265,7 +291,7 @@ which now returns an explained zero instead of lexical hits.
 - **The idle-schema guard measured the wrong string.** `totalSchemaChars()`
   stringified raw zod internals and silently dropped every `.describe()`, so it
   could not catch description bloat. It now sizes the JSON Schema the client
-  actually receives — real surface is 15 tools, 9,708 chars.
+  actually receives — real surface is 15 tools, 9,723 chars.
 - Stop reporting a name-fragment match as an identifier match:
   `ACC-NORTHWIND-001` ranked a note because the token `northwind` appeared in its
   title, returning the same results as the meaningless `NORTHWIND-001` with no way
@@ -287,8 +313,27 @@ which now returns an explained zero instead of lexical hits.
 
 ### Migration
 
-Nothing is required. One tool is added (`atomic_replace_section`, 14 → 15) and
-none are removed or renamed, so existing calls keep working. Worth knowing:
+One tool is added (`atomic_replace_section`, 14 → 15) and none are removed or
+renamed. Calls keep working, but **responses changed shape, and for four tools
+the change removes a container a 0.5.5 caller indexes into** — that is a crash,
+not a silent `undefined`, so read this list before upgrading:
+
+| Tool | Change | A naive 0.5.5 caller |
+| --- | --- | --- |
+| `search_vault` | bare array → `{count, tiers_used, escalated, results}` | **breaks** — array methods on an object |
+| `query_frontmatter` | `matches[]` removed | **breaks** — iterating `matches` |
+| `check_vault_health` | `orphaned_meeting_refs[]` removed | **breaks** — iterating the array |
+| `get_health` | `tool_surface{}` removed | **breaks** — property access on the object |
+| nine others | `ref` / `customer_ref` narrowed or dropped | degrades to `undefined` |
+| `atomic_append` | unchanged | unaffected |
+
+Also worth knowing:
+
+- **`matched_by` is always an array**, never a bare string — treat it as
+  `string[]`. It carries two entries when tiers co-match (`lexical+fuzzy`,
+  `lexical+semantic`).
+- **`search_vault`'s envelope fields are not all unconditional** — `escalated` is
+  present only when the cascade escalated. Read defensively.
 
 - **`semantic_search` answers differently.** It was fuzzy-plus-full-text under a
   semantic name; it is now embedding-backed. Callers that wanted the old broad
