@@ -109,6 +109,20 @@ than in 0.5.5.
   understate it rather than manufacture it. Also `index-liveness`,
   `semantic-probe`, `semantic-live-check`, `semantic-eval`, `rebuild-cost`,
   `tier-breakdown`, `floor-analysis` and `tool-surface-cost`.
+- **A committed golden set anyone can reproduce.** A 54-note eval vault and a
+  30-case golden set are checked into the repository rather than generated at
+  run time, spanning eight domains that share no vocabulary so a paraphrase query
+  has one defensible answer. The generator holds no PRNG, no UUID and no clock,
+  so `npm run eval:vault:regen` followed by a clean `git diff` **and** a clean
+  `git status` is the reproducibility check rather than a formality — both are
+  needed, because `git diff` normalises line endings and will report success
+  against a dirty tree on a `core.autocrlf=true` checkout. `.gitattributes` pins
+  these fixtures to `text eol=lf` so the two agree. The CI gate scores both
+  committed sets and asserts pass counts as fractions (`29/30`), so a failure
+  names its denominator; `bench/README.md` records how to re-derive every
+  published number and what one case is worth at each sample size. It exists
+  because the previous fixture — 12 notes against a top-10 window — pinned hit
+  rate at 100% and could not fail for a ranking regression at all.
 - **Consistency and soak suites** — a multi-turn suite over a generated
   1,500-note vault (identical repeat results, smaller `limit` a prefix of a
   larger one, every ref valid input to the next tool, facet counts agreeing with
@@ -143,17 +157,28 @@ than in 0.5.5.
   differ by design and are now weighted by evidence, so damping their internal
   ordering discards signal twice.
 
-  **This release publishes no before/after ranking numbers for that change, and
-  the reason is worth more than the numbers were.** Earlier drafts carried a hit
-  rate, a recall and an MRR delta from `bench/eval-golden.mjs`. Those were
-  produced by a harness that could not tell a ranking result from an
-  infrastructure failure, so they have been withdrawn rather than restated. The
-  demonstration is direct: with a proxy that serves Ollama's `/api/tags`
-  normally but returns HTTP 503 for embeddings after N calls, the pre-fix
-  harness printed `hit rate 75%, MRR 0.688, recall 71%` and **exited 0**, with
-  no warning. Per-call embedding failures were being scored as genuine, worse
-  rankings. The fixed harness against the identical proxy refuses to score,
-  names the affected cases, and exits non-zero.
+  **Measured on the committed 30-case golden set: mean reciprocal rank improves
+  from 0.875 to 0.894. Two of thirty cases improved, none regressed, twenty-eight
+  are unchanged. Hit rate is unchanged at 30/30 and recall at 97.8%.** Both
+  improvements are rank movements rather than new finds (`para-datacentre` 1→0,
+  `para-machine-failure` 3→2), and primary accuracy holds at 9/9. The comparison
+  was made by checking out the commit preceding both changes with `git archive`
+  into a scratch tree, building it, and scoring **both** builds with the same
+  external scorer against the same committed vault and dataset, so only `dist/`
+  differed.
+
+  **These numbers replace three earlier ones that were withdrawn, and the reason
+  matters more than the correction.** Earlier drafts claimed hit rate 87%→93%,
+  recall 72%→78% and MRR 0.664→0.707. Re-measurement shows hit rate and recall
+  do not move **at all** — 30/30 and 97.8% on both builds, identical to the digit
+  — and the MRR gain is **+0.019, not +0.043**. The original figures came from a
+  harness that could not tell a ranking result from an infrastructure failure.
+  The demonstration is direct: with a proxy that serves Ollama's `/api/tags`
+  normally but returns HTTP 503 for embeddings after N calls, the pre-fix harness
+  printed `hit rate 75%, MRR 0.688, recall 71%` and **exited 0**, with no
+  warning. Per-call embedding failures were being scored as genuine, worse
+  rankings. The fixed harness against the identical proxy refuses to score, names
+  the affected cases, and exits non-zero.
 
   Two things were ruled out along the way, both by direct measurement. The
   embedding model is deterministic — the same query embedded eight times over
@@ -162,17 +187,34 @@ than in 0.5.5.
   within one process and six separate processes produce byte-identical ranked
   lists with identical scores. The variance was never in the model or the
   cascade; it was load-dependent embedding failures being silently absorbed.
-  Re-measurement on a larger committed golden set is in flight and will be
-  published when it reproduces across repeated runs, or reported as inside the
-  noise band if it does not.
 
+  **The new figures are reproducible under the conditions that broke the old
+  ones.** Six consecutive runs on an idle machine are identical in every case
+  line and all five aggregates, and three further runs at ~90% sustained CPU —
+  the exact condition that produced the original 25-point spread — are
+  byte-identical to that baseline, hashing to `0509C57F75368869` all four ways.
+  That is nine identical scored runs spanning idle and saturated. The
+  before-build is independently reproducible too (3/3 identical).
+
+  One limitation is worth stating plainly: **hit rate is saturated at 100% on
+  this set for both builds, so it can demonstrate a regression but not an
+  improvement.** MRR is the only metric here with headroom. A set where hit rate
+  can move would need queries harder than a human would call unambiguous, and a
+  saturated honest set is preferable to a tuned one.
 
   The damping change remains a reasoned default rather than an observed
-  improvement. On every dataset in this repository, 60 and 10 produce identical
-  rankings (0 of 12 cases differ, across both harnesses) — and that result now
-  has a likely explanation rather than standing as evidence of no effect: the
+  improvement — and that now rests on measurement rather than on a fixture that
+  could not answer. Patching the constant in the built artifact and diffing full
+  ranked lists to nine decimal places across all 30 cases: every quality metric
+  is byte-identical for k=10 and k=60 (30/30, MRR 0.894, recall 98%, primary 9/9).
+  Scores change on 142 of 237 lines, but **ordering changes in exactly one case,
+  at ranks 2–6, entirely among notes irrelevant to that query — no relevant
+  document moves anywhere.** `ranking-strategies.mjs` agrees independently: k=10,
+  k=60 and k=200 all give MRR 0.869, so a 20× spread in the constant is
+  invisible. The earlier "0 of 12 cases differ" now has its explanation: the
   12-note fixture vault is smaller than the harness's own top-10 window, which
-  pins hit rate at 100% and leaves a fusion constant nothing to move.
+  pins hit rate at 100% and leaves a fusion constant nothing to move. That vault
+  cannot fail for a ranking regression at all.
 - **Responses are compact JSON.** Indentation was 25% of every payload
   (17,377 → 13,055 chars across ten representative calls) and nothing on the
   receiving end renders it.
@@ -578,6 +620,12 @@ Shipped deliberately, with the evidence that justified each call.
   ordinary English words embeds close enough to real prose to clear the floor.
   The separation is real but the margin is a few hundredths, so treat "no match"
   as reliable for pure nonsense and best-effort otherwise.
+- **The golden set's typo cases assert the fuzzy tier but do not forbid escalation.**
+  `expectTiers: ["fuzzy"]` passes today, and three of the five typo cases also
+  escalate to the semantic tier. That is recorded in the dataset rather than
+  hidden, but it means those cases assert "fuzzy participated", not "fuzzy alone
+  answered this". A change that quietly made semantic do the work would still
+  pass them.
 - **Semantic hits can still rank mid-page on some queries.** Coverage weighting
   and a smaller `k` moved the worst cases up sharply — worst observed
   first-relevant rank fell from 9 to 7 — but a correct answer can still land
