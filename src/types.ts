@@ -143,6 +143,32 @@ export interface OilConfig {
   search: SearchConfig;
   semantic: SemanticConfig;
   audit: AuditConfig;
+  /** Which layer supplied each overridable value. */
+  provenance: ConfigProvenance;
+}
+
+/**
+ * The configuration layer a value came from.
+ *
+ * Settings arrive from four places — flags beat environment variables, which
+ * beat `oil.config.yaml`, which beats the built-in defaults — and once merged
+ * the winner is indistinguishable from the losers. That matters when the server
+ * has to explain itself: telling someone the semantic tier was "disabled in
+ * oil.config.yaml" when they passed `--no-semantic` points them at a file that
+ * may not exist.
+ */
+export type ConfigSource = "default" | "oil.config.yaml" | "environment" | "flag";
+
+/** Where each overridable semantic setting came from. */
+export interface SemanticProvenance {
+  enabled: ConfigSource;
+  endpoint: ConfigSource;
+  model: ConfigSource;
+  minScore: ConfigSource;
+}
+
+export interface ConfigProvenance {
+  semantic: SemanticProvenance;
 }
 
 export interface SchemaConfig {

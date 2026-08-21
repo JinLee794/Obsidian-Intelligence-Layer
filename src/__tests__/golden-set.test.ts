@@ -13,12 +13,21 @@
 
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve, basename } from "node:path";
 import { GraphIndex } from "../graph.js";
 import { cascadeSearch } from "../search.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
-const DATASET = resolve(REPO_ROOT, "bench/datasets/fixture.golden.json");
+
+// Both committed sets run here. `fixture.golden.json` is twelve notes, which is
+// small enough that returning the top ten finds a relevant note almost however
+// it ranks; `eval.golden.json` is fifty-four notes across eight domains that
+// share no vocabulary, so it can still tell two rankings apart. A gate that only
+// runs the saturated set would pass through a regression the other one catches.
+const DATASETS = [
+  resolve(REPO_ROOT, "bench/datasets/fixture.golden.json"),
+  resolve(REPO_ROOT, "bench/datasets/eval.golden.json"),
+];
 
 interface GoldenCase {
   id: string;
@@ -31,22 +40,23 @@ interface GoldenCase {
   requiresSemantic?: boolean;
 }
 
-let graph: GraphIndex;
-let cases: GoldenCase[];
+for (const DATASET of DATASETS) {
+  let graph: GraphIndex;
+  let cases: GoldenCase[];
 
-beforeAll(async () => {
-  const dataset = JSON.parse(await readFile(DATASET, "utf-8")) as {
-    vault: string;
-    cases: GoldenCase[];
-  };
-  cases = dataset.cases.filter((c) => !c.requiresSemantic);
+  beforeAll(async () => {
+    const dataset = JSON.parse(await readFile(DATASET, "utf-8")) as {
+      vault: string;
+      cases: GoldenCase[];
+    };
+    cases = dataset.cases.filter((c) => !c.requiresSemantic);
 
-  graph = new GraphIndex(resolve(REPO_ROOT, dataset.vault));
-  await graph.build();
-});
+    graph = new GraphIndex(resolve(REPO_ROOT, dataset.vault));
+    await graph.build();
+  });
 
-describe("golden set — lexical tiers", () => {
-  it("covers every non-semantic scenario type", () => {
+  describe(`golden set — lexical tiers — ${basename(DATASET)}`, () => {
+    it("covers every non-semantic scenario type", () => {
     const scenarios = new Set(cases.map((c) => c.scenario));
     expect([...scenarios].sort()).toEqual(["attribute", "exact-entity", "identifier", "typo"]);
   });
@@ -60,6 +70,11 @@ describe("golden set — lexical tiers", () => {
         misses.push(`${testCase.id}: got ${JSON.stringify(paths.slice(0, 3))}`);
       }
     }
+    // Assert on a fraction, not a boolean, so a failure names the denominator.
+    // A bare percentage on a set this size lets one case moving look like a
+    // trend, which is how a single case flipping got published as a ranking
+    // improvement in this project.
+    expect(`${cases.length - misses.length}/${cases.length}`).toBe(`${cases.length}/${cases.length}`);
     expect(misses).toEqual([]);
   });
 
@@ -95,4 +110,5 @@ describe("golden set — lexical tiers", () => {
     }
     expect(violations).toEqual([]);
   });
-});
+  });
+}

@@ -31,6 +31,23 @@
  * Baselines are stored per mode. Scores with the semantic tier off are legitimately
  * lower, so comparing across modes would report a regression that is really just a
  * missing Ollama.
+ *
+ * ── Why this harness refuses to score ────────────────────────────────────────
+ *
+ * At runtime a failed embedding degrades to an empty result on purpose, so an
+ * unreachable Ollama never breaks a user's search. Measured, that same
+ * behaviour is a lie: the run reports a *lower quality score* when what actually
+ * happened was that the machine was busy. Observed directly on this repo, five
+ * runs of identical code gave hit rates of 100/100/100/92/92% and MRR
+ * 0.896/0.917/0.854/0.833/0.833 — a spread larger than any ranking change the
+ * release claimed, produced entirely by per-query embedder failures that the
+ * tier's own status never reflected because the status was sampled before the
+ * queries ran.
+ *
+ * So the harness snapshots the tier's degradation counters around every case.
+ * If any case was answered by a degraded tier, no metric is printed and the
+ * process exits non-zero. A refusal is a usable signal; a number that silently
+ * mixes infrastructure failure into retrieval quality is not.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -78,16 +95,41 @@ const config = await loadConfig(vaultPath);
 const graph = new GraphIndex(vaultPath);
 await graph.build();
 
+let semanticIndex = null;
 let semanticReady = false;
 if (!noSemantic && config.semantic.enabled) {
-  const semantic = new SemanticIndex(vaultPath, config.semantic);
-  attachSemanticIndex(graph, semantic);
-  await semantic.load();
+  semanticIndex = new SemanticIndex(vaultPath, config.semantic);
+  attachSemanticIndex(graph, semanticIndex);
+  await semanticIndex.load();
   process.stdout.write(`Embedding ${graph.nodeCount} notes... `);
-  await semantic.refresh(graph);
-  semanticReady = semantic.status === "ready";
-  console.log(semanticReady ? "ready." : `${semantic.status}: ${semantic.stats.reason}`);
+  await semanticIndex.refresh(graph);
+  semanticReady = semanticIndex.status === "ready";
+  console.log(semanticReady ? "ready." : `${semanticIndex.status}: ${semanticIndex.stats.reason}`);
 }
+
+/**
+ * A semantic run was asked for and could not be delivered.
+ *
+ * Falling back to lexical numbers here would be the same laundering the
+ * per-case check exists to stop, one level up: the run would print a real-looking
+ * score for a configuration nobody asked to measure. `--no-semantic` is how you
+ * ask for a lexical measurement.
+ */
+if (!noSemantic && config.semantic.enabled && !semanticReady) {
+  console.error(
+    `\nREFUSING TO SCORE: a semantic run was requested but the tier is ` +
+      `${semanticIndex?.status ?? "absent"} (${semanticIndex?.stats.reason ?? "no index"}).\n` +
+      `  Start Ollama, or pass --no-semantic to measure the lexical tiers on purpose.\n`,
+  );
+  process.exit(2);
+}
+
+/** Failures the tier absorbed so far, or null when there is no tier to ask. */
+const degradationCount = () => {
+  if (!semanticIndex) return null;
+  const { queryFailures, indexFailures } = semanticIndex.degradation;
+  return queryFailures + indexFailures;
+};
 
 // ─── Metrics ──────────────────────────────────────────────────────────────────
 
@@ -101,6 +143,8 @@ function reciprocalRank(paths, relevant) {
 
 const results = [];
 const skipped = [];
+/** Cases whose answer was shaped by an embedder failure rather than by ranking. */
+const degraded = [];
 
 for (const testCase of dataset.cases) {
   // A case that only makes sense with embeddings is not a failure without them.
@@ -109,7 +153,21 @@ for (const testCase of dataset.cases) {
     continue;
   }
 
+  const failuresBefore = degradationCount();
   const { results: hits, tiersUsed } = await cascadeSearch(graph, testCase.query, limit, undefined);
+  const failuresAfter = degradationCount();
+
+  // The tier swallowed an error while answering *this* query, so whatever it
+  // returned describes the machine, not the ranking. Recording the case and
+  // continuing gives a complete picture of how bad the run was before refusing.
+  if (failuresBefore !== null && failuresAfter > failuresBefore) {
+    degraded.push({
+      id: testCase.id,
+      query: testCase.query,
+      reason: semanticIndex.degradation.lastReason,
+    });
+  }
+
   const paths = hits.map((h) => h.path);
   const relevant = testCase.relevant ?? [];
 
@@ -139,6 +197,27 @@ for (const testCase of dataset.cases) {
   });
 }
 
+// ─── Refuse a degraded run ────────────────────────────────────────────────────
+
+// Anything below this point turns the per-case record into a published number.
+// A run where the embedder failed has no number worth publishing, so it stops
+// here rather than averaging an infrastructure fault into a quality metric.
+if (degraded.length > 0) {
+  console.error(`\n${"═".repeat(78)}`);
+  console.error(`REFUSING TO SCORE: the semantic tier failed on ${degraded.length} of ${results.length} case(s).`);
+  console.error("═".repeat(78));
+  for (const d of degraded) {
+    console.error(`  ${d.id.padEnd(28)} "${d.query}"`);
+    console.error(`  ${" ".repeat(28)} ${d.reason}`);
+  }
+  console.error(
+    `\n  Those cases were answered without embeddings, so their ranks measure the\n` +
+      `  machine rather than the code. Re-run on an idle machine, or raise\n` +
+      `  OIL_SEMANTIC_TIMEOUT_MS (currently ${config.semantic.timeoutMs}ms per input).\n`,
+  );
+  process.exit(2);
+}
+
 // ─── Aggregate ────────────────────────────────────────────────────────────────
 
 const byScenario = new Map();
@@ -150,6 +229,22 @@ for (const r of results) {
 
 const mean = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0);
 
+/**
+ * Counts behind each rate.
+ *
+ * A percentage on a set this size is a trap: at N=12, one case moving is eight
+ * points, which reads like a trend and is not. Printing `11/12` beside `92%`
+ * makes the sample size impossible to overlook — the published 87%→93% claim
+ * this harness is meant to support was 13/15→14/15, a single case.
+ */
+const counts = {
+  hit: results.filter((r) => r.hit).length,
+  primary: results.filter((r) => r.primaryOk === true).length,
+  primary_total: results.filter((r) => r.primaryOk !== null).length,
+  tier: results.filter((r) => r.tierOk).length,
+  recall_total: results.filter((r) => r.recall !== null).length,
+};
+
 const summary = {
   dataset: dataset.name ?? datasetPath,
   mode: noSemantic ? "lexical" : semanticReady ? "semantic" : "lexical",
@@ -157,17 +252,23 @@ const summary = {
   skipped: skipped.length,
   semantic: noSemantic ? "off" : semanticReady ? "on" : "unavailable",
   hit_rate: Number(mean(results.map((r) => (r.hit ? 1 : 0))).toFixed(4)),
+  hit_count: counts.hit,
   mrr: Number(mean(results.map((r) => r.rr)).toFixed(4)),
   recall: Number(mean(results.filter((r) => r.recall !== null).map((r) => r.recall)).toFixed(4)),
+  recall_cases: counts.recall_total,
   primary_accuracy: Number(
     mean(results.filter((r) => r.primaryOk !== null).map((r) => (r.primaryOk ? 1 : 0))).toFixed(4),
   ),
+  primary_count: counts.primary,
+  primary_cases: counts.primary_total,
   tier_routing: Number(mean(results.map((r) => (r.tierOk ? 1 : 0))).toFixed(4)),
+  tier_count: counts.tier,
   by_scenario: Object.fromEntries(
     [...byScenario].map(([scenario, bucket]) => [
       scenario,
       {
         cases: bucket.length,
+        hit_count: bucket.filter((r) => r.hit).length,
         hit_rate: Number(mean(bucket.map((r) => (r.hit ? 1 : 0))).toFixed(4)),
         mrr: Number(mean(bucket.map((r) => r.rr)).toFixed(4)),
       },
@@ -199,11 +300,14 @@ console.log(`\n${"─".repeat(78)}`);
 if (skipped.length > 0) {
   console.log(`  skipped           ${skipped.length} case(s) needing the semantic tier: ${skipped.join(", ")}`);
 }
-console.log(`  hit rate          ${pct(summary.hit_rate)}`);
-console.log(`  MRR               ${summary.mrr.toFixed(3)}`);
-console.log(`  recall            ${pct(summary.recall)}`);
-console.log(`  primary accuracy  ${pct(summary.primary_accuracy)}`);
-console.log(`  tier routing      ${pct(summary.tier_routing)}`);
+console.log(`  hit rate          ${pct(summary.hit_rate)}   (${counts.hit}/${results.length})`);
+console.log(`  MRR               ${summary.mrr.toFixed(3)}   (over ${results.length} case(s))`);
+console.log(`  recall            ${pct(summary.recall)}   (mean over ${counts.recall_total} case(s))`);
+console.log(
+  `  primary accuracy  ${pct(summary.primary_accuracy)}   (${counts.primary}/${counts.primary_total})`,
+);
+console.log(`  tier routing      ${pct(summary.tier_routing)}   (${counts.tier}/${results.length})`);
+console.log(`\n  One case is worth ${(100 / results.length).toFixed(1)} points of hit rate at this sample size.`);
 console.log();
 
 // ─── Baseline ─────────────────────────────────────────────────────────────────

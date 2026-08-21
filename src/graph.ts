@@ -31,6 +31,74 @@ interface PersistedGraph {
   nodes: PersistedGraphNode[];
 }
 
+/** A note read from disk, not yet folded into the index. */
+interface ParsedNote {
+  path: string;
+  mtimeMs: number;
+  title: string;
+  wikilinks: string[];
+  tags: string[];
+  headings: string[];
+  bodySnippet: string;
+  frontmatter: Record<string, unknown>;
+}
+
+/**
+ * How many vault files to have open at once.
+ *
+ * Indexing is latency-bound rather than CPU-bound — on a synced or network
+ * vault a single stat or read costs tens of milliseconds — so the work wants to
+ * be overlapped. Bounded because an unbounded fan-out over a large vault
+ * exhausts file descriptors (EMFILE), which is the failure this server is least
+ * able to afford.
+ */
+const IO_CONCURRENCY = 32;
+
+/**
+ * Notes to re-index between checkpoint saves.
+ *
+ * Small enough that a session ending mid-rebuild loses seconds of work rather
+ * than all of it; large enough that the save itself stays a rounding error.
+ */
+const CHECKPOINT_EVERY = 500;
+
+/**
+ * Longest a rebuild may run without persisting anything.
+ *
+ * The note threshold alone assumes a rebuild rate. Where that assumption fails
+ * — large notes, a slow disk, an on-access virus scanner — a short session can
+ * end having saved nothing at all, and repeat the same work on every connect.
+ * Two seconds is well inside the window a client allows between disconnecting
+ * and killing the process.
+ */
+const CHECKPOINT_INTERVAL_MS = 2000;
+
+/**
+ * Notes re-read per batch.
+ *
+ * Decoupled from the checkpoint thresholds so that progress can be measured
+ * often enough for a time-based checkpoint to be responsive.
+ */
+const BATCH_SIZE = 128;
+
+/** Run `fn` over `items` with at most `limit` in flight, preserving order. */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 // ─── Graph Index ──────────────────────────────────────────────────────────────
 
 /**
@@ -49,6 +117,27 @@ export class GraphIndex {
   private tagIndex = new Map<string, Set<string>>();
   /** title (lowercase) → path — for resolving wikilinks by title */
   private titleIndex = new Map<string, string>();
+  /**
+   * Set while the set of names a wikilink can resolve through has changed but
+   * the whole-vault resolve that change demands has not run yet.
+   *
+   * A note's body can be rewritten without affecting how any *other* note's
+   * links resolve; its title or filename changing, or the note appearing or
+   * disappearing, can affect all of them. Telling those two apart is what lets
+   * an ordinary edit skip the full pass.
+   *
+   * Sticky, rather than a counter compared across an update, because a removal
+   * raises it *before* the next batch starts: a batch snapshotting a counter on
+   * entry would take that snapshot after the bump, see no difference, and skip
+   * the very resolve the removal needed.
+   */
+  private _namesDirty = false;
+  /**
+   * Names given up by a removal or a retitle that another live note may still
+   * answer to. Recorded rather than chased down there and then, so a bulk
+   * delete pays one pass over the vault instead of one per file.
+   */
+  private orphanedNames = new Set<string>();
   /** path → raw wikilink targets (before resolution) — kept for persistence */
   private rawOutLinks = new Map<string, string[]>();
   /** path → file mtime (ms) — for incremental rebuild */
@@ -58,6 +147,8 @@ export class GraphIndex {
   private _lastIndexed: Date = new Date();
   private _building = false;
   private _version = 0;
+  /** Mutations not yet persisted. Drives save-on-shutdown. */
+  private _dirty = false;
 
   /**
    * Recent per-note mutations, so a derived index can refresh only what moved.
@@ -94,7 +185,25 @@ export class GraphIndex {
     return this._building;
   }
 
+  /**
+   * True when the in-memory index holds work that is not on disk.
+   *
+   * Indexing that is never persisted is indexing that runs again next session,
+   * so callers save on the way out rather than discarding it.
+   */
+  get dirty(): boolean {
+    return this._dirty;
+  }
+
+  /** Persist only if there is something to persist. */
+  async flush(graphIndexFile: string): Promise<boolean> {
+    if (!this._dirty) return false;
+    await this.saveToDisk(graphIndexFile);
+    return true;
+  }
+
   private recordMutation(path: string): void {
+    this._dirty = true;
     this.mutationLog.push({ version: this._version, path });
     if (this.mutationLog.length > GraphIndex.MUTATION_LOG_LIMIT) {
       const dropped = this.mutationLog.splice(
@@ -146,13 +255,19 @@ export class GraphIndex {
 
     const notePaths = await listAllNotes(this.vaultPath);
 
-    // Phase 1: Parse all notes, collect outlinks and metadata
-    for (const notePath of notePaths) {
-      await this.indexNote(notePath);
+    // Phase 1: Read all notes in parallel, then fold them in list order so the
+    // result does not depend on which read finished first.
+    const parsed = await mapWithConcurrency(notePaths, IO_CONCURRENCY, (notePath) =>
+      this.readNote(notePath),
+    );
+    for (const note of parsed) {
+      if (note) this.applyNote(note);
     }
 
     // Phase 2: Resolve wikilinks → paths and compute backlinks
     this.resolveLinks();
+    this.orphanedNames.clear();
+    this._namesDirty = false;
 
     this._lastIndexed = new Date();
     this._building = false;
@@ -162,88 +277,128 @@ export class GraphIndex {
    * Parse a single note and add it to the index.
    */
   private async indexNote(notePath: string): Promise<void> {
+    const parsed = await this.readNote(notePath);
+    if (parsed) this.applyNote(parsed);
+  }
+
+  /**
+   * Read and parse a note without touching the index.
+   *
+   * Split from the mutation half so many notes can be read at once: vault IO is
+   * latency-bound, and doing it one note at a time is what made indexing scale
+   * with vault size. Returns null for anything unreadable — a file that
+   * disappeared mid-walk is normal, not an error.
+   */
+  private async readNote(notePath: string): Promise<ParsedNote | null> {
     try {
       const fullPath = join(this.vaultPath, notePath);
-      const raw = await readFile(fullPath, "utf-8");
+      const [raw, fileStat] = await Promise.all([
+        readFile(fullPath, "utf-8"),
+        stat(fullPath).catch(() => null),
+      ]);
       // Normalize CRLF up front — heading/tag regexes below use `.` and `$`,
       // neither of which tolerates a trailing "\r".
       const { data: frontmatter, content } = matter(normalizeLineEndings(raw));
 
-      // Track mtime for incremental rebuild
-      try {
-        const fileStat = await stat(fullPath);
-        this.fileMtimes.set(notePath, fileStat.mtimeMs);
-      } catch {
-        // Use current time if stat fails
-        this.fileMtimes.set(notePath, Date.now());
-      }
-
-      const title = this.extractTitle(notePath, content);
-      const wikilinks = extractWikilinks(content);
-      const tags = this.extractTags(frontmatter, content);
-      const headings = this.extractHeadings(content);
-      const bodySnippet = content.slice(0, 10_000);
-
-      this._version++;
-      this.recordMutation(notePath);
-
-      // Store raw wikilink targets for persistence
-      this.rawOutLinks.set(notePath, wikilinks);
-
-      const node: GraphNode = {
+      return {
         path: notePath,
-        title,
-        tags,
-        headings,
-        bodySnippet,
+        mtimeMs: fileStat?.mtimeMs ?? Date.now(),
+        title: this.extractTitle(notePath, content),
+        wikilinks: extractWikilinks(content),
+        tags: this.extractTags(frontmatter, content),
+        headings: this.extractHeadings(content),
+        bodySnippet: content.slice(0, 10_000),
         frontmatter: frontmatter as Record<string, unknown>,
-        outLinks: new Set(wikilinks), // Temporarily stores link targets (names)
-        inLinks: new Set(),
       };
-
-      this.nodes.set(notePath, node);
-
-      // Index by title for wikilink resolution
-      this.titleIndex.set(title.toLowerCase(), notePath);
-      // Also index by filename without extension
-      const fileName = basename(notePath, extname(notePath));
-      this.titleIndex.set(fileName.toLowerCase(), notePath);
-
-      // Build tag index
-      for (const tag of tags) {
-        let paths = this.tagIndex.get(tag);
-        if (!paths) {
-          paths = new Set();
-          this.tagIndex.set(tag, paths);
-        }
-        paths.add(notePath);
-      }
     } catch {
-      // Skip files that can't be parsed
+      // Skip files that can't be read or parsed
+      return null;
+    }
+  }
+
+  /**
+   * Fold a parsed note into the index.
+   *
+   * Synchronous on purpose: callers apply in a stable order so that a title
+   * collision between two notes resolves the same way on every run, whichever
+   * read happened to finish first.
+   */
+  private applyNote(parsed: ParsedNote): void {
+    const notePath = parsed.path;
+
+    this.fileMtimes.set(notePath, parsed.mtimeMs);
+
+    this._version++;
+    this.recordMutation(notePath);
+
+    // Store raw wikilink targets for persistence
+    this.rawOutLinks.set(notePath, parsed.wikilinks);
+
+    const node: GraphNode = {
+      path: notePath,
+      title: parsed.title,
+      tags: parsed.tags,
+      headings: parsed.headings,
+      bodySnippet: parsed.bodySnippet,
+      frontmatter: parsed.frontmatter,
+      outLinks: new Set(parsed.wikilinks), // Temporarily stores link targets (names)
+      inLinks: new Set(),
+    };
+
+    this.nodes.set(notePath, node);
+
+    // Index by title for wikilink resolution
+    this.indexTitle(parsed.title.toLowerCase(), notePath);
+    // Also index by filename without extension
+    const fileName = basename(notePath, extname(notePath));
+    this.indexTitle(fileName.toLowerCase(), notePath);
+
+    // Build tag index
+    for (const tag of parsed.tags) {
+      let paths = this.tagIndex.get(tag);
+      if (!paths) {
+        paths = new Set();
+        this.tagIndex.set(tag, paths);
+      }
+      paths.add(notePath);
     }
   }
 
   /**
    * Resolve wikilink targets from names to paths, and compute backlinks.
+   *
+   * Resolution reads from `rawOutLinks`, not from `node.outLinks`. The latter
+   * has already been rewritten from names to paths by any earlier pass, with
+   * whatever failed to resolve dropped — so re-resolving from it could never
+   * recover a link that dangled at build time, and the index diverged
+   * permanently from a rebuild once a link's target arrived late.
    */
   private resolveLinks(): void {
-    for (const [path, node] of this.nodes) {
-      const resolvedLinks = new Set<string>();
-
-      for (const linkTarget of node.outLinks) {
-        const resolved = this.resolveWikilink(linkTarget);
-        if (resolved) {
-          resolvedLinks.add(resolved);
-          // Add backlink on the target node
-          const targetNode = this.nodes.get(resolved);
-          if (targetNode) {
-            targetNode.inLinks.add(path);
-          }
-        }
-      }
-
-      node.outLinks = resolvedLinks;
+    for (const path of this.nodes.keys()) {
+      this.resolveLinksForNote(path);
     }
+  }
+
+  /** Resolve just these notes' wikilinks, updating their targets' backlinks. */
+  private resolveLinksFor(notePaths: readonly string[]): void {
+    for (const notePath of notePaths) {
+      this.resolveLinksForNote(notePath);
+    }
+  }
+
+  private resolveLinksForNote(notePath: string): void {
+    const node = this.nodes.get(notePath);
+    if (!node) return;
+
+    const resolvedLinks = new Set<string>();
+    for (const linkTarget of this.rawOutLinks.get(notePath) ?? node.outLinks) {
+      const resolved = this.resolveWikilink(linkTarget);
+      if (!resolved) continue;
+      resolvedLinks.add(resolved);
+      this.nodes.get(resolved)?.inLinks.add(notePath);
+    }
+
+    node.outLinks = resolvedLinks;
   }
 
   /**
@@ -265,23 +420,119 @@ export class GraphIndex {
    * Re-index a single note after it changes on disk.
    */
   async updateNote(notePath: string): Promise<void> {
-    const key = normalizeNotePath(notePath);
-    // Remove old data
-    this.removeNote(key);
-    // Re-index
-    await this.indexNote(key);
-    // Full link re-resolution (could be optimised for single-note updates)
-    this.resolveAllBacklinks();
+    await this.updateNotes([notePath]);
+  }
+
+  /**
+   * Re-index a batch of notes, resolving links once for the whole batch.
+   *
+   * This used to be one note at a time, and each one triggered a full
+   * whole-vault backlink resolve — measured at 85% of the cost of an edit on a
+   * 6,000-note vault, and paid again for every file in a burst. A `git pull` or
+   * a sync touching 200 notes therefore cost 200 whole-vault resolves.
+   *
+   * Two things fix that. The batch resolves once rather than once per note; and
+   * where the batch has not changed any note's title or filename — an ordinary
+   * body edit, which is nearly every edit — only the edited notes' own links can
+   * have changed meaning, so the resolve is confined to them. Everyone else's
+   * backlinks are left standing rather than cleared and rebuilt.
+   */
+  async updateNotes(notePaths: readonly string[]): Promise<void> {
+    const keys = [...new Set(notePaths.map((p) => normalizeNotePath(p)))];
+    if (keys.length === 0) return;
+
+    const parsed = await mapWithConcurrency(keys, IO_CONCURRENCY, (key) => this.readNote(key));
+
+    const touched: string[] = [];
+
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const note = parsed[i];
+
+      if (!note) {
+        // Unreadable or gone: fall back to a plain removal, which also detaches
+        // it from every note that linked to it. Deferred, so a batch of them
+        // resolves once at the end rather than once apiece.
+        this.removeNoteDeferred(key);
+        continue;
+      }
+
+      // Other notes' links to this one are unaffected by its contents being
+      // rewritten, so they are carried across rather than destroyed and
+      // rebuilt. Detaching only the *outgoing* half is what makes this cheap.
+      const existing = this.nodes.get(key);
+      const inherited = existing ? new Set(existing.inLinks) : null;
+      if (existing) {
+        this.detachOutLinks(key, existing);
+        // A renamed note must give up the name it used to answer to. Only when
+        // it actually changed, so that the ordinary body edit leaves the epoch
+        // untouched and keeps the cheap path.
+        const previousTitle = existing.title.toLowerCase();
+        if (previousTitle !== note.title.toLowerCase()) {
+          this.unindexTitle(previousTitle, key);
+        }
+      }
+
+      this.applyNote(note);
+      if (inherited) {
+        const refreshed = this.nodes.get(key);
+        if (refreshed) refreshed.inLinks = inherited;
+      }
+      touched.push(key);
+    }
+
+    if (this._namesDirty) {
+      // A name entered or left the index, so links anywhere in the vault may
+      // resolve differently now. Nothing less than a full pass is correct.
+      this.resolveAllBacklinks();
+    } else {
+      this.resolveLinksFor(touched);
+    }
+  }
+
+  /**
+   * Detach a note's outgoing links without disturbing its incoming ones.
+   *
+   * The tag index goes too, since `applyNote` will re-add both from the freshly
+   * parsed note.
+   */
+  private detachOutLinks(notePath: string, node: GraphNode): void {
+    for (const targetPath of node.outLinks) {
+      this.nodes.get(targetPath)?.inLinks.delete(notePath);
+    }
+    for (const tag of node.tags) {
+      this.tagIndex.get(tag)?.delete(notePath);
+    }
   }
 
   /**
    * Remove a note from the index.
    */
   removeNote(notePath: string): void {
+    this.removeNotes([notePath]);
+  }
+
+  /**
+   * Remove a batch of notes, resolving once for the whole batch.
+   *
+   * A removal can change what a wikilink points at — it frees the names the
+   * note answered to — so it needs the whole-vault pass. Taking it once per
+   * batch rather than once per note is what keeps a bulk delete off the
+   * O(vault)-per-file path that a burst of edits already avoids.
+   */
+  removeNotes(notePaths: readonly string[]): void {
+    for (const notePath of notePaths) {
+      this.removeNoteDeferred(notePath);
+    }
+    this.settleNameChanges();
+  }
+
+  /** Remove without settling names — for callers that resolve once at the end. */
+  private removeNoteDeferred(notePath: string): void {
     const key = normalizeNotePath(notePath);
     const node = this.nodes.get(key);
     if (!node) return;
-    return this.removeNodeInternal(key, node);
+    this.removeNodeInternal(key, node);
   }
 
   private removeNodeInternal(notePath: string, node: GraphNode): void {
@@ -308,25 +559,86 @@ export class GraphIndex {
     this.fileMtimes.delete(notePath);
     // Clean title index
     const title = node.title.toLowerCase();
-    if (this.titleIndex.get(title) === notePath) {
-      this.titleIndex.delete(title);
-    }
+    this.unindexTitle(title, notePath);
     const fileName = basename(notePath, extname(notePath)).toLowerCase();
-    if (this.titleIndex.get(fileName) === notePath) {
-      this.titleIndex.delete(fileName);
+    this.unindexTitle(fileName, notePath);
+  }
+
+  /**
+   * Record a name that a wikilink may resolve through.
+   *
+   * Routed through here so the epoch can be bumped, which is what tells a
+   * single-note update whether it is allowed to take the cheap path: while the
+   * set of resolvable names is unchanged, no *other* note's links can have
+   * started or stopped resolving, so only the edited note's own links need
+   * revisiting.
+   */
+  private indexTitle(key: string, notePath: string): void {
+    if (this.titleIndex.get(key) === notePath) return;
+    this.titleIndex.set(key, notePath);
+    this._namesDirty = true;
+  }
+
+  /** Drop a name, if this note is the one currently claiming it. */
+  private unindexTitle(key: string, notePath: string): void {
+    if (this.titleIndex.get(key) !== notePath) return;
+    this.titleIndex.delete(key);
+    // Another note may answer to this name and be waiting to inherit it.
+    this.orphanedNames.add(key);
+    this._namesDirty = true;
+  }
+
+  /**
+   * Give away names that a removal or a retitle left unclaimed but which other
+   * live notes still answer to.
+   *
+   * Only one note can own a name, so the index stores the claimant and nothing
+   * else. That makes losing the claimant indistinguishable from the name never
+   * having existed, and strands every link pointing at it: a rebuild resolves
+   * them to the surviving note, while the live index resolved them nowhere and
+   * never recovered, because no later edit revisits a name it does not hold.
+   *
+   * One pass over the vault per batch rather than a search per removal, so a
+   * bulk delete costs what a single one does. Notes are visited in insertion
+   * order and the last match wins, which is the rule a build from scratch uses;
+   * where insertion order has itself drifted from disk order, so does the pick,
+   * but only between notes that are equally valid answers to the name.
+   */
+  private reclaimOrphanedNames(): void {
+    if (this.orphanedNames.size === 0) return;
+    const unclaimed = new Set(
+      [...this.orphanedNames].filter((name) => !this.titleIndex.has(name)),
+    );
+    this.orphanedNames.clear();
+    if (unclaimed.size === 0) return;
+
+    for (const [notePath, node] of this.nodes) {
+      const title = node.title.toLowerCase();
+      if (unclaimed.has(title)) this.indexTitle(title, notePath);
+      const fileName = basename(notePath, extname(notePath)).toLowerCase();
+      if (fileName !== title && unclaimed.has(fileName)) this.indexTitle(fileName, notePath);
     }
+  }
+
+  /** Run the whole-vault resolve an outstanding name change requires. */
+  private settleNameChanges(): void {
+    if (this._namesDirty) this.resolveAllBacklinks();
   }
 
   /**
    * Recompute all backlinks from scratch (used after incremental updates).
    */
   private resolveAllBacklinks(): void {
+    // Names first: a link cannot resolve through a name no note claims, so
+    // re-homing has to happen before anything is resolved against the index.
+    this.reclaimOrphanedNames();
     // Clear all backlinks
     for (const node of this.nodes.values()) {
       node.inLinks.clear();
     }
     // Recompute
     this.resolveLinks();
+    this._namesDirty = false;
   }
 
   // ─── Persistence ─────────────────────────────────────────────────────
@@ -379,6 +691,7 @@ export class GraphIndex {
       throw err;
     }
     await this.sweepStaleTemps(fullPath);
+    this._dirty = false;
     console.error(`[OIL] Graph index saved: ${persistedNodes.length} nodes.`);
   }
 
@@ -471,6 +784,8 @@ export class GraphIndex {
 
       // Resolve wikilinks → paths and compute backlinks
       this.resolveLinks();
+      this.orphanedNames.clear();
+      this._namesDirty = false;
 
       this._lastIndexed = new Date(data.builtAt);
       console.error(`[OIL] Graph index loaded from disk: ${this.nodes.size} nodes.`);
@@ -481,10 +796,18 @@ export class GraphIndex {
     } catch (err) {
       // A missing index is the normal first-run case; anything else is a
       // silent downgrade to a full rebuild and worth naming.
+      //
+      // This says "corrupt" and "rebuild" because its three siblings above do,
+      // and an operator scanning startup logs for a discarded index should not
+      // have to know which of four failure modes they hit to find the line. A
+      // truncated file lands here rather than on the shape checks, and the
+      // earlier wording ("unreadable ... falling back to full build") shared no
+      // vocabulary with them — enough to convince a reader the case logged
+      // nothing at all.
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
         console.error(
-          `[OIL] Graph index unreadable (${code ?? (err as Error).message}) — falling back to full build.`,
+          `[OIL] Graph index corrupt or unreadable (${code ?? (err as Error).message}) — will rebuild.`,
         );
       }
       return false;
@@ -514,34 +837,75 @@ export class GraphIndex {
         }
       }
 
-      const vaultNotes = new Set(await listAllNotes(this.vaultPath));
+      const vaultNotes = await listAllNotes(this.vaultPath);
+      const present = new Set(vaultNotes);
       let reindexed = 0;
 
       // Remove notes that no longer exist in the vault
       for (const path of [...this.nodes.keys()]) {
-        if (!vaultNotes.has(path)) {
-          this.removeNote(path);
+        if (!present.has(path)) {
+          this.removeNoteDeferred(path);
           reindexed++;
         }
       }
 
-      // Check each vault note against persisted mtime
-      for (const notePath of vaultNotes) {
-        const fullPath = join(this.vaultPath, notePath);
-        let currentMtime: number;
+      // Revalidate against disk. One stat per note, but issued in parallel:
+      // sequentially this is the single most expensive thing a warm start does,
+      // and on a synced or network vault each stat carries real latency.
+      const mtimes = await mapWithConcurrency(vaultNotes, IO_CONCURRENCY, async (notePath) => {
         try {
-          const fileStat = await stat(fullPath);
-          currentMtime = fileStat.mtimeMs;
+          return (await stat(join(this.vaultPath, notePath))).mtimeMs;
         } catch {
-          continue; // file disappeared
+          return null; // file disappeared
+        }
+      });
+
+      const changed = vaultNotes.filter((notePath, i) => {
+        const currentMtime = mtimes[i];
+        if (currentMtime === null) return false;
+        const cachedMtime = this.fileMtimes.get(notePath);
+        return cachedMtime === undefined || Math.abs(currentMtime - cachedMtime) > 1;
+      });
+
+      // Re-read changed notes in batches, persisting as we go. A mass
+      // invalidation — a sync, a restore, a `git pull`, any of which rewrites
+      // mtimes wholesale — can take longer than the session that discovered it.
+      // Without checkpoints that work is lost on disconnect and repeated in
+      // full next time, so a short-session client never converges.
+      //
+      // Checkpoints are triggered by elapsed time as well as note count,
+      // because count alone assumes a rebuild rate. A vault of large notes on a
+      // slow or scanned disk can spend an entire short session without reaching
+      // the note threshold, save nothing, and so repeat that work forever.
+      let sinceCheckpoint = 0;
+      let lastCheckpoint = Date.now();
+      for (let offset = 0; offset < changed.length; offset += BATCH_SIZE) {
+        const batch = changed.slice(offset, offset + BATCH_SIZE);
+        const parsed = await mapWithConcurrency(batch, IO_CONCURRENCY, (notePath) =>
+          this.readNote(notePath),
+        );
+        for (let i = 0; i < batch.length; i++) {
+          this.removeNoteDeferred(batch[i]);
+          const note = parsed[i];
+          if (note) this.applyNote(note);
+          reindexed++;
+          sinceCheckpoint++;
         }
 
-        const cachedMtime = this.fileMtimes.get(notePath);
-        if (cachedMtime === undefined || Math.abs(currentMtime - cachedMtime) > 1) {
-          // Note is new or changed — re-index it
-          this.removeNote(notePath);
-          await this.indexNote(notePath);
-          reindexed++;
+        const isLastBatch = offset + BATCH_SIZE >= changed.length;
+        const due =
+          sinceCheckpoint >= CHECKPOINT_EVERY ||
+          Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS;
+        if (!isLastBatch && due) {
+          this.resolveAllBacklinks();
+          await this.saveToDisk(graphIndexFile).catch((err) =>
+            console.error("[OIL] Index checkpoint failed (continuing):", err),
+          );
+          sinceCheckpoint = 0;
+          lastCheckpoint = Date.now();
+          console.error(
+            `[OIL] Re-indexing ${offset + batch.length}/${changed.length} — progress saved.`,
+          );
         }
       }
 

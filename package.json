@@ -1,6 +1,6 @@
 {
   "name": "@jinlee794/obsidian-intelligence-layer",
-  "version": "0.7.0-beta.1",
+  "version": "0.6.0",
   "description": "Obsidian Intelligence Layer — Knowledge Layer MCP Server for AI Agent Workflows",
   "type": "module",
   "publishConfig": {
@@ -27,9 +27,12 @@
     "prepublishOnly": "npm run check:release",
     "test": "vitest run",
     "test:perf": "vitest run src/__tests__/perf-regression.test.ts",
+    "test:startup": "vitest run src/__tests__/startup-contract.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
+    "test:startup:e2e": "node scripts/startup-contract.mjs",
+    "verify:observed": "node scripts/verify-observed.mjs",
     "test:ux": "node scripts/consumer-ux-check.mjs",
-    "check:release": "npm run lint && npm test && npm run test:package",
+    "check:release": "npm run lint && npm test && npm run test:package && npm run test:startup:e2e && npm run verify:observed",
     "lint": "tsc --noEmit -p tsconfig.check.json",
     "bench": "vitest bench",
     "bench:watch": "vitest bench --watch",
@@ -39,7 +42,10 @@
     "eval:baseline": "node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json --baseline",
     "eval:check": "node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json --compare",
     "eval:lexical": "node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json --no-semantic --compare",
-    "eval:strategies": "node bench/ranking-strategies.mjs"
+    "eval:strategies": "node bench/ranking-strategies.mjs",
+    "eval:vault": "node bench/eval-golden.mjs --dataset=bench/datasets/eval.golden.json",
+    "eval:vault:strategies": "node bench/ranking-strategies.mjs --dataset=bench/datasets/eval.golden.json",
+    "eval:vault:regen": "node bench/fixtures/generate-eval-vault.mjs"
   },
   "keywords": [
     "mcp",

@@ -210,7 +210,7 @@ Use this first when a client needs fast runtime state without paying the cost of
 
 | Tool | What It Does |
 |---|---|
-| `get_health` | Returns server identity, live tool-surface counts, index freshness, cache stats, watcher state, and whether audit logs are available. This is the summary visibility tool; use `get_agent_log` only when you need detailed write history. |
+| `get_health` | Returns server identity, startup phase, live tool-surface counts, index freshness, cache stats, watcher state, and whether audit logs are available. This is the summary visibility tool, and the one tool that answers during startup — use it to find out why other calls are waiting. Use `get_agent_log` only when you need detailed write history. |
 
 ### Search & Inspect (5 tools) — Token-efficient reads
 
@@ -351,7 +351,9 @@ audit:
 
 ```
 src/
-├── index.ts          # Entry point — startup sequence, tool registration, shutdown
+├── index.ts          # Process entry — crash guards, transport connect, shutdown
+├── server.ts         # Server assembly — tool registration, hydration gating, startup order
+├── hydration.ts      # Hydration gate — background vault load with backoff retry
 ├── cli.ts            # CLI wrapper — .env loading, subcommand routing
 ├── types.ts          # Shared TypeScript types (NoteRef, OilConfig, etc.)
 ├── config.ts         # Reads oil.config.yaml from vault root; merges with defaults
@@ -405,13 +407,20 @@ When `node dist/index.js` runs:
 ```
 1. Read OBSIDIAN_VAULT_PATH env var
 2. Load oil.config.yaml (or use defaults)
-3. Load graph index from _oil-graph.json (or full-build if first run)
-4. Start incremental graph rebuild in background (if persisted index found)
-5. Initialize session cache (in-memory, 200-note LRU)
-6. Start chokidar file watcher (invalidates caches on vault changes)
-7. Register 13 MCP tools (core + retrieve + write + domain)
-8. Connect stdio transport → server ready
+3. Register the MCP tools (core + retrieve + write + domain)
+4. Connect stdio transport → client sees a live server
+
+   ...then, in the background (the "hydration gate"):
+
+5. Preflight the vault path
+6. Load graph index from _oil-graph.json (or full-build if first run)
+7. Load persisted vectors for the semantic tier
+8. Revalidate notes that changed since the index was written
+9. Start chokidar file watcher (invalidates caches on vault changes)
 ```
+
+Steps 5-9 do not block the handshake. See
+[Startup: the handshake comes first](#startup-the-handshake-comes-first).
 
 ### Request Flow (Example: read the Team section from a customer note)
 
@@ -435,6 +444,93 @@ The agent gets **just the section it needs** — not the entire note.
 ---
 
 ## Architecture Deep Dive
+
+### Startup: the handshake comes first
+
+An MCP client can't tell "still indexing" apart from "dead" — it only sees an
+`initialize` that hasn't answered, and it gives up at 60s. So OIL connects the
+transport *before* it touches the vault:
+
+```
+connect stdio transport  ──▶  client sees a live server (~700ms, any vault size)
+        │
+        └─ hydration gate (background)
+             ├─ preflight vault path
+             ├─ load or build the graph index
+             ├─ load persisted vectors
+             └─ start the file watcher
+```
+
+Tool calls arriving during hydration **await the gate** rather than failing, so a
+caller sees a slower first call and never a dead server. `get_health` is
+deliberately ungated — it is how you find out what the others are waiting on:
+
+```json
+{ "startup": { "phase": "warming", "attempts": 1, "duration_ms": 1840 } }
+```
+
+If hydration fails — vault not mounted yet, a synced folder mid-sync, a
+transient FS error — it retries with backoff (1s, 2s, 5s, 15s, 30s) and the
+failure reason is reported rather than thrown. A vault that appears late heals
+itself without a restart. Watcher errors (EMFILE, ENOSPC, EPERM — routine with
+OneDrive and antivirus on Windows) are recorded in
+`get_health.watcher.last_error` instead of killing the process.
+
+This contract is enforced by tests, not convention: `npm run test:startup`
+covers the ordering over an in-memory transport, and `npm run test:startup:e2e`
+spawns the built artifact over real stdio and fails a handshake budget.
+
+### Startup: the vault is read once, not once per connect
+
+Hydration is cheap on a repeat connect because the graph index is persisted to
+`_oil-graph.json` in the vault. A warm start loads it and then revalidates
+against disk — one `stat` per note, issued in parallel — re-reading only what
+actually moved:
+
+| Connect | Path | Notes re-read |
+|---|---|---|
+| First, or after the index is lost | full build | all |
+| Repeat, vault unchanged | load from disk | none |
+| Repeat, a few notes edited | load from disk | those notes |
+| After a sync, restore or `git pull` | load from disk | all, **once** |
+
+That last row is the case worth naming. Anything that rewrites mtimes without
+changing content invalidates every entry at once. It costs one re-index — and
+that result is *kept*, because the rebuild persists as it goes: every 500 notes,
+and at least every two seconds, so progress survives even on a slow vault where
+500 notes is a long way off.
+
+Checkpointing carries that guarantee on its own, deliberately. Clients do not
+ask a stdio server to stop, they kill it — the MCP SDK's own client sends
+`SIGTERM` and follows with `SIGKILL` two seconds later, and on Windows that
+first signal is a `TerminateProcess` that runs no handler at all. OIL does still
+flush on the way out, and does watch stdin for the hangup so that a graceful
+disconnect is both noticed and terminal (before that it hung until the client
+escalated to `SIGKILL`). But nothing on the shutdown path is *relied* on: only
+what is already on disk is guaranteed to survive.
+
+Revalidation runs *before* the file watcher's recursive scan rather than after
+it, so a connect traverses the vault once rather than twice — and in the order
+that matters. Revalidation is what lets a stale index converge, so it goes
+first; gating it behind the watcher meant any session shorter than the watcher's
+scan did no index work at all, and such a client never converged however often
+it reconnected.
+
+### Keeping up with edits
+
+Changes seen by the watcher are collected into one window rather than one per
+file, so a burst — a sync landing, a `git pull`, a bulk rename — is applied as a
+single batch: one pass over the changed notes, one search-index invalidation.
+The window is the usual 300ms trailing debounce, capped at 2s so a continuous
+stream of writes cannot defer indexing indefinitely.
+
+Within a batch, only the edited notes' own links are re-resolved. Rewriting a
+note's body cannot change how any *other* note's links resolve, so everyone
+else's backlinks are left standing. The whole-vault pass is kept for the changes
+that genuinely alter what a wikilink can point at: a renamed title, a note
+appearing, a note deleted. That is what keeps the cost of a burst roughly
+independent of vault size — a 200-note burst costs ~130ms on a 6,000-note vault,
+against ~2.3s when every edit triggered a full re-resolve.
 
 ### Index Stack
 

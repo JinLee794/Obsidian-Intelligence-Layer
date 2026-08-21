@@ -1,22 +1,16 @@
 /**
  * OIL — MCP Server
  * Obsidian Intelligence Layer server entry point.
- * Startup sequence: config → graph index → file watcher → session cache → tools → ready.
+ *
+ * Startup sequence: config → tools → transport connected → vault hydrates in
+ * the background. The handshake deliberately precedes all vault work: a stdio
+ * server that indexes before it connects makes its own availability a function
+ * of vault size and filesystem latency, and a client that times out waiting
+ * cannot tell "slow" from "broken".
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig } from "./config.js";
-import { GraphIndex } from "./graph.js";
-import { SessionCache } from "./cache.js";
-import { VaultWatcher } from "./watcher.js";
-import { SemanticIndex, attachSemanticIndex } from "./semantic.js";
-import { setExcludedFolders } from "./search.js";
-import { registerCoreTools } from "./tools/core.js";
-import { registerRetrieveTools } from "./tools/retrieve.js";
-import { registerWriteTools } from "./tools/write.js";
-import { registerDomainTools } from "./tools/domain.js";
-import { SERVER_NAME, SERVER_VERSION } from "./version.js";
+import { createOilServer } from "./server.js";
 
 async function main(): Promise<void> {
   // ── Resolve vault path ─────────────────────────────────────────────────
@@ -31,115 +25,57 @@ async function main(): Promise<void> {
 
   console.error(`[OIL] Starting — vault: ${vaultPath}`);
 
-  // ── 1. Load configuration ──────────────────────────────────────────────
-  console.error("[OIL] Loading configuration...");
-  const config = await loadConfig(vaultPath);
-  setExcludedFolders(config.search.excludeFolders);
-  if (config.search.excludeFolders.length > 0) {
-    console.error(
-      `[OIL] Search excludes: ${config.search.excludeFolders.join(", ")}`,
-    );
-  }
-  console.error("[OIL] Configuration loaded.");
+  installProcessGuards();
 
-  // ── 2. Build graph index (with persistence + background indexing) ─────
-  const graph = new GraphIndex(vaultPath);
-  const graphFile = config.search.graphIndexFile;
-
-  const loaded = await graph.loadFromDisk(graphFile);
-  if (loaded) {
-    // Persisted index loaded — start incremental rebuild in background
-    const stats = graph.getStats();
-    console.error(
-      `[OIL] Graph loaded from disk — ${stats.noteCount} notes. Incremental update in background.`,
-    );
-    setImmediate(async () => {
-      try {
-        await graph.buildIncremental(graphFile);
-      } catch (err) {
-        console.error("[OIL] Background incremental rebuild failed:", err);
-      }
-    });
-  } else {
-    // No persisted index — full build, with background fallback if slow
-    console.error("[OIL] No persisted graph index — full build...");
-    const startTime = Date.now();
-    await graph.build();
-    const elapsed = Date.now() - startTime;
-    const stats = graph.getStats();
-    console.error(
-      `[OIL] Graph index built in ${elapsed}ms — ${stats.noteCount} notes, ${stats.linkCount} links, ${stats.tagCount} tags.`,
-    );
-    // Await persistence before serving: an early shutdown would otherwise
-    // discard the index and force another full rebuild on the next start.
-    // Still non-fatal — persistence is only a startup optimisation.
-    await graph.saveToDisk(graphFile).catch((err) =>
-      console.error("[OIL] Failed to save graph index:", err),
-    );
-  }
-
-  // ── 3. Initialise session cache ────────────────────────────────────────
-  const cache = new SessionCache();
-
-  // ── 3b. Attach the semantic tier ──────────────────────────────────────
-  // Vectors load from the sidecar synchronously; embedding anything new is
-  // deferred so a cold vault (or a model that still has to be pulled) never
-  // delays the server becoming ready. Until it catches up, search runs lexical.
-  const semantic = new SemanticIndex(vaultPath, config.semantic);
-  attachSemanticIndex(graph, semantic);
-  await semantic.load();
-  if (config.semantic.enabled) {
-    console.error(
-      `[OIL] Semantic tier: ${semantic.stats.note_count} cached vector(s), model '${config.semantic.model}'. Refreshing in background.`,
-    );
-    setImmediate(() => {
-      void semantic.refresh(graph);
-    });
-  }
-
-  // ── 4. Start file watcher ──────────────────────────────────────────────
-  const watcher = new VaultWatcher(vaultPath, graph, cache);
-  watcher.start();
-  console.error("[OIL] File watcher started.");
-  void watcher.whenReady().then(() => {
-    console.error("[OIL] File watcher ready — vault changes are now observed.");
-  });
-
-  // ── 5. Create MCP server and register tools ────────────────────────────
-  const server = new McpServer({
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-  });
-
-  // Core visibility tool
-  registerCoreTools(server, vaultPath, graph, cache, watcher, config);
-
-  // Optimized retrieve/search tools
-  registerRetrieveTools(server, vaultPath, graph, cache, config);
-
-  // Atomic write tools with mtime concurrency checks
-  registerWriteTools(server, vaultPath, graph, cache, config);
-
-  // High-value domain tools (deterministic assembly, CRM prefetch, health)
-  registerDomainTools(server, vaultPath, graph, cache, config);
-
+  const oil = await createOilServer(vaultPath);
   console.error("[OIL] Tools registered.");
 
-  // ── 6. Connect transport ───────────────────────────────────────────────
+  // ── Connect transport before touching the vault ────────────────────────
   const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("[OIL] MCP server ready.");
+  await oil.server.connect(transport);
+  console.error("[OIL] MCP server ready — indexing vault in background.");
+
+  oil.hydration.begin();
 
   // ── Graceful shutdown ──────────────────────────────────────────────────
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.error("[OIL] Shutting down...");
-    await watcher.stop();
-    await server.close();
+    await oil.shutdown().catch((err) => console.error("[OIL] Shutdown error:", err));
     process.exit(0);
   };
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // The ordinary end of an MCP session is the client closing stdin, and nothing
+  // else notices it: StdioServerTransport subscribes only to `data` and
+  // `error`, so its `onclose` never fires for a disconnect, and on Windows a
+  // client's SIGTERM is a TerminateProcess that runs no handler at all. Left
+  // alone the server simply hung on EOF until the client escalated to SIGKILL.
+  // Watching stdin directly is the only signal that actually arrives.
+  process.stdin.on("end", () => void shutdown());
+  process.stdin.on("close", () => void shutdown());
+}
+
+/**
+ * Keep the server alive through faults that are not its business to die on.
+ *
+ * chokidar emits `error` for EMFILE, ENOSPC and permission failures — routine
+ * on a synced or virus-scanned vault — and an EventEmitter with no `error`
+ * listener throws. Node 20+ likewise exits on an unhandled rejection. Either
+ * would take down a server that is otherwise perfectly able to answer, so both
+ * are logged loudly and survived instead.
+ */
+function installProcessGuards(): void {
+  process.on("uncaughtException", (err) => {
+    console.error("[OIL] Uncaught exception — server continues:", err);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[OIL] Unhandled rejection — server continues:", reason);
+  });
 }
 
 main().catch((err) => {

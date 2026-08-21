@@ -14,6 +14,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { recordFlagOrigin } from "./config.js";
 
 // ── Load .env from cwd (simple key=value, no dotenv dependency) ────
 const envFile = resolve(process.cwd(), ".env");
@@ -37,6 +38,8 @@ const USAGE = `Usage: obsidian-intelligence-layer <command> [flags]
 Commands:
   mcp                       Start the MCP server over stdio.
   doctor                    Check vault, Ollama and effective settings, then exit.
+                            Exits 0 if everything checks out, 1 if a check
+                            failed, 2 if a check could not be confirmed.
 
 Flags (equivalent env vars in parentheses):
   --vault=<path>            Vault to serve (OBSIDIAN_VAULT_PATH)
@@ -51,11 +54,21 @@ Flags win over the environment, which wins over oil.config.yaml in the vault.`;
  * Translate flags into the environment the server already reads, so an MCP
  * client can drive every setting from either `args` or `env` — whichever its
  * config format makes easier.
+ *
+ * Each translation is recorded, because the translation is lossy in the one
+ * place it matters: once a flag has become an environment variable, the server
+ * can no longer tell a user who passed `--no-semantic` why the tier is off
+ * without being told which layer really set it.
  */
 function applyFlags(argv: string[]): string | null {
+  const setEnv = (name: string, value: string) => {
+    process.env[name] = value;
+    recordFlagOrigin(name);
+  };
+
   for (const arg of argv) {
     if (arg === "--no-semantic") {
-      process.env.OIL_SEMANTIC = "off";
+      setEnv("OIL_SEMANTIC", "off");
       continue;
     }
     const match = /^--([a-z-]+)=(.*)$/.exec(arg);
@@ -64,16 +77,16 @@ function applyFlags(argv: string[]): string | null {
     const [, name, value] = match;
     switch (name) {
       case "vault":
-        process.env.OBSIDIAN_VAULT_PATH = resolve(value);
+        setEnv("OBSIDIAN_VAULT_PATH", resolve(value));
         break;
       case "semantic-model":
-        process.env.OIL_SEMANTIC_MODEL = value;
+        setEnv("OIL_SEMANTIC_MODEL", value);
         break;
       case "semantic-endpoint":
-        process.env.OIL_SEMANTIC_ENDPOINT = value;
+        setEnv("OIL_SEMANTIC_ENDPOINT", value);
         break;
       case "semantic-min-score":
-        process.env.OIL_SEMANTIC_MIN_SCORE = value;
+        setEnv("OIL_SEMANTIC_MIN_SCORE", value);
         break;
       default:
         return arg;

@@ -20,7 +20,8 @@ import { readFile, writeFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { GraphIndex } from "./graph.js";
 import { flattenFrontmatter } from "./frontmatter.js";
-import type { NoteFrontmatter, SemanticConfig } from "./types.js";
+import { describeSemanticDisabledBy } from "./config.js";
+import type { ConfigSource, NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
 const INDEX_VERSION = 1;
@@ -57,6 +58,26 @@ export interface SemanticStats {
   dimensions: number;
   /** Why the tier is not serving, when it isn't. */
   reason: string | null;
+}
+
+/**
+ * Count of times this process degraded to a lexical answer because the embedder
+ * failed, rather than because there was nothing to find.
+ *
+ * At runtime the two are deliberately indistinguishable — an unreachable Ollama
+ * must not break a user's search. But a *measurement* cannot afford that: a
+ * timed-out embedding scored as "the semantic tier found nothing" turns an
+ * environmental failure into what reads as a quality number. Counting the
+ * failures separately is what lets the eval harness tell them apart and refuse
+ * to publish a score, while leaving the served behaviour exactly as it was.
+ */
+export interface SemanticDegradation {
+  /** Query embeddings that failed. Each one silently cost a tier. */
+  queryFailures: number;
+  /** Index refreshes that failed, leaving vectors stale or absent. */
+  indexFailures: number;
+  /** The most recent failure's description, or null if there has been none. */
+  lastReason: string | null;
 }
 
 interface Entry {
@@ -210,6 +231,11 @@ export class SemanticIndex {
   private reason: string | null = null;
   private dimensions = 0;
 
+  /** Failures that were absorbed into a graceful degradation. */
+  private queryFailures = 0;
+  private indexFailures = 0;
+  private lastFailureReason: string | null = null;
+
   /** Graph version the vectors were last reconciled against. */
   private indexedVersion = -1;
   /** In-flight refresh, so concurrent triggers coalesce instead of stacking. */
@@ -218,12 +244,14 @@ export class SemanticIndex {
   /** True once Ollama has actually answered this process. */
   private verified = false;
 
-  constructor(vaultPath: string, config: SemanticConfig) {
+  constructor(vaultPath: string, config: SemanticConfig, enabledSource?: ConfigSource) {
     this.vaultPath = vaultPath;
     this.config = config;
     this.endpoint = config.endpoint.replace(/\/+$/, "");
     this.state = config.enabled ? "cold" : "disabled";
-    if (!config.enabled) this.reason = "Disabled in oil.config.yaml";
+    // Name the layer that actually turned the tier off. Reporting a file that
+    // may not exist sends whoever is debugging this to the wrong place.
+    if (!config.enabled) this.reason = describeSemanticDisabledBy(enabledSource);
   }
 
   get status(): SemanticStatus {
@@ -237,6 +265,20 @@ export class SemanticIndex {
       note_count: this.vectors.size,
       dimensions: this.dimensions,
       reason: this.reason,
+    };
+  }
+
+  /**
+   * Failures this process swallowed to keep serving.
+   *
+   * Monotonic for the life of the index, so a caller can snapshot it around a
+   * search and know whether that particular answer was a real one.
+   */
+  get degradation(): SemanticDegradation {
+    return {
+      queryFailures: this.queryFailures,
+      indexFailures: this.indexFailures,
+      lastReason: this.lastFailureReason,
     };
   }
 
@@ -499,6 +541,8 @@ export class SemanticIndex {
       this.verified = false;
       this.state = "unavailable";
       this.reason = describeError(err);
+      this.indexFailures += 1;
+      this.lastFailureReason = this.reason;
       if (previous !== "unavailable") {
         console.error(
           `[OIL] Semantic tier unavailable (${this.reason}). Search continues on the lexical tiers.`,
@@ -537,9 +581,17 @@ export class SemanticIndex {
     } catch (err) {
       // Ollama answered once but has stopped; the next refresh must re-check
       // rather than trust the earlier success.
+      //
+      // The caller still gets a graceful empty answer, but the failure is
+      // recorded rather than erased: a search that returned nothing because the
+      // embedder timed out is not the same event as one that returned nothing
+      // because the vault holds nothing similar, and anything measuring quality
+      // has to be able to tell them apart.
       this.verified = false;
       this.state = "unavailable";
       this.reason = describeError(err);
+      this.queryFailures += 1;
+      this.lastFailureReason = this.reason;
       return null;
     }
   }

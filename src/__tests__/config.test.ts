@@ -2,8 +2,15 @@
  * Tests for config.ts — defaults, snake_case remapping, legacy key aliases,
  * and the environment overrides an MCP client uses to configure a connection.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { loadConfig, applyEnvOverrides, DEFAULT_CONFIG } from "../config.js";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import {
+  loadConfig,
+  applyEnvOverrides,
+  DEFAULT_CONFIG,
+  recordFlagOrigin,
+  clearFlagOrigins,
+  describeSemanticDisabledBy,
+} from "../config.js";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -163,5 +170,78 @@ describe("loadConfig — environment precedence", () => {
     } finally {
       delete process.env.OIL_SEMANTIC;
     }
+  });
+});
+
+describe("config provenance", () => {
+  afterEach(() => {
+    clearFlagOrigins();
+    delete process.env.OIL_SEMANTIC;
+    delete process.env.OIL_SEMANTIC_MODEL;
+  });
+
+  it("attributes untouched values to the built-in defaults", async () => {
+    const root = join(tempDir, "prov-bare");
+    await mkdir(root, { recursive: true });
+    const config = await loadConfig(root);
+    expect(config.provenance.semantic).toEqual({
+      enabled: "default",
+      endpoint: "default",
+      model: "default",
+      minScore: "default",
+    });
+  });
+
+  it("attributes only the keys oil.config.yaml actually states", async () => {
+    const root = await vaultWithConfig(
+      "prov-yaml",
+      "semantic:\n  enabled: false\n  min_score: 0.8\n",
+    );
+    const config = await loadConfig(root);
+    expect(config.provenance.semantic.enabled).toBe("oil.config.yaml");
+    expect(config.provenance.semantic.minScore).toBe("oil.config.yaml");
+    // Keys the file never mentions are still the defaults' — attributing them
+    // to the file would misdirect a reader just as badly as naming no source.
+    expect(config.provenance.semantic.model).toBe("default");
+    expect(config.provenance.semantic.endpoint).toBe("default");
+  });
+
+  it("attributes an environment override to the environment, over yaml", async () => {
+    const root = await vaultWithConfig("prov-env", "semantic:\n  enabled: true\n");
+    process.env.OIL_SEMANTIC = "off";
+    const config = await loadConfig(root);
+    expect(config.semantic.enabled).toBe(false);
+    expect(config.provenance.semantic.enabled).toBe("environment");
+  });
+
+  it("attributes a flag-set variable to the flag, not the environment", async () => {
+    const root = await vaultWithConfig("prov-flag", "semantic:\n  enabled: true\n");
+    // What `--no-semantic` does: the CLI translates it into the variable the
+    // server reads, and records that the translation happened.
+    process.env.OIL_SEMANTIC = "off";
+    recordFlagOrigin("OIL_SEMANTIC");
+    const config = await loadConfig(root);
+    expect(config.semantic.enabled).toBe(false);
+    expect(config.provenance.semantic.enabled).toBe("flag");
+  });
+
+  it("ignores a provenance block written into the vault's own config", async () => {
+    const root = await vaultWithConfig(
+      "prov-forged",
+      "provenance:\n  semantic:\n    enabled: \"flag\"\n",
+    );
+    const config = await loadConfig(root);
+    expect(config.provenance.semantic.enabled).toBe("default");
+  });
+
+  it("names the layer that disabled the tier, and never invents one", () => {
+    expect(describeSemanticDisabledBy("flag")).toBe("Disabled by the --no-semantic flag");
+    expect(describeSemanticDisabledBy("environment")).toBe(
+      "Disabled by OIL_SEMANTIC in the environment",
+    );
+    expect(describeSemanticDisabledBy("oil.config.yaml")).toBe("Disabled in oil.config.yaml");
+    // No layer known: say so without naming a file that may not exist.
+    expect(describeSemanticDisabledBy(undefined)).not.toMatch(/oil\.config\.yaml/);
+    expect(describeSemanticDisabledBy("default")).not.toMatch(/oil\.config\.yaml/);
   });
 });

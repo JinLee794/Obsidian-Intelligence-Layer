@@ -191,6 +191,23 @@ describe("SemanticIndex — indexing", () => {
     expect(stub.embedCalls).toHaveLength(0);
     expect(await index.search("migration", 5)).toEqual([]);
   });
+
+  it("names the layer that disabled it, rather than always blaming the yaml", async () => {
+    const config = makeConfig({ enabled: false });
+    // Pointing someone at oil.config.yaml when they passed `--no-semantic`
+    // sends them to a file that may not even exist.
+    expect(new SemanticIndex(vaultRoot, config, "flag").stats.reason).toBe(
+      "Disabled by the --no-semantic flag",
+    );
+    expect(new SemanticIndex(vaultRoot, config, "environment").stats.reason).toBe(
+      "Disabled by OIL_SEMANTIC in the environment",
+    );
+    expect(new SemanticIndex(vaultRoot, config, "oil.config.yaml").stats.reason).toBe(
+      "Disabled in oil.config.yaml",
+    );
+    // No source supplied: stay truthful rather than naming one.
+    expect(new SemanticIndex(vaultRoot, config).stats.reason).not.toMatch(/oil\.config\.yaml/);
+  });
 });
 
 // ─── Degradation ──────────────────────────────────────────────────────────────
@@ -262,6 +279,58 @@ describe("SemanticIndex — degradation", () => {
     await index.refresh(graph);
 
     expect(index.status).toBe("ready");
+  });
+
+  it("counts a failed query embedding without changing what the caller sees", async () => {
+    // Both halves of the contract in one test, because they are in tension.
+    //
+    // Production must not notice: a query the embedder could not answer still
+    // returns an empty list, never an exception, so an unreachable Ollama
+    // degrades a search instead of breaking it.
+    //
+    // Measurement must notice: the same event has to be countable, or a harness
+    // scores "the embedder timed out" as "the semantic tier found nothing" and
+    // publishes an environmental failure as a quality number.
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.refresh(graph);
+    expect(index.status).toBe("ready");
+    expect(index.degradation.queryFailures).toBe(0);
+
+    const healthy = await index.search("cloud migration", 5);
+    expect(index.degradation.queryFailures).toBe(0);
+
+    stub.failNext = true;
+    const degradedResults = await index.search("a query the embedder cannot serve", 5);
+
+    expect(degradedResults).toEqual([]);
+    expect(index.degradation.queryFailures).toBe(1);
+    expect(index.degradation.lastReason).toContain("stub failure");
+    // The healthy call really did return something, so the empty list above is
+    // attributable to the failure rather than to an inert tier.
+    expect(healthy.length).toBeGreaterThan(0);
+  });
+
+  it("separates an empty answer from a failed one", async () => {
+    // The distinction the eval harness depends on: a query that simply matches
+    // nothing above the floor must leave the counters alone, so a refusal to
+    // score only ever fires on a real failure.
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: 2 }));
+    await index.refresh(graph);
+
+    const nothing = await index.search("cloud migration", 5);
+
+    expect(nothing).toEqual([]);
+    expect(index.degradation.queryFailures).toBe(0);
+    expect(index.degradation.indexFailures).toBe(0);
+  });
+
+  it("counts a failed refresh separately from a failed query", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    stub.failNext = true;
+    await index.refresh(graph);
+
+    expect(index.degradation.indexFailures).toBe(1);
+    expect(index.degradation.queryFailures).toBe(0);
   });
 
   it("does not report ready from a cached index alone", async () => {
@@ -391,5 +460,108 @@ describe("cascadeSearch — semantic tier", () => {
     } finally {
       detachSemanticIndex(graph);
     }
+  });
+});
+
+// ─── Ran vs contributed ───────────────────────────────────────────────────────
+
+/**
+ * A tier that ran and found nothing used to be indistinguishable from a tier
+ * that never ran, because both were simply absent from `tiersUsed`. That is not
+ * a cosmetic gap: it led a reader to conclude the cascade was not wired to the
+ * semantic tier at all, when in truth the tier had run on every escalated query
+ * and nothing had cleared the similarity floor.
+ */
+describe("cascadeSearch — tiers that ran vs tiers that contributed", () => {
+  it("reports a tier that ran and cleared nothing, distinctly from one that never ran", async () => {
+    // An unreachable floor: the tier embeds, scores every note, and admits none.
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: 1.1 }));
+    await index.refresh(graph);
+    attachSemanticIndex(graph, index);
+    stub.embedCalls.length = 0;
+
+    try {
+      const ran = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      // It really did run — an embedding round trip was paid for.
+      expect(stub.embedCalls.length).toBeGreaterThan(0);
+      expect(ran.tiersRan).toContain("semantic");
+      expect(ran.tiersUsed).not.toContain("semantic");
+
+      // ...and a query the lexical tier covered never reaches the tier at all.
+      stub.embedCalls.length = 0;
+      const skipped = await cascadeSearch(graph, "customer", 10, undefined);
+      expect(stub.embedCalls).toHaveLength(0);
+      expect(skipped.tiersRan).not.toContain("semantic");
+      expect(skipped.tiersUsed).not.toContain("semantic");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("still names the tiers that contributed, which is the older signal", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: -1 }));
+    await index.refresh(graph);
+    attachSemanticIndex(graph, index);
+
+    try {
+      const { tiersUsed, tiersRan } = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      expect(tiersUsed).toContain("semantic");
+      // Anything that contributed necessarily ran.
+      for (const tier of tiersUsed) expect(tiersRan).toContain(tier);
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("does not claim a disabled tier ran", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig({ enabled: false }));
+    attachSemanticIndex(graph, index);
+
+    try {
+      const { tiersRan, escalation } = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      expect(escalation).not.toBeNull();
+      expect(tiersRan).not.toContain("semantic");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("does not claim an unreachable tier ran", async () => {
+    // The whole point of the field is to be trusted; reporting a tier that
+    // could not serve would reintroduce the same untruth somewhere new.
+    const index = new SemanticIndex(
+      vaultRoot,
+      makeConfig({ endpoint: "http://127.0.0.1:1", minScore: -1 }),
+    );
+    await index.refresh(graph);
+    attachSemanticIndex(graph, index);
+
+    try {
+      const { tiersRan } = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      // Whatever it is mid-retry — `unavailable`, or `indexing` while a
+      // background refresh fails again — it is not serving, and must not claim
+      // to have run.
+      expect(index.status).not.toBe("ready");
+      expect(tiersRan).not.toContain("semantic");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("reports the fuzzy tier as run even when it recovers nothing", async () => {
+    const { tiersRan, tiersUsed } = await cascadeSearch(graph, "zzzzqqqq", 5, undefined);
+    expect(tiersRan).toContain("fuzzy");
+    expect(tiersUsed).not.toContain("fuzzy");
+  });
+
+  it("omits the fuzzy tier entirely when the query is too long for it", async () => {
+    // Bitap cost scales per token per document, so a long query skips the tier.
+    const { tiersRan } = await cascadeSearch(
+      graph,
+      "a rambling question with far too many words for fuzzy matching",
+      5,
+      undefined,
+    );
+    expect(tiersRan).not.toContain("fuzzy");
   });
 });

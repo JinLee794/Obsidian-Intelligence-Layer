@@ -154,3 +154,32 @@ describe("semantic_search — empty results are explained", () => {
     expect(JSON.stringify(result)).toContain("non-empty");
   });
 });
+
+/**
+ * `tiers_used` answers "what contributed", which cannot answer "what happened".
+ * A client reading only that field sees the same `["lexical"]` whether the
+ * semantic tier ran and admitted nothing or was never consulted, and has no way
+ * to tell from outside the process — the sibling investigation that hit this
+ * needed an environment variable and a rebuild to establish the difference.
+ */
+describe("search_vault — tiers_ran in the response envelope", () => {
+  it("reports an escalated tier that contributed nothing", async () => {
+    const index = new SemanticIndex(vault, { ...DEFAULT_CONFIG.semantic, endpoint: "http://127.0.0.1:1" });
+    attachSemanticIndex(graph, index);
+
+    try {
+      const result = await server.callToolJson("search_vault", { query: ESCALATING, limit: 5 });
+      expect(result.escalated).not.toBeNull();
+      // The lexical tiers are always consulted, and say so.
+      expect(result.tiers_ran).toContain("lexical");
+      // The older signal is unchanged and still present.
+      expect(Array.isArray(result.tiers_used)).toBe(true);
+      // Nothing that contributed can be missing from what ran.
+      for (const tier of result.tiers_used as string[]) {
+        expect(result.tiers_ran).toContain(tier);
+      }
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+});

@@ -1,1 +1,15 @@
 *.sh text eol=lf
+
+# Generated fixtures are compared byte-for-byte against a regenerated copy, so
+# their line endings must not depend on the checkout platform.
+#
+# `bench/fixtures/generate-eval-vault.mjs` writes LF. With `core.autocrlf=true`
+# — the Windows default — checkout rewrites these files to CRLF, so a
+# regeneration immediately reports 55 modified files in `git status` and the
+# tree can never be clean. `git diff` hides it, because diff normalizes both
+# sides before comparing and reports no change; that is what makes this worth
+# pinning rather than documenting, since the obvious check passes while the
+# tree is dirty. Holding them at LF everywhere makes regenerate-and-compare
+# mean the same thing on every platform.
+bench/fixtures/eval-vault/** text eol=lf
+bench/datasets/*.json text eol=lf

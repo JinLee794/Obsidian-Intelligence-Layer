@@ -35,10 +35,31 @@ interface SearchEntry {
   headings: string[];
 }
 
+/**
+ * The last-resort variant. Carries a *deduplicated term list* rather than prose:
+ * fuzzy matching only ever needs to know which words a note contains, so the
+ * repetition and punctuation in raw prose is search surface fuse.js pays for and
+ * gets nothing back from. Measured on a 610-note vault, indexing terms instead
+ * of prose halves the indexed text (53%), builds 4.6x faster (250ms -> 55ms) and
+ * queries 1.7x faster (79ms -> 46ms median), at equal recall.
+ *
+ * `bodySnippet` rides along unindexed, purely so the excerpt shown to the caller
+ * is real prose rather than the token soup that was matched.
+ */
+interface BodySearchEntry extends SearchEntry {
+  bodyTerms: string;
+  bodySnippet: string;
+}
+
 // ─── Fuse Index Cache ─────────────────────────────────────────────────────────
 
 interface CachedIndex {
   fuse: Fuse<SearchEntry>;
+  version: number;
+}
+
+interface CachedBodyIndex {
+  fuse: Fuse<BodySearchEntry>;
   version: number;
 }
 
@@ -49,6 +70,15 @@ interface CachedIndex {
  * rebuild without depending on callers remembering to invalidate.
  */
 let indexCache = new WeakMap<GraphIndex, CachedIndex>();
+
+/**
+ * Separate cache for the body-bearing index, built lazily the first time a query
+ * actually needs it. Most processes never build it at all.
+ */
+let bodyIndexCache = new WeakMap<GraphIndex, CachedBodyIndex>();
+
+/** Shortest body term the last-resort pass will try to fuzzy-match. */
+const BODY_TERM_MIN_LENGTH = 4;
 
 /**
  * Above this share of the corpus, rebuilding the fuzzy index beats patching it.
@@ -133,7 +163,51 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
  */
 export function invalidateSearchIndex(): void {
   indexCache = new WeakMap();
+  bodyIndexCache = new WeakMap();
   invalidateBm25Index();
+}
+
+/**
+ * Build or return the cached fuzzy index that *does* carry body prose.
+ *
+ * Rebuilt wholesale rather than patched: it is built lazily and consulted on a
+ * small share of queries, so the incremental machinery the cheap index needs
+ * would cost more to maintain than it saves here.
+ */
+function getOrBuildBodyIndex(graph: GraphIndex): Fuse<BodySearchEntry> {
+  const cached = bodyIndexCache.get(graph);
+  if (cached && cached.version === graph.version) return cached.fuse;
+
+  const entries: BodySearchEntry[] = [];
+  for (const ref of graph.getNotesByFolder("")) {
+    const node = graph.getNode(ref.path);
+    if (!node) continue;
+    const body = node.bodySnippet ?? "";
+    // Terms shorter than this are not worth a fuzzy match: an edit distance of
+    // one is most of a three-letter word, so they match almost anything.
+    const terms = [...new Set(tokenize(body))].filter((t) => t.length >= BODY_TERM_MIN_LENGTH);
+    entries.push({
+      ...toSearchEntry(node),
+      bodyTerms: terms.join(" "),
+      bodySnippet: body,
+    });
+  }
+
+  const fuse = new Fuse(entries, {
+    keys: [
+      { name: "title", weight: 3 },
+      { name: "tags", weight: 2 },
+      { name: "headings", weight: 1 },
+      { name: "bodyTerms", weight: 0.5 },
+    ],
+    threshold: 0.4,
+    includeScore: true,
+    ignoreLocation: true,
+    useExtendedSearch: false,
+  });
+  bodyIndexCache.set(graph, { fuse, version: graph.version });
+
+  return fuse;
 }
 
 // ─── Search Functions ─────────────────────────────────────────────────────────
@@ -251,6 +325,56 @@ export function fuzzySearch(
 }
 
 /**
+ * Tier 2b — the last-resort fuzzy pass that can reach note bodies.
+ *
+ * Bodies are deliberately absent from the tier above: fuse.js over full prose
+ * measured 87–97% of that tier's cost on a 1,200-note vault, and BM25 already
+ * indexes body text, so paying it on every query bought a second pass over
+ * text tier 1 had already read.
+ *
+ * What BM25 cannot do is match a *misspelled* word — it looks terms up exactly,
+ * and its prefix expansion only fires forwards. So a typo whose target appears
+ * only in body prose had no tier left at all and `search_vault` returned zero
+ * results where 0.5.5 returned the note. This pass exists to close that gap
+ * without reopening the cost, which is why the cascade calls it last and rarely.
+ */
+export function fuzzyBodySearch(
+  graph: GraphIndex,
+  query: string,
+  limit: number,
+  filters?: SearchFilters,
+): SearchResult[] {
+  const fuse = getOrBuildBodyIndex(graph);
+  const hasFilters = Boolean(filters?.folder || filters?.tags?.length || filters?.frontmatter);
+  const raw = fuse.search(query, { limit: hasFilters ? limit * 10 : limit * 2 });
+
+  const results: SearchResult[] = [];
+  const maxFuseScore = raw.length > 0
+    ? Math.max(...raw.map((r) => r.score ?? 0), 0.01)
+    : 1;
+
+  for (const match of raw) {
+    if (!passesFilters(match.item.path, graph, filters)) continue;
+
+    const fuseScore = match.score ?? 0;
+    const normalizedScore = 1 - (fuseScore / maxFuseScore) * 0.9;
+
+    results.push({
+      path: match.item.path,
+      title: match.item.title,
+      excerpt: leadExcerpt(match.item.bodySnippet, match.item.tags),
+      score: normalizedScore,
+      matchedTerms: [],
+      matchType: "fuzzy",
+    });
+
+    if (results.length >= limit) break;
+  }
+
+  return results;
+}
+
+/**
  * Tier 3 — Semantic search over local Ollama embeddings.
  *
  * Returns nothing when the tier is disabled, still warming up, or Ollama is not
@@ -300,7 +424,23 @@ export interface CascadeHit {
 
 export interface CascadeResult {
   results: CascadeHit[];
+  /**
+   * Tiers that put at least one note into the answer.
+   *
+   * Deliberately not the same list as `tiersRan`: knowing which tier earned
+   * its keep is what tells you whether escalation was worth the cost.
+   */
   tiersUsed: string[];
+  /**
+   * Tiers that actually executed, whether or not they found anything.
+   *
+   * Without this, a tier that ran and cleared nothing looks exactly like a tier
+   * that never ran — and the difference is the whole diagnosis. A reader who
+   * sees only `["lexical"]` on an escalated query cannot tell "the semantic
+   * tier is not wired up" from "the semantic tier ran and nothing passed the
+   * similarity floor", and has no way to find out from the outside.
+   */
+  tiersRan: string[];
   /** Why the cascade escalated past lexical, or null if it never needed to. */
   escalation: string | null;
   /** Matches before the limit was applied, when the tier can count them. */
@@ -358,6 +498,7 @@ export async function cascadeSearch(
   const accept = (path: string) => passesFilters(path, graph, filters);
   const candidateDepth = Math.max(limit * 3, 20);
   const tiersUsed: string[] = [];
+  const tiersRan: string[] = [];
 
   // Reconcile vectors on every search, not just the ones that reach the semantic
   // tier. Escalation is rare in an entity-keyed vault, so hanging re-embedding
@@ -373,6 +514,7 @@ export async function cascadeSearch(
   // frontmatter values (customer:, action_owners:), and short-circuiting on
   // those would suppress the very note the user named.
   if (!graph.resolveTitle(query.trim())) {
+    tiersRan.push("frontmatter");
     const exact = exactFieldSearch(graph, query, accept);
     if (exact.length > 0) {
       tiersUsed.push("frontmatter");
@@ -392,6 +534,7 @@ export async function cascadeSearch(
           matchedBy: [`frontmatter:${hit.key}`],
         })),
         tiersUsed,
+        tiersRan,
         escalation: null,
         totalMatched: ordered.length,
       };
@@ -399,6 +542,7 @@ export async function cascadeSearch(
   }
   // ── Tier 1: BM25 ────────────────────────────────────────────────────────
   const lexical = lexicalSearch(graph, query, candidateDepth, filters);
+  tiersRan.push("lexical");
   tiersUsed.push("lexical");
 
   const queryTermCount = tokenize(query).length;
@@ -410,6 +554,7 @@ export async function cascadeSearch(
     return {
       results: lexical.slice(0, limit).map(toCascadeHit),
       tiersUsed,
+      tiersRan,
       escalation: null,
     };
   }
@@ -417,10 +562,9 @@ export async function cascadeSearch(
   const escalation = !fullCoverage ? "partial_term_coverage" : "insufficient_results";
 
   // ── Tier 2: fuzzy — recovers typos and near-miss titles ────────────────
-  const fuzzy =
-    queryTermCount <= FUZZY_MAX_QUERY_TOKENS
-      ? fuzzySearch(graph, query, candidateDepth, filters)
-      : [];
+  const fuzzyRan = queryTermCount <= FUZZY_MAX_QUERY_TOKENS;
+  const fuzzy = fuzzyRan ? fuzzySearch(graph, query, candidateDepth, filters) : [];
+  if (fuzzyRan) tiersRan.push("fuzzy");
   if (fuzzy.length > 0) tiersUsed.push("fuzzy");
 
   // ── Tier 3: semantic — recovers notes that share no words with the query ─
@@ -431,7 +575,34 @@ export async function cascadeSearch(
   const semantic = fullCoverage
     ? []
     : await semanticSearch(graph, query, candidateDepth, filters);
+  // Asked, and answered. `semanticSearch` returns an empty list both for "the
+  // tier is off or Ollama is down" and for "nothing cleared the floor", so the
+  // call alone does not establish that the tier ran — and reporting a tier that
+  // could not serve as having run would be the same untruth in a new place.
+  // Checked after the await: a mid-search failure flips the status.
+  if (!fullCoverage && getSemanticIndex(graph)?.status === "ready") {
+    tiersRan.push("semantic");
+  }
   if (semantic.length > 0) tiersUsed.push("semantic");
+
+  // ── Tier 2b: last-resort fuzzy pass over body prose ─────────────────────
+  //
+  // Same gate as the semantic tier: BM25 did not understand the whole query, so
+  // a misspelling is on the table and the one place a misspelling can still hide
+  // is body text. Measured on a 610-note vault this fires on 6% of realistic
+  // queries and 0% of the fully covered ones that already returned at tier 1,
+  // which is what keeps the cost win — the expensive pass only runs where the
+  // cheap path has demonstrably come up short.
+  //
+  // Semantic cannot stand in for it: single-word queries against whole-note
+  // embeddings land in a 0.39–0.58 cosine band that straddles the relevance
+  // floor, so even correctly spelled words like "understaffed" and "peering"
+  // score below it.
+  const fuzzyBody =
+    !fullCoverage && queryTermCount <= FUZZY_MAX_QUERY_TOKENS
+      ? fuzzyBodySearch(graph, query, candidateDepth, filters)
+      : [];
+  if (fuzzyBody.length > 0 && !tiersUsed.includes("fuzzy")) tiersUsed.push("fuzzy");
 
   // Trust the lexical ranking in proportion to how much of the query it
   // actually matched. A query it barely understood is exactly the case where its
@@ -447,10 +618,14 @@ export async function cascadeSearch(
     { name: "lexical", paths: lexical.map((h) => h.path), weight: lexicalWeight },
     { name: "fuzzy", paths: fuzzy.map((h) => h.path) },
     { name: "semantic", paths: semantic.map((h) => h.path) },
+    // Half weight: a body-prose fuzzy hit is the weakest evidence in the
+    // cascade, so it fills the tail rather than displacing a tier that matched
+    // the query where it was actually indexed.
+    { name: "fuzzy", paths: fuzzyBody.map((h) => h.path), weight: 0.5 },
   ]);
 
   const excerpts = new Map(
-    [...semantic, ...fuzzy, ...lexical].map((hit) => [hit.path, hit.excerpt]),
+    [...fuzzyBody, ...semantic, ...fuzzy, ...lexical].map((hit) => [hit.path, hit.excerpt]),
   );
 
   // Normalise to the top hit, matching the confident-lexical path above. Raw
@@ -471,7 +646,7 @@ export async function cascadeSearch(
     };
   });
 
-  return { results, tiersUsed, escalation };
+  return { results, tiersUsed, tiersRan, escalation };
 }
 
 /** Adapt a single-tier hit to the cascade's response shape. */
