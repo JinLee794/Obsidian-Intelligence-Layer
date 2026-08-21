@@ -116,3 +116,36 @@ This was not done during the v0.6.0 work because the account doing it lacks push
 repository — both `git push` and issue creation return `403` under the enterprise policy in force.
 Anyone with write access can complete it in one command.
 
+
+---
+
+## The ready marker reads as a completion marker
+
+`[OIL] MCP server ready — indexing vault in background` is literally accurate: the server does
+accept MCP requests at that point. But it reads as "startup finished", and **every index
+diagnostic is emitted after it** — the four `_oil-graph.json` rejection paths, the build timing,
+and the warm-start reconciliation lines all come from background indexing.
+
+This is not theoretical. During v0.6.0 validation it produced **two separate false findings**,
+both from stopping at the ready line and concluding the absent diagnostic did not exist:
+
+- "a truncated `_oil-graph.json` is silently discarded" — it is logged, after the marker
+- an earlier startup-ordering misreading with the same shape
+
+It is the same defect class as the three fixed in this release (`tiers_used`, the hardcoded
+semantic-disabled reason, `doctor` exiting 0 on an unconfirmable model): **the software says
+something true that a reasonable reader takes to mean something false.**
+
+The countermeasure belongs in the marker's wording, not in the log ordering — the ordering is
+correct and is the whole point of the startup fix. Something like:
+
+```
+[OIL] MCP server ready — vault indexing has not started yet; diagnostics follow
+```
+
+Deliberately not changed in v0.6.0: it is a behaviour-adjacent wording change with no failing
+test behind it, and this release is scoped to making its own claims true.
+
+**Anyone reading OIL's stderr to determine what happened during startup must read past the ready
+line.** Harnesses that stop at it, or that kill the process once it appears, will observe none of
+the index diagnostics and may conclude they are absent.
