@@ -200,10 +200,48 @@ than in 0.5.5.
   was not merely noisy; on this fixture it was strictly weaker than the check it
   sat next to. Run `OIL_PERF=1` on an idle machine to assert it; by default a
   breach is reported as a warning.
-- Taken together these were the dominant source of `check:release` flakiness. A
-  handful of watcher tests remain timing-sensitive and are declared with
-  `{ retry: 2 }`, so "deterministic" is the goal rather than a measured
-  guarantee.
+- The end-to-end `scripts/startup-contract.mjs` gets the same treatment, and it
+  was the one still failing releases. It asserted absolute handshake budgets on
+  every `check:release` run. Across five consecutive runs of unmodified code on
+  an idle machine the warm handshake ranged **1,506 ms to 25,003 ms** and the
+  corrupt-index handshake **1,592 ms to 12,149 ms** — an 8,000 ms budget fails
+  three of those five while the code is correct. Its own "is this machine busy?"
+  guard could not save it for two reasons: it is sampled once before any work,
+  so it cannot see load arriving later — and in `check:release` this script runs
+  straight after a full vitest suite — and it was sampled immediately after the
+  script writes 2,000 fixture notes, so it measured its own I/O storm rather
+  than the machine, reading 5,464 ms against 1,259 ms for the identical
+  handshake on the identical vault later in the same run. That inflated every
+  derived ceiling fourfold *and* reported an idle box as loaded. The baseline is
+  now taken before the fixture is built.
+- Gating the E2E timings costs no coverage, and that is measured rather than
+  argued. With vault hydration deliberately moved in front of the transport, the
+  gated script still exits `1` — failing on the ordering assertion and on the
+  missing-vault path. The same injection also retired the one timing check kept
+  hard-asserted: "warm handshake is independent of vault size" read 668 ms for
+  2,000 notes against 762 ms for 5 and **passed** while the ordering assertion
+  failed. That is structural rather than a badly chosen threshold — by that
+  point the large index is persisted, and loading a persisted index costs less
+  than process-spawn noise, so a warm-versus-warm ratio cannot see a cost that
+  is paid on a cold build. It is now reported, not asserted. What guards the
+  contract is the ordering assertion, which needs no clock.
+- These two entries and the harness fix above are the same defect wearing
+  different clothes, and it is worth naming: **a gate that reports a number it
+  cannot reproduce launders an environmental failure into what reads as a
+  result.** An Ollama timeout became a quality metric; machine load became a
+  contract failure. Every remaining assertion in both startup-contract harnesses
+  is structural — readiness is announced before the vault is read, the index
+  hydrates behind the handshake, a missing vault is reported rather than fatal,
+  a corrupt index is rebuilt, concurrent sessions report a coherent index, and
+  closing stdin exits through the shutdown path. Those hold or fail regardless
+  of how busy the machine is. The milliseconds only ever quantified them.
+- Taken together these were the dominant source of `check:release` flakiness.
+  With them gated, `npm run check:release` completed green end to end — lint,
+  38 test files, the package smoke test, the E2E startup contract and
+  `verify:observed` — which it had not previously managed on this machine. That
+  is one observed pass, not a determinism claim: a handful of watcher tests
+  remain timing-sensitive and are declared with `{ retry: 2 }`, so
+  "deterministic" is still the goal rather than a measured guarantee.
 - **`npm run verify:observed` is now release-gating.** It runs nine assertions
   against a real server over stdio — the claims in these notes that are about
   runtime behaviour rather than code shape. It previously printed its findings
