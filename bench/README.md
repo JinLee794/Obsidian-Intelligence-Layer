@@ -26,22 +26,25 @@ cannot tell". The 54-note vault exists because of that.
 
 ```
 npm run eval:vault:regen
-git diff --exit-code bench/fixtures/eval-vault
-git status --porcelain bench/fixtures/eval-vault    # must also print nothing
+git status --porcelain bench/fixtures/eval-vault   # must print nothing
 ```
 
 The generator holds no PRNG, no UUID generation and no clock, so the second
 command is the reproducibility check rather than a formality. If it prints a
-diff, the vault and the committed numbers no longer describe the same thing.
+line, the vault and the committed numbers no longer describe the same thing.
 
-Run the third command too, and do not treat the second as sufficient on its
-own. `git diff` normalises line endings before comparing, so on a checkout with
-`core.autocrlf=true` it exits 0 while `git status` reports every fixture file as
-modified — the generator writes LF, the checkout holds CRLF, and the check that
-exists to catch drift is the one thing that cannot see it. This is not
-hypothetical: it reported success against a 55-file dirty tree during this
-release. `.gitattributes` now pins these fixtures to `text eol=lf`, which is
-what makes the pair agree; the second command is sound only because of it.
+Use `git status --porcelain`, not `git diff --exit-code`. `git diff` normalizes
+line endings on both sides before comparing, so on a checkout with
+`core.autocrlf=true` it returns 0 against a tree `git status` simultaneously
+reports as 55 files modified. That was measured here, not reasoned about: a
+fresh checkout of the fixture put 33 CRLF pairs in `Customers/Contoso.md`, the
+generator rewrote it as LF, and `git diff --exit-code` still exited 0. A
+reproducibility gate that normalizes away the difference it is looking for is
+worse than no gate, because it reports success.
+
+`.gitattributes` pins these paths to `text eol=lf` so the checkout matches what
+the generator writes. With that pin the same experiment yields 0 CRLF pairs and
+both checks return clean.
 
 ## Running the eval
 
