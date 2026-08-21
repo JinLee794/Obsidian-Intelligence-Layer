@@ -90,6 +90,28 @@ let timingIsTrustworthy = true;
  * exists for — the handshake becoming a function of vault size — while staying
  * immune to the box simply being busy.
  */
+/**
+ * Wall-clock assertions are opt-in via `OIL_PERF=1`.
+ *
+ * `timingIsTrustworthy` is sampled once, before any work — so it cannot see
+ * load that arrives later in the run, and in `check:release` it reliably does:
+ * the E2E script runs straight after a full vitest suite. Observed in one such
+ * run, on a machine whose opening baseline looked fine at 987ms: the warm
+ * handshake took 11,172ms here against 1,244ms standalone, and the concurrency
+ * block measured 8,156ms against a `cold` sampled at 1,110ms earlier in the
+ * same run. Load is not constant across a run, so comparing two phases of one
+ * run does not cancel it either.
+ *
+ * Nothing is lost by gating: the contract this script exists for is structural
+ * and every part of it is asserted separately and unconditionally — readiness
+ * is announced before the vault is read, the index hydrates behind the
+ * handshake, a missing vault is reported rather than fatal, a corrupt index is
+ * rebuilt, concurrent sessions report a coherent index, and closing stdin exits
+ * through the shutdown path. Those hold or fail regardless of how busy the box
+ * is. The milliseconds only quantify them.
+ */
+const PERF = process.env.OIL_PERF === "1";
+
 const checkHandshake = (handshakeMs, label, { concurrency = 1 } = {}) => {
   // Concurrent sessions share one CPU, so the slowest of N cold starts cannot
   // cost what a single one does — scaling the ceiling by N is the difference
@@ -99,6 +121,10 @@ const checkHandshake = (handshakeMs, label, { concurrency = 1 } = {}) => {
   const detail =
     `${label} handshake ${handshakeMs}ms (budget ${BUDGET_MS * concurrency}ms, ` +
     `machine baseline ${baselineMs}ms -> ceiling ${Math.round(relativeCeiling)}ms)`;
+  if (!PERF) {
+    console.log(`  ${ok ? "note " : "SLOW "} ${detail} — advisory, set OIL_PERF=1 to assert`);
+    return;
+  }
   if (!timingIsTrustworthy) {
     console.log(`  note  ${detail} — advisory, machine too loaded to judge`);
     return;
@@ -193,11 +219,18 @@ const handshakeOf = async (vaultPath, { hydrate = false } = {}) => {
 
 try {
   console.log(`\nOIL startup contract — ${NOTE_COUNT} notes, budget ${BUDGET_MS}ms\n`);
-  await buildVault();
 
-  // Establish the warm handshake cost on this machine before measuring a large
-  // warm vault. Seed explicitly so the baseline cannot alternate between cold
-  // and warm depending on whether a background five-note build finished.
+  // Establish the warm handshake cost on this machine *before* building the
+  // large vault. Sampling it afterwards measures the tail of the script's own
+  // I/O storm rather than the machine: writing NOTE_COUNT files leaves the
+  // filesystem and any on-access scanner busy for seconds. Observed with the
+  // baseline taken after `buildVault()` on an idle box — 5464ms, against 1259ms
+  // for the identical handshake on the identical vault later in the same run.
+  // That inflates every derived ceiling fourfold and reports an idle machine as
+  // loaded, so the check both permits too much and describes itself wrongly.
+  //
+  // Seed explicitly so the baseline cannot alternate between cold and warm
+  // depending on whether a background five-note build finished.
   const tiny = join(tempRoot, "tiny-vault");
   await mkdir(tiny, { recursive: true });
   for (let i = 0; i < 5; i++) {
@@ -212,6 +245,8 @@ try {
     `  machine baseline: ${baselineMs}ms warm handshake on a 5-note vault` +
       `${timingIsTrustworthy ? "" : " — LOADED, timing checks are advisory"}\n`,
   );
+
+  await buildVault();
 
   // ── Cold: no persisted index, the worst case a new session can hit ────────
   const cold = await session("cold", async ({ client, handshakeMs }) => {
@@ -277,15 +312,44 @@ try {
   );
 
   // `ordering` awaited hydration above, so the large graph is persisted here.
+  //
+  // Interleave the two vaults and take the min of each, so any drift hits both
+  // arms and single spikes are discarded. That makes the *ratio* trustworthy on
+  // a busy box in a way no absolute number is — but it is reported, not
+  // asserted, because it was observed not to catch the regression it names.
+  //
+  // With `hydration.begin(); await hydration.whenReady()` injected in front of
+  // the transport in `src/server.ts` — the exact regression this script exists
+  // for — this comparison read 668ms for 2000 notes against 762ms for 5 and
+  // passed, while the ordering assertion above failed and the missing-vault
+  // check failed with it. The reason is structural rather than a threshold
+  // being wrong: by this point the 2000-note graph is *persisted*, and loading
+  // a persisted index costs less than the spawn noise floor, so a warm-vs-warm
+  // ratio cannot see a regression whose cost is a cold build. The cold path is
+  // where that shows, and the ordering assertion covers it without a clock.
+  //
+  // Left in because the number is genuinely informative when it moves, and
+  // because deleting it would hide the measurement that justifies the ordering
+  // assertion carrying the contract. Asserting it would add flake risk — the
+  // worst margin over five clean runs was 14% — in exchange for no coverage.
   const largeWarmSamples = [];
-  for (let i = 0; i < 5; i++) largeWarmSamples.push(await handshakeOf(vault));
+  const tinyNowSamples = [];
+  for (let i = 0; i < 5; i++) {
+    largeWarmSamples.push(await handshakeOf(vault));
+    tinyNowSamples.push(await handshakeOf(tiny));
+  }
   const largeHandshake = Math.min(...largeWarmSamples);
-  const ceiling = baselineMs * 2 + 1000;
+  const tinyNow = Math.min(...tinyNowSamples);
+  const ceiling = tinyNow * 2 + 1000;
   const scaleDetail =
     `warm handshake is independent of vault size: ${NOTE_COUNT} notes ${largeHandshake}ms ` +
-    `vs 5 notes ${baselineMs}ms (ceiling ${Math.round(ceiling)}ms)`;
-  if (timingIsTrustworthy) check(largeHandshake < ceiling, scaleDetail);
-  else console.log(`  note  ${scaleDetail} — advisory, machine too loaded to judge`);
+    `vs 5 notes ${tinyNow}ms (ceiling ${Math.round(ceiling)}ms)`;
+  if (PERF && timingIsTrustworthy) {
+    check(largeHandshake < ceiling, scaleDetail);
+  } else {
+    const marker = largeHandshake < ceiling ? "note " : "SLOW ";
+    console.log(`  ${marker} ${scaleDetail} — advisory, set OIL_PERF=1 to assert`);
+  }
 
   // ── A vault that is not there must not be fatal ───────────────────────────
   const absent = join(tempRoot, "not-mounted");
@@ -351,12 +415,13 @@ try {
   // fails. Both sides come from the same run, so machine load cancels.
   const CONVOY_SLACK = 1.5;
   const serialEquivalent = Math.round(cold * CONCURRENT_SESSIONS * CONVOY_SLACK);
-  if (timingIsTrustworthy) {
-    check(
-      slowest < serialEquivalent,
-      `concurrency does not convoy: slowest ${slowest}ms < ` +
-        `${CONCURRENT_SESSIONS} x cold ${cold}ms x ${CONVOY_SLACK} = ${serialEquivalent}ms`,
-    );
+  const convoyDetail =
+    `concurrency does not convoy: slowest ${slowest}ms < ` +
+    `${CONCURRENT_SESSIONS} x cold ${cold}ms x ${CONVOY_SLACK} = ${serialEquivalent}ms`;
+  if (PERF && timingIsTrustworthy) {
+    check(slowest < serialEquivalent, convoyDetail);
+  } else {
+    console.log(`  note  ${convoyDetail} — advisory, set OIL_PERF=1 to assert`);
   }
   check(
     concurrent.every((r) => r.notes === NOTE_COUNT || r.notes === 0),
