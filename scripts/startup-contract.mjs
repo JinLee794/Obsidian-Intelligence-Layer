@@ -164,7 +164,7 @@ const waitForReady = async (client) => {
   return callJson(client, "get_health");
 };
 
-const handshakeOf = async (vaultPath) => {
+const handshakeOf = async (vaultPath, { hydrate = false } = {}) => {
   const startedAt = Date.now();
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -176,6 +176,13 @@ const handshakeOf = async (vaultPath) => {
   const client = new Client({ name: "oil-startup-contract", version: "1.0.0" });
   await client.connect(transport);
   const elapsed = Date.now() - startedAt;
+  if (hydrate) {
+    await client.callTool(
+      { name: "search_vault", arguments: { query: "ready", limit: 1 } },
+      undefined,
+      { timeout: 300_000 },
+    );
+  }
   await client.close().catch(() => undefined);
   await transport.close().catch(() => undefined);
   return elapsed;
@@ -185,19 +192,21 @@ try {
   console.log(`\nOIL startup contract — ${NOTE_COUNT} notes, budget ${BUDGET_MS}ms\n`);
   await buildVault();
 
-  // Establish what a handshake costs on this machine before measuring one that
-  // is supposed to be indistinguishable from it. Best-of-two, because the
-  // interesting direction is "slower than it should be" and a single sample on
-  // a contended box measures the contention.
+  // Establish the warm handshake cost on this machine before measuring a large
+  // warm vault. Seed explicitly so the baseline cannot alternate between cold
+  // and warm depending on whether a background five-note build finished.
   const tiny = join(tempRoot, "tiny-vault");
   await mkdir(tiny, { recursive: true });
   for (let i = 0; i < 5; i++) {
     await writeFile(join(tiny, `Tiny ${i}.md`), `# Tiny ${i}\n\nbody\n`, "utf-8");
   }
-  baselineMs = Math.min(await handshakeOf(tiny), await handshakeOf(tiny));
+  await handshakeOf(tiny, { hydrate: true });
+  const tinyWarmSamples = [];
+  for (let i = 0; i < 5; i++) tinyWarmSamples.push(await handshakeOf(tiny));
+  baselineMs = Math.min(...tinyWarmSamples);
   timingIsTrustworthy = baselineMs < TRUSTWORTHY_BASELINE_MS;
   console.log(
-    `  machine baseline: ${baselineMs}ms handshake on a 5-note vault` +
+    `  machine baseline: ${baselineMs}ms warm handshake on a 5-note vault` +
       `${timingIsTrustworthy ? "" : " — LOADED, timing checks are advisory"}\n`,
   );
 
@@ -264,10 +273,13 @@ try {
     "server announces readiness before it starts reading the vault",
   );
 
-  const largeHandshake = Math.min(await handshakeOf(vault), await handshakeOf(vault));
+  // `ordering` awaited hydration above, so the large graph is persisted here.
+  const largeWarmSamples = [];
+  for (let i = 0; i < 5; i++) largeWarmSamples.push(await handshakeOf(vault));
+  const largeHandshake = Math.min(...largeWarmSamples);
   const ceiling = baselineMs * 2 + 1000;
   const scaleDetail =
-    `handshake is independent of vault size: ${NOTE_COUNT} notes ${largeHandshake}ms ` +
+    `warm handshake is independent of vault size: ${NOTE_COUNT} notes ${largeHandshake}ms ` +
     `vs 5 notes ${baselineMs}ms (ceiling ${Math.round(ceiling)}ms)`;
   if (timingIsTrustworthy) check(largeHandshake < ceiling, scaleDetail);
   else console.log(`  note  ${scaleDetail} — advisory, machine too loaded to judge`);
@@ -285,10 +297,7 @@ try {
   try {
     const startedAt = Date.now();
     await absentClient.connect(absentTransport);
-    check(
-      Date.now() - startedAt < BUDGET_MS || Date.now() - startedAt < baselineMs * 3 + 1500,
-      "server still completes the handshake when the vault is missing",
-    );
+    checkHandshake(Date.now() - startedAt, "missing-vault");
     const health = await callJson(absentClient, "get_health");
     check(
       health.startup?.phase === "failed" && /does not exist/i.test(health.startup?.reason ?? ""),
@@ -304,7 +313,7 @@ try {
   // ── A corrupt persisted index must degrade, not fail ──────────────────────
   await writeFile(join(vault, "_oil-graph.json"), '{"version":2,"nodes":[{"pa', "utf-8");
   await session("corrupt index", async ({ client, handshakeMs }) => {
-    check(handshakeMs < BUDGET_MS, `corrupt-index handshake ${handshakeMs}ms < ${BUDGET_MS}ms`);
+    checkHandshake(handshakeMs, "corrupt-index");
     const health = await waitForReady(client);
     check(health.index?.note_count === NOTE_COUNT, "corrupt index is rebuilt, not fatal");
   });
@@ -320,10 +329,7 @@ try {
     ),
   );
   const slowest = Math.max(...concurrent.map((r) => r.handshakeMs));
-  check(
-    slowest < BUDGET_MS,
-    `4 concurrent cold sessions all handshake within budget (slowest ${slowest}ms)`,
-  );
+  checkHandshake(slowest, "4 concurrent cold sessions (slowest)");
 
   // ── Disconnect must be observed, and must be terminal ────────────────────
   //
