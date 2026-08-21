@@ -796,10 +796,18 @@ export class GraphIndex {
     } catch (err) {
       // A missing index is the normal first-run case; anything else is a
       // silent downgrade to a full rebuild and worth naming.
+      //
+      // This says "corrupt" and "rebuild" because its three siblings above do,
+      // and an operator scanning startup logs for a discarded index should not
+      // have to know which of four failure modes they hit to find the line. A
+      // truncated file lands here rather than on the shape checks, and the
+      // earlier wording ("unreadable ... falling back to full build") shared no
+      // vocabulary with them — enough to convince a reader the case logged
+      // nothing at all.
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
         console.error(
-          `[OIL] Graph index unreadable (${code ?? (err as Error).message}) — falling back to full build.`,
+          `[OIL] Graph index corrupt or unreadable (${code ?? (err as Error).message}) — will rebuild.`,
         );
       }
       return false;
