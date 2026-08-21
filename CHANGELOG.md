@@ -68,10 +68,15 @@ which now returns an explained zero instead of lexical hits.
   `scripts/verify-observed.mjs` checks these claims against the built artifact
   rather than in-process — it exists because the shutdown fix below was first
   written from the code and turned out to be false in the runtime a client
-  drives. All are wired into `check:release`.
-- **CI on pull requests** (`.github/workflows/ci.yml`) — lint, tests, startup
-  contract and package smoke on Linux and Windows. Previously nothing ran until a
-  push to `main`.
+  drives. The startup gate was itself proven by injecting a warm-only delay
+  proportional to persisted-index size: exactly one assertion fails, the scale
+  one, so it detects the regression class it exists to prevent.
+- **A CI workflow for pull requests** (`.github/workflows/ci.yml`) — lint, tests,
+  startup contract and package smoke on Linux and Windows. Previously nothing ran
+  until a push to `main`: the only workflow was `Publish`, and its run history
+  contains no verification runs at all. The workflow ships *with* this release, so
+  it has not yet executed on a pull request — the first PR against this branch is
+  what will prove it.
 - **Evaluation harnesses.** `bench/eval-golden.mjs` scores `search_vault` against
   scenarios with known answers, grouped so a change that helps one query kind
   while breaking another is visible instead of averaged away; baselines record to
@@ -136,7 +141,11 @@ which now returns an explained zero instead of lexical hits.
 - Wall-clock performance ceilings moved behind `OIL_PERF=1` (`npm run
   test:perf`). They assert absolute latency, which is only meaningful on an idle
   machine — under load they failed on unmodified `main` too, and a gate that
-  cries wolf is one people learn to ignore. `check:release` is now deterministic.
+  cries wolf is one people learn to ignore. That was the dominant source of
+  `check:release` flakiness and it is fixed; the suite has run green repeatedly
+  since. A handful of watcher tests remain timing-sensitive and are declared with
+  `{ retry: 2 }`, so "deterministic" is the goal rather than a measured
+  guarantee.
 
 ### Fixed
 
