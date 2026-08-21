@@ -179,6 +179,12 @@ export function applyEnvOverrides(
   const minScore = parseNumber(env.OIL_SEMANTIC_MIN_SCORE, "OIL_SEMANTIC_MIN_SCORE");
   if (minScore !== undefined) semantic.minScore = minScore;
 
+  // Reachable from the environment so a measurement harness can tighten or
+  // loosen the budget without editing a vault's config — and so the
+  // degradation path can be provoked deliberately in a test.
+  const timeoutMs = parseNumber(env.OIL_SEMANTIC_TIMEOUT_MS, "OIL_SEMANTIC_TIMEOUT_MS");
+  if (timeoutMs !== undefined) semantic.timeoutMs = timeoutMs;
+
   const search = { ...config.search };
   if (env.OIL_EXCLUDE_FOLDERS !== undefined && env.OIL_EXCLUDE_FOLDERS.trim() !== "") {
     search.excludeFolders = env.OIL_EXCLUDE_FOLDERS.split(",")

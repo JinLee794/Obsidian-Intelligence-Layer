@@ -264,6 +264,58 @@ describe("SemanticIndex — degradation", () => {
     expect(index.status).toBe("ready");
   });
 
+  it("counts a failed query embedding without changing what the caller sees", async () => {
+    // Both halves of the contract in one test, because they are in tension.
+    //
+    // Production must not notice: a query the embedder could not answer still
+    // returns an empty list, never an exception, so an unreachable Ollama
+    // degrades a search instead of breaking it.
+    //
+    // Measurement must notice: the same event has to be countable, or a harness
+    // scores "the embedder timed out" as "the semantic tier found nothing" and
+    // publishes an environmental failure as a quality number.
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.refresh(graph);
+    expect(index.status).toBe("ready");
+    expect(index.degradation.queryFailures).toBe(0);
+
+    const healthy = await index.search("cloud migration", 5);
+    expect(index.degradation.queryFailures).toBe(0);
+
+    stub.failNext = true;
+    const degradedResults = await index.search("a query the embedder cannot serve", 5);
+
+    expect(degradedResults).toEqual([]);
+    expect(index.degradation.queryFailures).toBe(1);
+    expect(index.degradation.lastReason).toContain("stub failure");
+    // The healthy call really did return something, so the empty list above is
+    // attributable to the failure rather than to an inert tier.
+    expect(healthy.length).toBeGreaterThan(0);
+  });
+
+  it("separates an empty answer from a failed one", async () => {
+    // The distinction the eval harness depends on: a query that simply matches
+    // nothing above the floor must leave the counters alone, so a refusal to
+    // score only ever fires on a real failure.
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: 2 }));
+    await index.refresh(graph);
+
+    const nothing = await index.search("cloud migration", 5);
+
+    expect(nothing).toEqual([]);
+    expect(index.degradation.queryFailures).toBe(0);
+    expect(index.degradation.indexFailures).toBe(0);
+  });
+
+  it("counts a failed refresh separately from a failed query", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    stub.failNext = true;
+    await index.refresh(graph);
+
+    expect(index.degradation.indexFailures).toBe(1);
+    expect(index.degradation.queryFailures).toBe(0);
+  });
+
   it("does not report ready from a cached index alone", async () => {
     // Every query still has to be embedded, so a complete sidecar with no
     // reachable Ollama is not a working tier.
