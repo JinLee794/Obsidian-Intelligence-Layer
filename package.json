@@ -42,7 +42,10 @@
     "eval:baseline": "node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json --baseline",
     "eval:check": "node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json --compare",
     "eval:lexical": "node bench/eval-golden.mjs --dataset=bench/datasets/fixture.golden.json --no-semantic --compare",
-    "eval:strategies": "node bench/ranking-strategies.mjs"
+    "eval:strategies": "node bench/ranking-strategies.mjs",
+    "eval:vault": "node bench/eval-golden.mjs --dataset=bench/datasets/eval.golden.json",
+    "eval:vault:strategies": "node bench/ranking-strategies.mjs --dataset=bench/datasets/eval.golden.json",
+    "eval:vault:regen": "node bench/fixtures/generate-eval-vault.mjs"
   },
   "keywords": [
     "mcp",
