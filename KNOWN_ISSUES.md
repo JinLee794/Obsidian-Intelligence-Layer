@@ -66,3 +66,53 @@ that its claims are true.
 Adopt an order-independent tie-break rule, apply it in both the full build and the incremental
 path, and call the behaviour change out in release notes, since it can move existing ambiguous
 links.
+
+---
+
+## A `v0.7.0-beta.1` tag is published for a version this project never released
+
+**Status:** open · **Severity:** low, but needs one manual action · **Found:** v0.6.0 validation
+
+The tag `v0.7.0-beta.1` is pushed to `origin`, at commit `48bda599`. That commit really does carry
+`"version": "0.7.0-beta.1"` in `package.json`, so the tag is internally consistent — but the
+version was later walked **backwards**:
+
+```
+0.5.5 -> 0.6.0 (5ca738f) -> 0.7.0-beta.1 (c43a800) -> 0.6.0 (c00b261)
+```
+
+Under semver, `0.6.0` sorts *older* than `0.7.0-beta.1`, so at first glance this release looks
+like a downgrade from something already tagged.
+
+### Why 0.6.0 is nevertheless the correct number
+
+The prerelease was **never published**. Observed:
+
+```
+npm view @jinlee794/obsidian-intelligence-layer versions
+  0.2.0 0.3.1 0.5.0 0.5.1 0.5.2 0.5.3 0.5.4 0.5.5
+npm view @jinlee794/obsidian-intelligence-layer dist-tags
+  { "latest": "0.5.5" }
+```
+
+The registry stops at `0.5.5`. The reason is visible in the workflow: `Publish` triggers only on
+a push to `main`, and `48bda599` sits on the `feat/semantic-tier` branch, so publication never
+fired. `gh run list` confirms it — every recorded run is a `Publish` run on `main`.
+
+So **no installed consumer can be on `0.7.0-beta.1`**, and the next version after the published
+`0.5.5` is `0.6.0`. Renumbering this release to `0.7.0` would inflate the version to accommodate
+an artifact nobody received.
+
+### Required manual action
+
+Delete the stray tag, so the repository does not advertise a release that does not exist:
+
+```
+git push origin :refs/tags/v0.7.0-beta.1
+git tag -d v0.7.0-beta.1
+```
+
+This was not done during the v0.6.0 work because the account doing it lacks push access to the
+repository — both `git push` and issue creation return `403` under the enterprise policy in force.
+Anyone with write access can complete it in one command.
+
