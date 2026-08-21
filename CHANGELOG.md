@@ -105,7 +105,10 @@ which now returns an explained zero instead of lexical hits.
   The damping constant also drops from 60 to 10 — the classic value assumes many
   systems of similar quality, whereas these tiers differ by design and are now
   weighted by evidence, so damping their internal ordering discards signal twice.
-  MRR 0.664 → 0.707, four of fifteen cases improved and none regressed.
+  MRR 0.664 → 0.707, four of fifteen cases improved and none regressed. Note that
+  the damping change is a reasoned default, not an observed improvement: on every
+  dataset in this repository, 60 and 10 produce identical rankings (0 of 12 cases
+  differ, across both harnesses).
 - **Responses are compact JSON.** Indentation was 25% of every payload
   (17,377 → 13,055 chars across ten representative calls) and nothing on the
   receiving end renders it.
@@ -116,8 +119,11 @@ which now returns an explained zero instead of lexical hits.
   and `query_frontmatter`'s duplicate `matches` array.
 - **The fuzzy tier no longer indexes note bodies.** BM25 already indexes them with
   term statistics, so fuse.js was making a slower second pass over the same text —
-  the dominant cost of the tier. The three tiers now have disjoint jobs: BM25 owns
-  exact terms and identifiers, fuzzy owns misspelled names, semantic owns meaning.
+  the dominant cost of the tier. The three tiers are now weighted toward different
+  jobs rather than split cleanly between them: BM25 leads on exact terms and
+  identifiers, fuzzy on misspelled names, semantic on meaning. They still overlap —
+  a result routinely matches on more than one tier, which is why `matched_by` is a
+  list.
 - **`score` is comparable across code paths.** Escalated queries returned raw
   reciprocal-rank sums (~0.016–0.033) while direct answers returned a 0–1 value.
   Both now normalise to the top hit. Rank order is unaffected; it remains a
