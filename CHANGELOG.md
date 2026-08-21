@@ -158,13 +158,24 @@ which now returns an explained zero instead of lexical hits.
 - **The server no longer fails to start on a cold or slow vault.** The stdio
   transport was connected *last*, after the graph build, semantic load, watcher
   and tool registration — so a client's `initialize` sat behind a full vault
-  index, measured at 6,441 ms cold for 2,000 notes on a local SSD and unbounded
-  on synced or network storage. The SDK gives up at 60 s, so a large or slow
-  enough vault could never connect at all. A small vault stays far under that
-  ceiling — the intermittent failures there came from the leaked watcher, the
-  watcher crash and the unguarded rejection paths below, not from this — but the
-  handshake had no business scaling with vault size either way. The transport now
-  connects first and vault work runs behind a hydration gate.
+  index. Measured A/B against the pre-fix build over real stdio, three cold runs
+  each, semantic off, on a local SSD:
+
+  | notes | before | after |
+  |-------|--------|-------|
+  | 2,000 | 1,923 / 2,006 / 2,040 ms | 613 / 441 / 421 ms |
+  | 6,000 | 5,107 / 9,172 / 9,780 ms | 752 / 1,165 / 969 ms |
+
+  The point is the shape rather than any single number: before, the handshake
+  scaled with vault size; after, it does not. The SDK gives up at 60 s
+  (`DEFAULT_REQUEST_TIMEOUT_MSEC`), so a vault large enough — or storage slow
+  enough, which is where synced and network folders bite — could extend that
+  curve past the ceiling and never connect at all. That end of the curve is an
+  extrapolation, not something reproduced here. A small vault stays far under it:
+  a 273-note vault handshook in 446 ms even before the fix, so the intermittent
+  failures reported on small vaults are **not** explained by this and their cause
+  is not established. The transport now connects first and vault work runs behind
+  a hydration gate.
 - **A burst of file changes no longer costs O(vault) per file.** The watcher gave
   every changed path its own debounce timer, so a sync, a `git pull` or a bulk
   rename produced one re-index and one search invalidation per filesystem
@@ -251,6 +262,9 @@ which now returns an explained zero instead of lexical hits.
   window were silently lost with no way to tell. `whenReady()` is exposed and
   `ready` appears in `get_health`. Found by an end-to-end liveness harness on a
   2,000-note vault, where an edit just after startup never reached the index.
+  Both landed in `d08494e`, before the startup work above rather than as part of
+  it; they are listed here because `d08494e` postdates 0.5.5 and this is the
+  release that ships it.
 - **The vector index only refreshed on queries that reached the semantic tier.**
   `ensureFresh` hung off the tier itself, which the cascade runs only when the
   lexical tiers fail to cover a query — rare in an entity-keyed vault. A vault
