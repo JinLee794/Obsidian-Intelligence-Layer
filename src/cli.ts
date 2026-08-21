@@ -38,6 +38,8 @@ const USAGE = `Usage: obsidian-intelligence-layer <command> [flags]
 Commands:
   mcp                       Start the MCP server over stdio.
   doctor                    Check vault, Ollama and effective settings, then exit.
+                            Exits 0 if everything checks out, 1 if a check
+                            failed, 2 if a check could not be confirmed.
 
 Flags (equivalent env vars in parentheses):
   --vault=<path>            Vault to serve (OBSIDIAN_VAULT_PATH)
