@@ -159,6 +159,11 @@ const totals = Object.fromEntries(
   ]),
 );
 const perCase = [];
+const degraded = [];
+
+/** Total failures the semantic tier has swallowed so far. */
+const degradationCount = () =>
+  semantic.degradation.queryFailures + semantic.degradation.indexFailures;
 
 for (const testCase of dataset.cases) {
   const relevant = testCase.relevant ?? [];
@@ -166,7 +171,18 @@ for (const testCase of dataset.cases) {
 
   const lex = lexicalSearch(graph, testCase.query, DEPTH);
   const fuz = fuzzySearch(graph, testCase.query, DEPTH);
+  const failuresBefore = degradationCount();
   const sem = await semanticSearch(graph, testCase.query, DEPTH);
+  if (degradationCount() > failuresBefore) {
+    // The embedder failed while answering *this* query. `sem` is empty because
+    // the call failed, not because nothing was similar, and every strategy that
+    // reads it is now scoring an infrastructure failure.
+    degraded.push({
+      id: testCase.id,
+      query: testCase.query,
+      reason: semantic.degradation.lastReason ?? "unknown",
+    });
+  }
 
   const queryTerms = tokenize(testCase.query).length;
   const rawCoverage =
@@ -212,6 +228,30 @@ for (const testCase of dataset.cases) {
   oracle.recall += Math.max(...singles.map((s) => s.recall));
 }
 
+// ─── Refuse a degraded run ────────────────────────────────────────────────────
+
+// Comparing ranking policies is exactly what a degraded embedder destroys. With
+// the semantic arm empty, every fusion variant collapses onto the same lexical
+// and fuzzy input and scores identically, so the table still sorts and still
+// looks like a verdict while having lost the thing it set out to measure.
+// Measured against a proxy that answered /api/tags normally and returned 503 for
+// embeddings: all four fusion strategies printed 0.879 MRR where a healthy run
+// separates them across 0.850-0.931, and 'semantic only' printed 0%.
+if (degraded.length > 0) {
+  console.error(
+    `\nREFUSING TO SCORE: the semantic tier failed on ${degraded.length} of ` +
+      `${dataset.cases.length} case(s), so these strategies are not comparable.\n`,
+  );
+  for (const { id, query, reason } of degraded) {
+    console.error(`  ${id}  "${query}"  — ${reason}`);
+  }
+  console.error(
+    "\nThis is an infrastructure failure, not a ranking result. Fix the embedder\n" +
+      "and re-run; a number from this run would describe the machine, not the code.\n",
+  );
+  process.exit(2);
+}
+
 // ─── Report ───────────────────────────────────────────────────────────────────
 
 const pct = (n) => `${(n * 100).toFixed(0)}%`;
@@ -220,11 +260,13 @@ console.log(`\n${"═".repeat(70)}`);
 console.log(`Ranking strategies — ${dataset.name ?? datasetPath}`);
 console.log(`${totals[Object.keys(STRATEGIES)[0]].cases} cases, top ${LIMIT}`);
 console.log("═".repeat(70));
-console.log("\n  strategy                 hit rate    MRR    recall");
+console.log("\n  strategy                 hit rate            MRR    recall");
 
 const rows = Object.entries(totals).map(([name, t]) => ({
   name,
   hit: t.hit / t.cases,
+  hitCount: t.hit,
+  cases: t.cases,
   mrr: t.rr / t.cases,
   recall: t.recall / t.cases,
 }));
@@ -233,7 +275,7 @@ const rows = Object.entries(totals).map(([name, t]) => ({
 // declaration order.
 for (const row of [...rows].sort((a, b) => b.mrr - a.mrr)) {
   console.log(
-    `  ${row.name.padEnd(24)} ${pct(row.hit).padStart(6)}   ${row.mrr.toFixed(3)}    ${pct(row.recall).padStart(5)}`,
+    `  ${row.name.padEnd(24)} ${pct(row.hit).padStart(6)} ${`(${row.hitCount}/${row.cases})`.padStart(8)}   ${row.mrr.toFixed(3)}    ${pct(row.recall).padStart(5)}`,
   );
 }
 
