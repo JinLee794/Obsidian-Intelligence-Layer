@@ -101,7 +101,12 @@ than in 0.5.5.
   while breaking another is visible instead of averaged away; baselines record to
   disk and `--compare` exits non-zero on a drop. `bench/ranking-strategies.mjs`
   isolates ranking policy from retrieval — it is what established that fusing
-  beats any single tier (93% hit rate versus 60%). Also `index-liveness`,
+  beats any single tier. Its headline figure (93% hit rate versus 60%) predates
+  the harness-honesty fix described under *Rank fusion* below and shares the
+  mechanism that invalidated the other ranking numbers, so treat the margin as
+  unconfirmed pending re-measurement; the ordering it establishes — fusion above
+  every single tier — is a large enough gap that a degraded embedding tier would
+  understate it rather than manufacture it. Also `index-liveness`,
   `semantic-probe`, `semantic-live-check`, `semantic-eval`, `rebuild-cost`,
   `tier-breakdown`, `floor-analysis` and `tool-surface-cost`.
 - **Consistency and soak suites** — a multi-turn suite over a generated
@@ -118,16 +123,56 @@ than in 0.5.5.
   embedding tier directly, takes `filter_folder` and `filter_tags`, and reports
   *why* a result set is empty. `search_vault` remains the default for ordinary
   lookups and consults the same tier as part of its cascade.
+- **The semantic tier counts the failures it swallows.** Graceful degradation is
+  the correct runtime behaviour — an unreachable Ollama must not break a search
+  — but it made two different events indistinguishable: a query that found
+  nothing because the vault holds nothing similar, and one that found nothing
+  because the embedding call failed. `SemanticIndex.degradation` now exposes
+  `queryFailures`, `indexFailures` and `lastReason`, monotonic for the life of
+  the index, so a caller can snapshot around a search and know whether that
+  answer was a real one. Served behaviour is unchanged. This is what makes the
+  distinction detectable at all: the failures are per call, and they do not move
+  the tier's status, so a harness that samples status once at setup sees a
+  healthy `ready` tier for an entire run in which individual embeddings were
+  failing. `OIL_SEMANTIC_TIMEOUT_MS` is readable from the environment so the
+  degradation path can be provoked deliberately rather than waited for.
 - **Rank fusion is weighted by how much of the query each tier understood.**
   Equal weights let a tier that matched one word of a seven-word question outvote
-  one that matched its meaning. Golden set: hit rate 87% → 93%, recall 72% → 78%.
-  The damping constant also drops from 60 to 10 — the classic value assumes many
-  systems of similar quality, whereas these tiers differ by design and are now
-  weighted by evidence, so damping their internal ordering discards signal twice.
-  MRR 0.664 → 0.707, four of fifteen cases improved and none regressed. Note that
-  the damping change is a reasoned default, not an observed improvement: on every
-  dataset in this repository, 60 and 10 produce identical rankings (0 of 12 cases
-  differ, across both harnesses).
+  one that matched its meaning. The damping constant also drops from 60 to 10 —
+  the classic value assumes many systems of similar quality, whereas these tiers
+  differ by design and are now weighted by evidence, so damping their internal
+  ordering discards signal twice.
+
+  **This release publishes no before/after ranking numbers for that change, and
+  the reason is worth more than the numbers were.** Earlier drafts carried a hit
+  rate, a recall and an MRR delta from `bench/eval-golden.mjs`. Those were
+  produced by a harness that could not tell a ranking result from an
+  infrastructure failure, so they have been withdrawn rather than restated. The
+  demonstration is direct: with a proxy that serves Ollama's `/api/tags`
+  normally but returns HTTP 503 for embeddings after N calls, the pre-fix
+  harness printed `hit rate 75%, MRR 0.688, recall 71%` and **exited 0**, with
+  no warning. Per-call embedding failures were being scored as genuine, worse
+  rankings. The fixed harness against the identical proxy refuses to score,
+  names the affected cases, and exits non-zero.
+
+  Two things were ruled out along the way, both by direct measurement. The
+  embedding model is deterministic — the same query embedded eight times over
+  raw HTTP, with no OIL code in the path, returns one distinct vector, bit for
+  bit. And the ranking is deterministic given the same inputs: four rounds
+  within one process and six separate processes produce byte-identical ranked
+  lists with identical scores. The variance was never in the model or the
+  cascade; it was load-dependent embedding failures being silently absorbed.
+  Re-measurement on a larger committed golden set is in flight and will be
+  published when it reproduces across repeated runs, or reported as inside the
+  noise band if it does not.
+
+
+  The damping change remains a reasoned default rather than an observed
+  improvement. On every dataset in this repository, 60 and 10 produce identical
+  rankings (0 of 12 cases differ, across both harnesses) — and that result now
+  has a likely explanation rather than standing as evidence of no effect: the
+  12-note fixture vault is smaller than the harness's own top-10 window, which
+  pins hit rate at 100% and leaves a fusion constant nothing to move.
 - **Responses are compact JSON.** Indentation was 25% of every payload
   (17,377 → 13,055 chars across ten representative calls) and nothing on the
   receiving end renders it.
@@ -228,8 +273,9 @@ than in 0.5.5.
 - These two entries and the harness fix above are the same defect wearing
   different clothes, and it is worth naming: **a gate that reports a number it
   cannot reproduce launders an environmental failure into what reads as a
-  result.** An Ollama timeout became a quality metric; machine load became a
-  contract failure. Every remaining assertion in both startup-contract harnesses
+  result.** That is not a figure of speech here: an HTTP 503 from Ollama was
+  printed as `hit rate 75%, MRR 0.688` with a zero exit status, and machine load
+  was printed as a contract failure on a correct build. Every remaining assertion in both startup-contract harnesses
   is structural — readiness is announced before the vault is read, the index
   hydrates behind the handshake, a missing vault is reported rather than fatal,
   a corrupt index is rebuilt, concurrent sessions report a coherent index, and
