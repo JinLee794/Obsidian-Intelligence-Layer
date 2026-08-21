@@ -50,6 +50,8 @@ npm run eval:vault              # 30 cases, semantic tier live, needs Ollama
 npm run eval:vault:strategies   # compares fusion policies against a tier oracle
 ```
 
+Both refuse to print a number if the embedder failed while answering any case.
+
 ## Why the harness refuses instead of scoring
 
 `embedQuery` catches a failed embedding call and returns nothing, so the search
@@ -81,8 +83,25 @@ fails only embeddings, which is what the proxy above was for: measured warm,
 `/api/tags` answers in 3-12 ms and `/api/embed` in 27-47 ms, so no timeout value
 separates them.
 
-## Quote denominators
+## Comparing strategies is what degradation destroys
 
+`ranking-strategies.mjs` is more fragile than the absolute metric, not less. With
+the semantic arm empty every fusion variant reads the same two lists and scores
+identically, so the table still sorts and still reads like a verdict.
+
+Measured through the same 503 proxy: all 14 index batches succeeded, the tier
+reported `ready`, then all 30 query embeddings failed, and the pre-fix harness
+printed a full table and exited 0. In it `rrf equal`, `rrf coverage` and both
+score blends all scored **0.879 MRR**, where a healthy run separates them across
+**0.850-0.931**. `semantic only` printed 0%.
+
+The apparent margin is inflated, not shrunk. Healthy, fusion leads `semantic
+only` by 0.228 MRR; degraded, it leads by 0.879 — the comparator collapses to
+zero while fusion keeps its lexical tiers. Any published "fusion beats a single
+tier by N" measured on a harness without this gate should be treated as
+unconfirmed in magnitude *and* in ordering between fusion variants.
+
+## Quote denominators
 At N=30 one case is worth 3.3 points of hit rate; at N=15 it is 6.7, and at N=12
 it is 8.3. The 0.6.0 notes reported `87% -> 93%` on an N=15 set, which is
 13/15 -> 14/15 — one case. The harness now prints the denominator beside every
