@@ -462,3 +462,106 @@ describe("cascadeSearch — semantic tier", () => {
     }
   });
 });
+
+// ─── Ran vs contributed ───────────────────────────────────────────────────────
+
+/**
+ * A tier that ran and found nothing used to be indistinguishable from a tier
+ * that never ran, because both were simply absent from `tiersUsed`. That is not
+ * a cosmetic gap: it led a reader to conclude the cascade was not wired to the
+ * semantic tier at all, when in truth the tier had run on every escalated query
+ * and nothing had cleared the similarity floor.
+ */
+describe("cascadeSearch — tiers that ran vs tiers that contributed", () => {
+  it("reports a tier that ran and cleared nothing, distinctly from one that never ran", async () => {
+    // An unreachable floor: the tier embeds, scores every note, and admits none.
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: 1.1 }));
+    await index.refresh(graph);
+    attachSemanticIndex(graph, index);
+    stub.embedCalls.length = 0;
+
+    try {
+      const ran = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      // It really did run — an embedding round trip was paid for.
+      expect(stub.embedCalls.length).toBeGreaterThan(0);
+      expect(ran.tiersRan).toContain("semantic");
+      expect(ran.tiersUsed).not.toContain("semantic");
+
+      // ...and a query the lexical tier covered never reaches the tier at all.
+      stub.embedCalls.length = 0;
+      const skipped = await cascadeSearch(graph, "customer", 10, undefined);
+      expect(stub.embedCalls).toHaveLength(0);
+      expect(skipped.tiersRan).not.toContain("semantic");
+      expect(skipped.tiersUsed).not.toContain("semantic");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("still names the tiers that contributed, which is the older signal", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig({ minScore: -1 }));
+    await index.refresh(graph);
+    attachSemanticIndex(graph, index);
+
+    try {
+      const { tiersUsed, tiersRan } = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      expect(tiersUsed).toContain("semantic");
+      // Anything that contributed necessarily ran.
+      for (const tier of tiersUsed) expect(tiersRan).toContain(tier);
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("does not claim a disabled tier ran", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig({ enabled: false }));
+    attachSemanticIndex(graph, index);
+
+    try {
+      const { tiersRan, escalation } = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      expect(escalation).not.toBeNull();
+      expect(tiersRan).not.toContain("semantic");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("does not claim an unreachable tier ran", async () => {
+    // The whole point of the field is to be trusted; reporting a tier that
+    // could not serve would reintroduce the same untruth somewhere new.
+    const index = new SemanticIndex(
+      vaultRoot,
+      makeConfig({ endpoint: "http://127.0.0.1:1", minScore: -1 }),
+    );
+    await index.refresh(graph);
+    attachSemanticIndex(graph, index);
+
+    try {
+      const { tiersRan } = await cascadeSearch(graph, "Cntoso", 5, undefined);
+      // Whatever it is mid-retry — `unavailable`, or `indexing` while a
+      // background refresh fails again — it is not serving, and must not claim
+      // to have run.
+      expect(index.status).not.toBe("ready");
+      expect(tiersRan).not.toContain("semantic");
+    } finally {
+      detachSemanticIndex(graph);
+    }
+  });
+
+  it("reports the fuzzy tier as run even when it recovers nothing", async () => {
+    const { tiersRan, tiersUsed } = await cascadeSearch(graph, "zzzzqqqq", 5, undefined);
+    expect(tiersRan).toContain("fuzzy");
+    expect(tiersUsed).not.toContain("fuzzy");
+  });
+
+  it("omits the fuzzy tier entirely when the query is too long for it", async () => {
+    // Bitap cost scales per token per document, so a long query skips the tier.
+    const { tiersRan } = await cascadeSearch(
+      graph,
+      "a rambling question with far too many words for fuzzy matching",
+      5,
+      undefined,
+    );
+    expect(tiersRan).not.toContain("fuzzy");
+  });
+});

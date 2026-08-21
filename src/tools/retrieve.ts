@@ -168,6 +168,7 @@ async function semanticOnlySearch(
       return jsonResponse({
         count: 0,
         tiers_used: [],
+        tiers_ran: [],
         results: [],
         ...(Object.keys(notice).length > 0
           ? notice
@@ -183,6 +184,9 @@ async function semanticOnlySearch(
   return jsonResponse({
     count: results.length,
     tiers_used: ["semantic"],
+    // Reaching here means the tier was ready and searched, whether or not
+    // anything cleared the floor.
+    tiers_ran: ["semantic"],
     results: results.map((hit) => ({
       path: hit.path,
       title: hit.title,
@@ -231,7 +235,7 @@ export function registerRetrieveTools(
       }
 
       const boundedLimit = limit ?? 10;
-      const { results, tiersUsed, escalation, totalMatched } = await cascadeSearch(
+      const { results, tiersUsed, tiersRan, escalation, totalMatched } = await cascadeSearch(
         graph,
         query,
         boundedLimit,
@@ -249,6 +253,7 @@ export function registerRetrieveTools(
             }
           : {}),
         tiers_used: tiersUsed,
+        tiers_ran: tiersRan,
         escalated: escalation,
         ...semanticNotice(graph, escalation, tiersUsed),
         results: results.map(({ matchedBy, heading, ...rest }: CascadeHit) => ({

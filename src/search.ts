@@ -424,7 +424,23 @@ export interface CascadeHit {
 
 export interface CascadeResult {
   results: CascadeHit[];
+  /**
+   * Tiers that put at least one note into the answer.
+   *
+   * Deliberately not the same list as `tiersRan`: knowing which tier earned
+   * its keep is what tells you whether escalation was worth the cost.
+   */
   tiersUsed: string[];
+  /**
+   * Tiers that actually executed, whether or not they found anything.
+   *
+   * Without this, a tier that ran and cleared nothing looks exactly like a tier
+   * that never ran — and the difference is the whole diagnosis. A reader who
+   * sees only `["lexical"]` on an escalated query cannot tell "the semantic
+   * tier is not wired up" from "the semantic tier ran and nothing passed the
+   * similarity floor", and has no way to find out from the outside.
+   */
+  tiersRan: string[];
   /** Why the cascade escalated past lexical, or null if it never needed to. */
   escalation: string | null;
   /** Matches before the limit was applied, when the tier can count them. */
@@ -482,6 +498,7 @@ export async function cascadeSearch(
   const accept = (path: string) => passesFilters(path, graph, filters);
   const candidateDepth = Math.max(limit * 3, 20);
   const tiersUsed: string[] = [];
+  const tiersRan: string[] = [];
 
   // Reconcile vectors on every search, not just the ones that reach the semantic
   // tier. Escalation is rare in an entity-keyed vault, so hanging re-embedding
@@ -497,6 +514,7 @@ export async function cascadeSearch(
   // frontmatter values (customer:, action_owners:), and short-circuiting on
   // those would suppress the very note the user named.
   if (!graph.resolveTitle(query.trim())) {
+    tiersRan.push("frontmatter");
     const exact = exactFieldSearch(graph, query, accept);
     if (exact.length > 0) {
       tiersUsed.push("frontmatter");
@@ -516,6 +534,7 @@ export async function cascadeSearch(
           matchedBy: [`frontmatter:${hit.key}`],
         })),
         tiersUsed,
+        tiersRan,
         escalation: null,
         totalMatched: ordered.length,
       };
@@ -523,6 +542,7 @@ export async function cascadeSearch(
   }
   // ── Tier 1: BM25 ────────────────────────────────────────────────────────
   const lexical = lexicalSearch(graph, query, candidateDepth, filters);
+  tiersRan.push("lexical");
   tiersUsed.push("lexical");
 
   const queryTermCount = tokenize(query).length;
@@ -534,6 +554,7 @@ export async function cascadeSearch(
     return {
       results: lexical.slice(0, limit).map(toCascadeHit),
       tiersUsed,
+      tiersRan,
       escalation: null,
     };
   }
@@ -541,10 +562,9 @@ export async function cascadeSearch(
   const escalation = !fullCoverage ? "partial_term_coverage" : "insufficient_results";
 
   // ── Tier 2: fuzzy — recovers typos and near-miss titles ────────────────
-  const fuzzy =
-    queryTermCount <= FUZZY_MAX_QUERY_TOKENS
-      ? fuzzySearch(graph, query, candidateDepth, filters)
-      : [];
+  const fuzzyRan = queryTermCount <= FUZZY_MAX_QUERY_TOKENS;
+  const fuzzy = fuzzyRan ? fuzzySearch(graph, query, candidateDepth, filters) : [];
+  if (fuzzyRan) tiersRan.push("fuzzy");
   if (fuzzy.length > 0) tiersUsed.push("fuzzy");
 
   // ── Tier 3: semantic — recovers notes that share no words with the query ─
@@ -555,6 +575,14 @@ export async function cascadeSearch(
   const semantic = fullCoverage
     ? []
     : await semanticSearch(graph, query, candidateDepth, filters);
+  // Asked, and answered. `semanticSearch` returns an empty list both for "the
+  // tier is off or Ollama is down" and for "nothing cleared the floor", so the
+  // call alone does not establish that the tier ran — and reporting a tier that
+  // could not serve as having run would be the same untruth in a new place.
+  // Checked after the await: a mid-search failure flips the status.
+  if (!fullCoverage && getSemanticIndex(graph)?.status === "ready") {
+    tiersRan.push("semantic");
+  }
   if (semantic.length > 0) tiersUsed.push("semantic");
 
   // ── Tier 2b: last-resort fuzzy pass over body prose ─────────────────────
@@ -618,7 +646,7 @@ export async function cascadeSearch(
     };
   });
 
-  return { results, tiersUsed, escalation };
+  return { results, tiersUsed, tiersRan, escalation };
 }
 
 /** Adapt a single-tier hit to the cascade's response shape. */
