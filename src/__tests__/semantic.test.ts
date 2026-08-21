@@ -191,6 +191,23 @@ describe("SemanticIndex — indexing", () => {
     expect(stub.embedCalls).toHaveLength(0);
     expect(await index.search("migration", 5)).toEqual([]);
   });
+
+  it("names the layer that disabled it, rather than always blaming the yaml", async () => {
+    const config = makeConfig({ enabled: false });
+    // Pointing someone at oil.config.yaml when they passed `--no-semantic`
+    // sends them to a file that may not even exist.
+    expect(new SemanticIndex(vaultRoot, config, "flag").stats.reason).toBe(
+      "Disabled by the --no-semantic flag",
+    );
+    expect(new SemanticIndex(vaultRoot, config, "environment").stats.reason).toBe(
+      "Disabled by OIL_SEMANTIC in the environment",
+    );
+    expect(new SemanticIndex(vaultRoot, config, "oil.config.yaml").stats.reason).toBe(
+      "Disabled in oil.config.yaml",
+    );
+    // No source supplied: stay truthful rather than naming one.
+    expect(new SemanticIndex(vaultRoot, config).stats.reason).not.toMatch(/oil\.config\.yaml/);
+  });
 });
 
 // ─── Degradation ──────────────────────────────────────────────────────────────

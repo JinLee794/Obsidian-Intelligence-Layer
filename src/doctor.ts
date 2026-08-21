@@ -10,10 +10,10 @@
  */
 
 import { stat } from "node:fs/promises";
-import { loadConfig } from "./config.js";
+import { describeConfigSource, loadConfig } from "./config.js";
 import { describeError } from "./semantic.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
-import type { SemanticConfig } from "./types.js";
+import type { ConfigSource, SemanticConfig } from "./types.js";
 
 interface Check {
   label: string;
@@ -124,11 +124,16 @@ export async function runDoctor(): Promise<number> {
   const ollamaChecks = await checkOllama(config.semantic);
   render(ollamaChecks);
 
+  // Naming the layer each value came from is the difference between "this is
+  // the setting" and "this is why the setting is what it is" — the second is
+  // the question someone runs `doctor` to answer.
+  const from = (source: ConfigSource) => `(from ${describeConfigSource(source)})`;
+  const sources = config.provenance.semantic;
   console.log("\n  effective semantic settings");
-  console.log(`    enabled   ${config.semantic.enabled}`);
-  console.log(`    endpoint  ${config.semantic.endpoint}`);
-  console.log(`    model     ${config.semantic.model}`);
-  console.log(`    minScore  ${config.semantic.minScore}`);
+  console.log(`    enabled   ${config.semantic.enabled} ${from(sources.enabled)}`);
+  console.log(`    endpoint  ${config.semantic.endpoint} ${from(sources.endpoint)}`);
+  console.log(`    model     ${config.semantic.model} ${from(sources.model)}`);
+  console.log(`    minScore  ${config.semantic.minScore} ${from(sources.minScore)}`);
   console.log(`    index     ${config.semantic.indexFile} (in the vault root)`);
 
   const failed = [vaultCheck, ...ollamaChecks].filter((c) => !c.ok);

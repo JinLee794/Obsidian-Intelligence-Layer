@@ -81,7 +81,11 @@ export async function createOilServer(
   // ── In-memory components (construction only — no vault I/O) ─────────────
   const graph = new GraphIndex(vaultPath);
   const cache = new SessionCache();
-  const semantic = new SemanticIndex(vaultPath, config.semantic);
+  const semantic = new SemanticIndex(
+    vaultPath,
+    config.semantic,
+    config.provenance.semantic.enabled,
+  );
   attachSemanticIndex(graph, semantic);
   const watcher = new VaultWatcher(vaultPath, graph, cache);
 

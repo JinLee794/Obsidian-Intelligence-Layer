@@ -20,7 +20,8 @@ import { readFile, writeFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { GraphIndex } from "./graph.js";
 import { flattenFrontmatter } from "./frontmatter.js";
-import type { NoteFrontmatter, SemanticConfig } from "./types.js";
+import { describeSemanticDisabledBy } from "./config.js";
+import type { ConfigSource, NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
 const INDEX_VERSION = 1;
@@ -243,12 +244,14 @@ export class SemanticIndex {
   /** True once Ollama has actually answered this process. */
   private verified = false;
 
-  constructor(vaultPath: string, config: SemanticConfig) {
+  constructor(vaultPath: string, config: SemanticConfig, enabledSource?: ConfigSource) {
     this.vaultPath = vaultPath;
     this.config = config;
     this.endpoint = config.endpoint.replace(/\/+$/, "");
     this.state = config.enabled ? "cold" : "disabled";
-    if (!config.enabled) this.reason = "Disabled in oil.config.yaml";
+    // Name the layer that actually turned the tier off. Reporting a file that
+    // may not exist sends whoever is debugging this to the wrong place.
+    if (!config.enabled) this.reason = describeSemanticDisabledBy(enabledSource);
   }
 
   get status(): SemanticStatus {
