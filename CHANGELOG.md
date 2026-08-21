@@ -39,15 +39,29 @@ Migration, where four tools return a different container than in 0.5.5.
   missing heading is a `NOT_FOUND` listing `available_headings`, never a silently
   created section.
 - **`obsidian-intelligence-layer doctor`** — reports whether the vault resolves,
-  whether Ollama is reachable, whether the model is present, and the *effective*
-  settings after all configuration layers merge. Exits non-zero when something
-  needs attention.
+  whether Ollama is reachable, and whether the embedding model is installed, then
+  prints the *effective* settings after all configuration layers merge, annotating
+  each one with the layer it came from. Exits `0` when everything checks out, `1`
+  when a check failed, and `2` when a check could not be confirmed. An absent
+  model is the last of those, and the distinction is not pedantry: OIL pulls the
+  model on first use, which succeeds for a real name on a networked machine and
+  fails permanently for anything else, and `doctor` cannot tell those apart from
+  Ollama's tag list. Reporting either "fine" or "broken" there would be a guess.
 - **Configuration from the MCP client**, which wires up a server through
   `command`/`args`/`env` and never through files inside the vault. Every semantic
   setting is reachable by CLI flag (`--no-semantic`, `--semantic-model`,
   `--semantic-endpoint`, `--semantic-min-score`, `--vault`) or environment
   variable. Resolution order is flags → environment → `oil.config.yaml` →
-  defaults.
+  defaults. Flags take the form `--flag=value`; a space-separated
+  `--vault <path>` is rejected rather than silently ignored.
+- **Configuration answers say which layer set them.** Every semantic setting
+  carries derived provenance, so `get_health` and `doctor` name the layer that
+  actually supplied a value instead of guessing at one. Turning the tier off via
+  `OIL_SEMANTIC=off` now reports *"Disabled by OIL_SEMANTIC in the environment"*
+  and `--no-semantic` reports the flag; both previously blamed
+  `oil.config.yaml`, including on vaults that had no such file. Provenance is
+  derived and never declared — a `provenance` key inside a vault's
+  `oil.config.yaml` is stripped, so a vault cannot forge its own.
 - **`get_health` reports startup and semantic state** — a `startup` block
   (`phase`, `attempts`, `duration_ms`, and a `reason` when not ready) plus the
   tier's `status`, `model`, `note_count`, `dimensions` and `reason`. It is
@@ -175,6 +189,16 @@ Migration, where four tools return a different container than in 0.5.5.
   handful of watcher tests remain timing-sensitive and are declared with
   `{ retry: 2 }`, so "deterministic" is the goal rather than a measured
   guarantee.
+- **`npm run verify:observed` is now release-gating.** It runs nine assertions
+  against a real server over stdio — the claims in these notes that are about
+  runtime behaviour rather than code shape. It previously printed its findings
+  and always exited `0`, so a contradiction was a line of text nobody's build
+  read; it now sets a non-zero exit code and runs as the last stage of
+  `check:release`. Proven by injection rather than assumed: with the persisted
+  index deliberately prevented from loading, the run drops to `5/9`, names the
+  four claims it contradicts, and exits `1`; reverted, it returns `9/9` and
+  exits `0`. `bench/burst-cost.mjs` ships alongside it so the burst-coalescing
+  figures have a script anyone can re-run.
 
 ### Fixed
 
@@ -362,6 +386,15 @@ Migration, where four tools return a different container than in 0.5.5.
   test fixture missing `title`, `wikilinks` and `tags`, and a benchmark calling a
   `graph.getAllNodes()` method that does not exist. Also drop a `tier` field that
   `logWrite` no longer accepts, which broke `tsc --noEmit`.
+- A rejected `_oil-graph.json` now logs the same way whichever way it broke.
+  The four rejection paths had drifted apart — three said *corrupt* or
+  *mismatch* and *will rebuild*, while a parse failure said *unreadable* and
+  *falling back to full build*, sharing no word with its siblings. The discard
+  was always logged, but a search for the obvious terms did not find it. All
+  four now read *"Graph index corrupt or unreadable (…) — will rebuild"*, which
+  is equally true of a truncated file and an unreadable one. Worth knowing when
+  reading for it: these lines come from background indexing, so they arrive
+  *after* `[OIL] MCP server ready`.
 
 ### Migration
 
@@ -393,6 +426,16 @@ Also worth knowing:
   `tiers_used`, `escalated` and per-result `matched_by`. With no Ollama reachable
   `semantic_search` returns zero results and says why, where 0.5.5 returned
   lexical hits — this is the one behaviour that changes without Ollama present.
+- **`search_vault` responses carry `tiers_ran` alongside `tiers_used`.**
+  `tiers_used` is unchanged and still lists the tiers that *contributed* results;
+  `tiers_ran` lists the tiers that *executed*, so a tier that ran and matched
+  nothing is no longer indistinguishable from one that was never consulted. That
+  ambiguity was not hypothetical — it caused a false report during this release's
+  own validation, where `tiers_used: ["lexical"]` was read as "semantic never
+  escalated" when semantic had in fact run and returned nothing. A tier appears
+  in `tiers_ran` only if it was in a position to serve: a disabled or unreachable
+  semantic tier is still called by the cascade, and counting that as a run would
+  put the same untruth in a new field.
 - Anything thresholding on the raw `score` number should switch to rank or
   `matched_by`.
 - **The semantic tier is on by default** and will pull `nomic-embed-text`
