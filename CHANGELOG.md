@@ -159,9 +159,20 @@ Migration, where four tools return a different container than in 0.5.5.
 - Wall-clock performance ceilings moved behind `OIL_PERF=1` (`npm run
   test:perf`). They assert absolute latency, which is only meaningful on an idle
   machine — under load they failed on unmodified `main` too, and a gate that
-  cries wolf is one people learn to ignore. That was the dominant source of
-  `check:release` flakiness and it is fixed; the suite has run green repeatedly
-  since. A handful of watcher tests remain timing-sensitive and are declared with
+  cries wolf is one people learn to ignore.
+- The last absolute ceiling still running in the default suite is now behind the
+  same flag. `startup-contract.test.ts` asserted a 1,500 ms handshake budget on
+  every `npm test`, which is why that file, not only the watcher, flaked under
+  load. Downgrading it costs nothing, and that is worth stating precisely rather
+  than asserting: with vault work deliberately moved back in front of the
+  transport — the exact regression the budget existed to catch — the handshake
+  took 446 ms, so the budget **passed** while the structural assertion beside it
+  (`hydration.ready === false`) failed, along with six other cases. The ceiling
+  was not merely noisy; on this fixture it was strictly weaker than the check it
+  sat next to. Run `OIL_PERF=1` on an idle machine to assert it; by default a
+  breach is reported as a warning.
+- Taken together these were the dominant source of `check:release` flakiness. A
+  handful of watcher tests remain timing-sensitive and are declared with
   `{ retry: 2 }`, so "deterministic" is the goal rather than a measured
   guarantee.
 
