@@ -90,11 +90,14 @@ let timingIsTrustworthy = true;
  * exists for — the handshake becoming a function of vault size — while staying
  * immune to the box simply being busy.
  */
-const checkHandshake = (handshakeMs, label) => {
-  const relativeCeiling = baselineMs * 3 + 1500;
-  const ok = handshakeMs < BUDGET_MS || handshakeMs < relativeCeiling;
+const checkHandshake = (handshakeMs, label, { concurrency = 1 } = {}) => {
+  // Concurrent sessions share one CPU, so the slowest of N cold starts cannot
+  // cost what a single one does — scaling the ceiling by N is the difference
+  // between measuring contention and measuring the machine.
+  const relativeCeiling = (baselineMs * 3 + 1500) * concurrency;
+  const ok = handshakeMs < BUDGET_MS * concurrency || handshakeMs < relativeCeiling;
   const detail =
-    `${label} handshake ${handshakeMs}ms (budget ${BUDGET_MS}ms, ` +
+    `${label} handshake ${handshakeMs}ms (budget ${BUDGET_MS * concurrency}ms, ` +
     `machine baseline ${baselineMs}ms -> ceiling ${Math.round(relativeCeiling)}ms)`;
   if (!timingIsTrustworthy) {
     console.log(`  note  ${detail} — advisory, machine too loaded to judge`);
@@ -319,7 +322,16 @@ try {
   });
 
   // ── Several sessions on one vault, as a multi-session client does ─────────
+  //
+  // Four cold builds compete for one CPU, so the slowest legitimately costs a
+  // multiple of a single cold start — this asserted a single-session ceiling
+  // and so failed on a busy machine while the code was correct. The property
+  // worth holding is that concurrency costs no *more* than running the sessions
+  // one after another: that catches a deadlock or a pathological convoy, and
+  // it is measured against this same run's cold handshake, so machine load
+  // cancels out of both sides.
   await unlink(join(vault, "_oil-graph.json")).catch(() => undefined);
+  const CONCURRENT_SESSIONS = 4;
   const concurrent = await Promise.all(
     [0, 1, 2, 3].map((i) =>
       session(`concurrent-${i}`, async ({ client, handshakeMs }) => {
@@ -329,7 +341,27 @@ try {
     ),
   );
   const slowest = Math.max(...concurrent.map((r) => r.handshakeMs));
-  checkHandshake(slowest, "4 concurrent cold sessions (slowest)");
+  checkHandshake(slowest, `${CONCURRENT_SESSIONS} concurrent cold sessions (slowest)`, {
+    concurrency: CONCURRENT_SESSIONS,
+  });
+  // Load-independent: no session may cost dramatically more than running them
+  // all serially. The slack absorbs ordinary contention — four cold builds on a
+  // box with fewer than four free cores legitimately approach the serial cost —
+  // while a deadlock or a convoy is several times worse than this and still
+  // fails. Both sides come from the same run, so machine load cancels.
+  const CONVOY_SLACK = 1.5;
+  const serialEquivalent = Math.round(cold * CONCURRENT_SESSIONS * CONVOY_SLACK);
+  if (timingIsTrustworthy) {
+    check(
+      slowest < serialEquivalent,
+      `concurrency does not convoy: slowest ${slowest}ms < ` +
+        `${CONCURRENT_SESSIONS} x cold ${cold}ms x ${CONVOY_SLACK} = ${serialEquivalent}ms`,
+    );
+  }
+  check(
+    concurrent.every((r) => r.notes === NOTE_COUNT || r.notes === 0),
+    "every concurrent session reports a coherent index",
+  );
 
   // ── Disconnect must be observed, and must be terminal ────────────────────
   //
