@@ -256,6 +256,96 @@ describe("batched updates", () => {
   });
 });
 
+describe("names more than one note answers to", () => {
+  /**
+   * Two notes answering to the same name is ordinary in a vault — daily notes,
+   * a per-customer "Index", a template copied but not yet retitled. Only one of
+   * them can claim the name, so the claimant leaving has to hand it to a
+   * survivor. Leaving the name unclaimed instead strands every link that
+   * pointed at it, and no later edit puts it back.
+   */
+  beforeEach(async () => {
+    await writeNote("Ambiguous.md", `# Ambiguous\n\nPoints at [[Shared]].\n`);
+    await writeNote("Dup One.md", `# Shared\n\nOne note answering to Shared.\n`);
+    await writeNote("Dup Two.md", `# Shared\n\nAnother note answering to Shared.\n`);
+
+    graph = new GraphIndex(vault);
+    await graph.build();
+  });
+
+  /** Whichever duplicate currently owns the name, and the one that does not. */
+  function claim(): { owner: string; survivor: string } {
+    const [owner] = graph.getForwardLinks("Ambiguous.md").map((r) => r.path);
+    expect(owner, "the ambiguous link should resolve to one of the duplicates").toBeDefined();
+    const survivor = ["Dup One.md", "Dup Two.md"].find((p) => p !== owner);
+    expect(survivor).toBeDefined();
+    return { owner, survivor: survivor as string };
+  }
+
+  it("hands the name to the surviving note when the claimant is deleted", async () => {
+    const { owner, survivor } = claim();
+
+    await unlink(join(vault, owner));
+    graph.removeNote(owner);
+
+    expect(graph.getForwardLinks("Ambiguous.md").map((r) => r.path)).toEqual([survivor]);
+    expect(graph.getBacklinks(survivor).map((r) => r.path)).toEqual(["Ambiguous.md"]);
+    await expectLinksMatchFullRebuild();
+  });
+
+  it("converges on the delete itself rather than on some later edit", async () => {
+    const { owner } = claim();
+
+    await unlink(join(vault, owner));
+    graph.removeNote(owner);
+
+    // Asserting only after a subsequent edit would pass while every read taken
+    // in between still saw a stranded link, so the delete has to settle it.
+    await expectLinksMatchFullRebuild();
+
+    await writeNote("Orphan.md", `# Orphan\n\nAn unrelated body edit.\n`);
+    await graph.updateNote("Orphan.md");
+    await expectLinksMatchFullRebuild();
+  });
+
+  it("hands the name over when the claimant is deleted alongside an edit", async () => {
+    const { owner, survivor } = claim();
+
+    await unlink(join(vault, owner));
+    await writeNote("A.md", `# A\n\nLinks to [[B]] and [[Shared]].\n`);
+
+    graph.removeNote(owner);
+    await graph.updateNotes(["A.md"]);
+
+    expect(graph.getForwardLinks("A.md").map((r) => r.path).sort()).toEqual(
+      ["B.md", survivor].sort(),
+    );
+    await expectLinksMatchFullRebuild();
+  });
+
+  it("hands the name over when the claimant is retitled rather than deleted", async () => {
+    const { owner, survivor } = claim();
+
+    await writeNote(owner, `# Renamed Away\n\nNo longer answers to Shared.\n`);
+    await graph.updateNote(owner);
+
+    expect(graph.getForwardLinks("Ambiguous.md").map((r) => r.path)).toEqual([survivor]);
+    await expectLinksMatchFullRebuild();
+  });
+
+  it("leaves the link dangling once every claimant is gone", async () => {
+    const { owner, survivor } = claim();
+
+    await unlink(join(vault, owner));
+    graph.removeNote(owner);
+    await unlink(join(vault, survivor));
+    graph.removeNote(survivor);
+
+    expect(graph.getForwardLinks("Ambiguous.md")).toEqual([]);
+    await expectLinksMatchFullRebuild();
+  });
+});
+
 describe("realistic sequences", () => {
   it("matches a full rebuild after interleaved edits, adds and deletes", async () => {
     await writeNote("A.md", `# A\n\nLinks to [[Hub]] and [[C]].\n`);

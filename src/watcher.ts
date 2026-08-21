@@ -237,8 +237,8 @@ export class VaultWatcher {
       this.cache.invalidateNote(notePath);
     }
 
-    for (const notePath of removed) {
-      this.graph.removeNote(notePath);
+    if (removed.length > 0) {
+      this.graph.removeNotes(removed);
     }
     if (updated.length > 0) {
       await this.graph.updateNotes(updated);

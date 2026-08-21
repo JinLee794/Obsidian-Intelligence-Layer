@@ -118,14 +118,26 @@ export class GraphIndex {
   /** title (lowercase) → path — for resolving wikilinks by title */
   private titleIndex = new Map<string, string>();
   /**
-   * Bumped whenever the set of names a wikilink can resolve through changes.
+   * Set while the set of names a wikilink can resolve through has changed but
+   * the whole-vault resolve that change demands has not run yet.
    *
    * A note's body can be rewritten without affecting how any *other* note's
    * links resolve; its title or filename changing, or the note appearing or
-   * disappearing, can affect all of them. Comparing this across an update is
-   * what separates the two cases.
+   * disappearing, can affect all of them. Telling those two apart is what lets
+   * an ordinary edit skip the full pass.
+   *
+   * Sticky, rather than a counter compared across an update, because a removal
+   * raises it *before* the next batch starts: a batch snapshotting a counter on
+   * entry would take that snapshot after the bump, see no difference, and skip
+   * the very resolve the removal needed.
    */
-  private _titleEpoch = 0;
+  private _namesDirty = false;
+  /**
+   * Names given up by a removal or a retitle that another live note may still
+   * answer to. Recorded rather than chased down there and then, so a bulk
+   * delete pays one pass over the vault instead of one per file.
+   */
+  private orphanedNames = new Set<string>();
   /** path → raw wikilink targets (before resolution) — kept for persistence */
   private rawOutLinks = new Map<string, string[]>();
   /** path → file mtime (ms) — for incremental rebuild */
@@ -254,6 +266,8 @@ export class GraphIndex {
 
     // Phase 2: Resolve wikilinks → paths and compute backlinks
     this.resolveLinks();
+    this.orphanedNames.clear();
+    this._namesDirty = false;
 
     this._lastIndexed = new Date();
     this._building = false;
@@ -429,7 +443,6 @@ export class GraphIndex {
 
     const parsed = await mapWithConcurrency(keys, IO_CONCURRENCY, (key) => this.readNote(key));
 
-    const epochBefore = this._titleEpoch;
     const touched: string[] = [];
 
     for (let i = 0; i < keys.length; i++) {
@@ -438,8 +451,9 @@ export class GraphIndex {
 
       if (!note) {
         // Unreadable or gone: fall back to a plain removal, which also detaches
-        // it from every note that linked to it.
-        this.removeNote(key);
+        // it from every note that linked to it. Deferred, so a batch of them
+        // resolves once at the end rather than once apiece.
+        this.removeNoteDeferred(key);
         continue;
       }
 
@@ -467,7 +481,7 @@ export class GraphIndex {
       touched.push(key);
     }
 
-    if (this._titleEpoch !== epochBefore) {
+    if (this._namesDirty) {
       // A name entered or left the index, so links anywhere in the vault may
       // resolve differently now. Nothing less than a full pass is correct.
       this.resolveAllBacklinks();
@@ -495,10 +509,30 @@ export class GraphIndex {
    * Remove a note from the index.
    */
   removeNote(notePath: string): void {
+    this.removeNotes([notePath]);
+  }
+
+  /**
+   * Remove a batch of notes, resolving once for the whole batch.
+   *
+   * A removal can change what a wikilink points at — it frees the names the
+   * note answered to — so it needs the whole-vault pass. Taking it once per
+   * batch rather than once per note is what keeps a bulk delete off the
+   * O(vault)-per-file path that a burst of edits already avoids.
+   */
+  removeNotes(notePaths: readonly string[]): void {
+    for (const notePath of notePaths) {
+      this.removeNoteDeferred(notePath);
+    }
+    this.settleNameChanges();
+  }
+
+  /** Remove without settling names — for callers that resolve once at the end. */
+  private removeNoteDeferred(notePath: string): void {
     const key = normalizeNotePath(notePath);
     const node = this.nodes.get(key);
     if (!node) return;
-    return this.removeNodeInternal(key, node);
+    this.removeNodeInternal(key, node);
   }
 
   private removeNodeInternal(notePath: string, node: GraphNode): void {
@@ -542,26 +576,69 @@ export class GraphIndex {
   private indexTitle(key: string, notePath: string): void {
     if (this.titleIndex.get(key) === notePath) return;
     this.titleIndex.set(key, notePath);
-    this._titleEpoch++;
+    this._namesDirty = true;
   }
 
   /** Drop a name, if this note is the one currently claiming it. */
   private unindexTitle(key: string, notePath: string): void {
     if (this.titleIndex.get(key) !== notePath) return;
     this.titleIndex.delete(key);
-    this._titleEpoch++;
+    // Another note may answer to this name and be waiting to inherit it.
+    this.orphanedNames.add(key);
+    this._namesDirty = true;
+  }
+
+  /**
+   * Give away names that a removal or a retitle left unclaimed but which other
+   * live notes still answer to.
+   *
+   * Only one note can own a name, so the index stores the claimant and nothing
+   * else. That makes losing the claimant indistinguishable from the name never
+   * having existed, and strands every link pointing at it: a rebuild resolves
+   * them to the surviving note, while the live index resolved them nowhere and
+   * never recovered, because no later edit revisits a name it does not hold.
+   *
+   * One pass over the vault per batch rather than a search per removal, so a
+   * bulk delete costs what a single one does. Notes are visited in insertion
+   * order and the last match wins, which is the rule a build from scratch uses;
+   * where insertion order has itself drifted from disk order, so does the pick,
+   * but only between notes that are equally valid answers to the name.
+   */
+  private reclaimOrphanedNames(): void {
+    if (this.orphanedNames.size === 0) return;
+    const unclaimed = new Set(
+      [...this.orphanedNames].filter((name) => !this.titleIndex.has(name)),
+    );
+    this.orphanedNames.clear();
+    if (unclaimed.size === 0) return;
+
+    for (const [notePath, node] of this.nodes) {
+      const title = node.title.toLowerCase();
+      if (unclaimed.has(title)) this.indexTitle(title, notePath);
+      const fileName = basename(notePath, extname(notePath)).toLowerCase();
+      if (fileName !== title && unclaimed.has(fileName)) this.indexTitle(fileName, notePath);
+    }
+  }
+
+  /** Run the whole-vault resolve an outstanding name change requires. */
+  private settleNameChanges(): void {
+    if (this._namesDirty) this.resolveAllBacklinks();
   }
 
   /**
    * Recompute all backlinks from scratch (used after incremental updates).
    */
   private resolveAllBacklinks(): void {
+    // Names first: a link cannot resolve through a name no note claims, so
+    // re-homing has to happen before anything is resolved against the index.
+    this.reclaimOrphanedNames();
     // Clear all backlinks
     for (const node of this.nodes.values()) {
       node.inLinks.clear();
     }
     // Recompute
     this.resolveLinks();
+    this._namesDirty = false;
   }
 
   // ─── Persistence ─────────────────────────────────────────────────────
@@ -707,6 +784,8 @@ export class GraphIndex {
 
       // Resolve wikilinks → paths and compute backlinks
       this.resolveLinks();
+      this.orphanedNames.clear();
+      this._namesDirty = false;
 
       this._lastIndexed = new Date(data.builtAt);
       console.error(`[OIL] Graph index loaded from disk: ${this.nodes.size} nodes.`);
@@ -757,7 +836,7 @@ export class GraphIndex {
       // Remove notes that no longer exist in the vault
       for (const path of [...this.nodes.keys()]) {
         if (!present.has(path)) {
-          this.removeNote(path);
+          this.removeNoteDeferred(path);
           reindexed++;
         }
       }
@@ -798,7 +877,7 @@ export class GraphIndex {
           this.readNote(notePath),
         );
         for (let i = 0; i < batch.length; i++) {
-          this.removeNote(batch[i]);
+          this.removeNoteDeferred(batch[i]);
           const note = parsed[i];
           if (note) this.applyNote(note);
           reindexed++;
