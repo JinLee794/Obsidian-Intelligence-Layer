@@ -570,6 +570,14 @@ Shipped deliberately, with the evidence that justified each call.
   `OIL_SEMANTIC_MIN_SCORE` applies the answer. The floor governs embeddings, not
   BM25, so "no match" is reachable for gibberish but not guaranteed for
   everything irrelevant.
+  Note also that 0.5 sits *inside* the noise band it was derived from, not above
+  it: gibberish was measured at 0.451–0.531, so the top of that band still
+  clears. Observed on a 273-note vault with the tuned model — `zzxqq
+  wibblewobble` and `qwertyuiop asdfghjkl` both return nothing, but `zzzqqxwv
+  nonexistent term` returns two notes at 0.5174 and 0.5044. Gibberish carrying
+  ordinary English words embeds close enough to real prose to clear the floor.
+  The separation is real but the margin is a few hundredths, so treat "no match"
+  as reliable for pure nonsense and best-effort otherwise.
 - **Semantic hits can still rank mid-page on some queries.** Coverage weighting
   and a smaller `k` moved the worst cases up sharply — worst observed
   first-relevant rank fell from 9 to 7 — but a correct answer can still land
