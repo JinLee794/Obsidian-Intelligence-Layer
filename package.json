@@ -1,5 +1,5 @@
 {
-  "name": "@jinlee794/obsidian-intelligence-layer",
+  "name": "@mcaps-microsoft/obsidian-intelligence-layer",
   "version": "0.6.0",
   "description": "Obsidian Intelligence Layer — Knowledge Layer MCP Server for AI Agent Workflows",
   "type": "module",
@@ -12,15 +12,15 @@
   },
   "main": "dist/index.js",
   "bin": {
-    "obsidian-intelligence-layer": "dist/cli.js"
+    "obsidian-intelligence-layer": "bundle/cli.js"
   },
   "files": [
-    "dist",
+    "bundle",
     "README.md"
   ],
   "scripts": {
-    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('bundle',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc && npm run bundle",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "prepare": "npm run build",
@@ -45,7 +45,8 @@
     "eval:strategies": "node bench/ranking-strategies.mjs",
     "eval:vault": "node bench/eval-golden.mjs --dataset=bench/datasets/eval.golden.json",
     "eval:vault:strategies": "node bench/ranking-strategies.mjs --dataset=bench/datasets/eval.golden.json",
-    "eval:vault:regen": "node bench/fixtures/generate-eval-vault.mjs"
+    "eval:vault:regen": "node bench/fixtures/generate-eval-vault.mjs",
+    "bundle": "node scripts/bundle.mjs"
   },
   "keywords": [
     "mcp",
@@ -54,18 +55,18 @@
     "ai-agent"
   ],
   "license": "MIT",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "chokidar": "^4.0.3",
-    "fuse.js": "^7.1.0",
-    "gray-matter": "^4.0.3",
-    "yaml": "^2.7.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.13.0",
     "@vitest/runner": "^4.0.18",
     "typescript": "^5.7.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "chokidar": "^4.0.3",
+    "fuse.js": "^7.1.0",
+    "gray-matter": "^4.0.3",
+    "yaml": "^2.7.0",
+    "esbuild": "^0.25.0"
   },
   "engines": {
     "node": ">=20.0.0"
