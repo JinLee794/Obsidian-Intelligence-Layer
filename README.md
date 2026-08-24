@@ -62,6 +62,31 @@ model itself on first run, in the background.
 obsidian-intelligence-layer doctor --vault=/path/to/vault   # tells you where you stand
 ```
 
+### Install as a Copilot CLI plugin (fastest)
+
+This repository is also a Copilot plugin marketplace. Installing the plugin
+registers the MCP server and the `oil-setup` skill — with no clone and no build:
+
+```bash
+copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
+copilot plugin install obsidian-intelligence-layer@oil-marketplace
+```
+
+Set `OBSIDIAN_VAULT_PATH` in your environment before starting a session — it is
+the one value the plugin reads from you:
+
+```powershell
+setx OBSIDIAN_VAULT_PATH "C:\path\to\your\vault"     # Windows, persistent
+```
+
+```bash
+export OBSIDIAN_VAULT_PATH="/absolute/path/to/vault"  # macOS / Linux, in your shell profile
+```
+
+Everything else — including the optional Ollama semantic tier — is configured
+through `oil.config.yaml` in the vault root. See
+[plugins/obsidian-intelligence-layer/README.md](plugins/obsidian-intelligence-layer/README.md).
+
 ### Install and Build
 
 ```bash
@@ -375,6 +400,15 @@ src/
     ├── retrieve.ts   # 5 tools — search cascade, query, metadata, section reads, related
     ├── write.ts      # 5 tools — atomic_append, atomic_replace_section, atomic_replace, create_note, get_agent_log
     └── domain.ts     # 3 tools — get_customer_context, prepare_crm_prefetch, check_vault_health
+
+plugins/obsidian-intelligence-layer/
+├── plugin.json       # Copilot plugin manifest — version tracks the pinned release
+├── .mcp.json         # Registers the `oil` MCP server, pinned to a released tag
+└── skills/
+    └── oil-setup/    # Diagnosing a server that did not start; the Ollama tier
+
+.github/plugin/
+└── marketplace.json  # Makes this repository an installable plugin marketplace
 ```
 
 ### What Each Layer Does
@@ -759,10 +793,13 @@ Everything else is automatic:
 
 ```json
 { "semantic": { "status": "ready", "model": "nomic-embed-text",
-                "note_count": 1240, "dimensions": 768, "reason": null } }
+                "note_count": 1240, "dimensions": 768,
+                "reason": null, "remedy": null } }
 ```
 
-`status` is one of `disabled`, `cold`, `indexing`, `ready`, or `unavailable` — with `reason` explaining the last two.
+`status` is one of `disabled`, `cold`, `indexing`, `ready`, or `unavailable` — with `reason` explaining the last two, and `remedy` saying what to do about them. Both are `null` when the tier is healthy, so a working server pays nothing for them.
+
+There is deliberately **no `setup` or `install` tool**. The fix for a missing Ollama is a ~1 GB native install, and an MCP tool that performs it would be an LLM deciding to mutate the machine, with none of the approval UX the host's own shell already provides. OIL states the problem and the fix; running it stays with the user.
 
 To turn it off entirely, set `OIL_SEMANTIC=off` in your client config, pass `--no-semantic`, or set `semantic.enabled: false` in `oil.config.yaml`.
 

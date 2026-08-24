@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_health` reports a `remedy`, not just a `reason`.** `semantic.reason`
+  named the fault — `fetch failed (ECONNREFUSED)` — and left the caller to know
+  that this means "install Ollama". `doctor` has carried remedies since it
+  existed, but it is a CLI no MCP client runs, so the fix never reached an agent.
+  An end-to-end run showed the cost directly: the agent reported the tier as down
+  and stopped. `remedy` is `null` whenever the tier is healthy or merely warming,
+  so the common response pays nothing for it.
+
+  Deliberately *not* added: a `setup` or `install_semantic` tool. The remedy for
+  a missing Ollama is a ~1 GB native install, which the host's shell already
+  performs with approval prompts an MCP tool call has no equivalent of — and a
+  16th tool would spend context on every request to serve one moment per machine.
+
+### Added
+
+- **Copilot plugin and marketplace.** `plugins/obsidian-intelligence-layer/`
+  packages the MCP server as an installable Copilot plugin, and
+  `.github/plugin/marketplace.json` makes this repository a marketplace, so the
+  whole setup is two commands and no clone:
+
+  ```bash
+  copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
+  copilot plugin install obsidian-intelligence-layer@oil-marketplace
+  ```
+
+  The plugin registers the server as `oil`, pinned to the latest **released**
+  tag — not to `package.json`, which runs ahead of what is published. Its
+  `.mcp.json` references exactly one variable, `OBSIDIAN_VAULT_PATH`; every other
+  setting stays in `oil.config.yaml`, which survives plugin updates.
+- **`oil-setup` skill — the only bundled skill, deliberately.** OIL's tools
+  already document themselves: descriptions say when to call them, parameter
+  schemas explain each option (`view: brief | full | write`), and a rejected
+  write returns `agent_guidance.next_step` naming the exact recovery sequence. So
+  the skill claims none of that territory. It covers what tool discovery cannot
+  reach: the state where the server failed to start and there *are* no tools to
+  consult, and remediation that lives in the user's shell — environment
+  variables, `doctor`, and the fact that an MCP server is spawned once per
+  session, so setting a variable mid-session fixes nothing.
+- **`src/__tests__/plugin-manifest.test.ts`.** Asserts the plugin manifest, the
+  marketplace entry and every documented `npx --package=...#v` invocation agree
+  with the pin; that the pin names a released, non-prerelease version; and that
+  the skill stays out of the tool surface's territory. None of it is
+  hypothetical — an unpinned `doctor` command resolved to a branch without the
+  `doctor` subcommand, and the prerelease tag the plugin first advertised was
+  later deleted from the remote.
+
 ## [0.7.0-beta.1] - 2026-08-19
 
 Pre-release for cross-machine testing. Tool-surface audit: responses got 31%

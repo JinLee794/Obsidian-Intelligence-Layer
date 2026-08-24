@@ -57,6 +57,43 @@ export interface SemanticStats {
   dimensions: number;
   /** Why the tier is not serving, when it isn't. */
   reason: string | null;
+  /**
+   * What to do about it, when there is something to do.
+   *
+   * `reason` names the fault; on its own it leaves the caller to know that
+   * ECONNREFUSED on port 11434 means "install Ollama". The `doctor` command has
+   * carried remedies since it existed, but nothing reached a client over MCP, so
+   * an agent could report the tier as down and stop there. Null whenever the
+   * tier is healthy or merely warming, so the common response pays nothing.
+   */
+  remedy: string | null;
+}
+
+/**
+ * Turn a tier state into an instruction.
+ *
+ * Deliberately never suggests installing anything itself: the fix for a missing
+ * Ollama is a ~1 GB native install, which belongs to the user and their host's
+ * shell — with its approval prompts — not to an MCP server acting on an LLM's
+ * decision.
+ */
+export function semanticRemedy(
+  status: SemanticStatus,
+  reason: string | null,
+  model: string,
+  endpoint: string,
+): string | null {
+  if (status === "disabled") {
+    return "Meaning-based search is off. Set semantic.enabled: true in oil.config.yaml, or OIL_SEMANTIC=on, then restart the server.";
+  }
+  if (status !== "unavailable") return null;
+
+  // A reason naming Ollama came back from Ollama, so it is running and the
+  // fault is the model or the request — not a missing install.
+  if (reason?.includes("Ollama")) {
+    return `Ollama answered but could not embed. Check the model: ollama pull ${model}. Search continues on the keyword tiers.`;
+  }
+  return `Ollama is not reachable at ${endpoint}. Install it from https://ollama.com and leave it running, or set OIL_SEMANTIC=off. Search continues on the keyword tiers either way.`;
 }
 
 interface Entry {
@@ -237,6 +274,7 @@ export class SemanticIndex {
       note_count: this.vectors.size,
       dimensions: this.dimensions,
       reason: this.reason,
+      remedy: semanticRemedy(this.state, this.reason, this.config.model, this.endpoint),
     };
   }
 

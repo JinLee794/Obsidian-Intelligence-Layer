@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "oil": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.6.0",
+        "--",
+        "obsidian-intelligence-layer",
+        "mcp"
+      ],
+      "env": {
+        "OBSIDIAN_VAULT_PATH": "${OBSIDIAN_VAULT_PATH}"
+      },
+      "tools": ["*"]
+    }
+  }
+}
