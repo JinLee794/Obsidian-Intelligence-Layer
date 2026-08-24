@@ -1,0 +1,35 @@
+{
+  "name": "oil-marketplace",
+  "owner": {
+    "name": "Jin Lee"
+  },
+  "metadata": {
+    "description": "Obsidian Intelligence Layer — knowledge-layer MCP tooling for AI agent workflows over an Obsidian vault.",
+    "version": "0.6.0"
+  },
+  "plugins": [
+    {
+      "name": "obsidian-intelligence-layer",
+      "description": "Knowledge-layer MCP server for Obsidian vaults: tiered search, graph traversal, mtime-guarded writes, and an audit trail. Ships an optional local-embedding semantic tier that requires Ollama; without it search degrades to keyword tiers rather than failing.",
+      "version": "0.6.0",
+      "source": "plugins/obsidian-intelligence-layer",
+      "author": {
+        "name": "Jin Lee",
+        "url": "https://github.com/JinLee794"
+      },
+      "homepage": "https://github.com/JinLee794/Obsidian-Intelligence-Layer#readme",
+      "repository": "https://github.com/JinLee794/Obsidian-Intelligence-Layer.git",
+      "license": "MIT",
+      "category": "knowledge-management",
+      "keywords": [
+        "mcp",
+        "obsidian",
+        "knowledge-layer",
+        "memory",
+        "semantic-search",
+        "ollama",
+        "ai-agent"
+      ]
+    }
+  ]
+}
