@@ -133,3 +133,32 @@ a prerelease pin — `v0.7.0-beta.1` was advertised by the marketplace and then
 deleted from the remote, which breaks `npx` for every user. The pin deliberately
 tracks the **released** server, not the version in `package.json`, which runs
 ahead of it.
+
+### Why the pin names the public repository
+
+This plugin is mirrored to a private org repository, `mcaps-microsoft/Obsidian-Intelligence-Layer`,
+whose `v0.6.0` tag is the *same commit* as the public one. The pin still names
+the public `JinLee794` repo, on purpose.
+
+An MCP server is spawned non-interactively, at session start. Fetching it from a
+private repository makes that spawn depend on the user's git credentials being
+present and valid at that moment — and when they are not, `npx` fails, the server
+never starts, and the client reports only "tool unavailable" with no reason. That
+is the single worst failure mode this plugin has, and it is the one the
+`oil-setup` skill exists to untangle. A public pin cannot hit it.
+
+Everyone who can reach the private marketplace can also reach the public
+repository, so the public pin costs that audience nothing and removes an entire
+class of startup failure.
+
+To keep the fetch inside the org anyway — a reasonable call if the public
+repository is not considered a durable dependency — change the one line in
+`.mcp.json`:
+
+```diff
+- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.6.0",
++ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.6.0",
+```
+
+and confirm that every consumer has git credentials for the org available to
+non-interactive processes.
