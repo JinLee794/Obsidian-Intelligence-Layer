@@ -14,6 +14,12 @@ export interface NoteRef {
   version?: number;
 }
 
+/** A NoteRef reached by graph traversal, carrying distance and link direction. */
+export interface RelatedNoteRef extends NoteRef {
+  hops: number;
+  via: "out" | "in" | "both";
+}
+
 export interface NoteFrontmatter {
   [key: string]: unknown;
 }
@@ -117,58 +123,6 @@ export interface CustomerContext {
   similarCustomers: NoteRef[];
 }
 
-// ─── Person Context ───────────────────────────────────────────────────────────
-
-export interface PersonContext {
-  frontmatter: PersonFrontmatter;
-  email?: string;
-  teamsId?: string;
-  linkedCustomers: string[];
-  recentMeetings: NoteRef[];
-  backlinks: NoteRef[];
-}
-
-// ─── People Resolution ────────────────────────────────────────────────────────
-
-export interface PersonResolution {
-  customers: string[];
-  company: string;
-  org: "internal" | "customer" | "partner";
-  confidence: "exact" | "fuzzy" | "unresolved";
-}
-
-export interface PeopleResolutionResult {
-  resolved: Record<string, PersonResolution>;
-  unresolved: string[];
-}
-
-// ─── Vault Context ────────────────────────────────────────────────────────────
-
-export interface FolderTree {
-  name: string;
-  children: FolderTree[];
-  noteCount: number;
-}
-
-export interface VaultContext {
-  folderStructure: FolderTree;
-  noteCount: number;
-  topTags: TagCount[];
-  mostLinkedNotes: NoteRef[];
-  schemaVersion: string;
-  lastIndexed: Date;
-}
-
-// ─── Session Cache Types ──────────────────────────────────────────────────────
-
-export interface PendingWrite {
-  id: string;
-  operation: string;
-  path: string;
-  diff: string;
-  createdAt: Date;
-}
-
 // ─── Search Types ─────────────────────────────────────────────────────────────
 
 export interface SearchResult {
@@ -176,7 +130,9 @@ export interface SearchResult {
   title: string;
   excerpt: string;
   score: number;
-  matchType: "lexical" | "fuzzy";
+  /** Query terms this note actually matched. Empty for non-lexical tiers. */
+  matchedTerms: string[];
+  matchType: "lexical" | "fuzzy" | "semantic";
 }
 
 // ─── Config Types ─────────────────────────────────────────────────────────────
@@ -185,7 +141,34 @@ export interface OilConfig {
   schema: SchemaConfig;
   frontmatterSchema: FrontmatterSchemaConfig;
   search: SearchConfig;
-  writeGate: WriteGateConfig;
+  semantic: SemanticConfig;
+  audit: AuditConfig;
+  /** Which layer supplied each overridable value. */
+  provenance: ConfigProvenance;
+}
+
+/**
+ * The configuration layer a value came from.
+ *
+ * Settings arrive from four places — flags beat environment variables, which
+ * beat `oil.config.yaml`, which beats the built-in defaults — and once merged
+ * the winner is indistinguishable from the losers. That matters when the server
+ * has to explain itself: telling someone the semantic tier was "disabled in
+ * oil.config.yaml" when they passed `--no-semantic` points them at a file that
+ * may not exist.
+ */
+export type ConfigSource = "default" | "oil.config.yaml" | "environment" | "flag";
+
+/** Where each overridable semantic setting came from. */
+export interface SemanticProvenance {
+  enabled: ConfigSource;
+  endpoint: ConfigSource;
+  model: ConfigSource;
+  minScore: ConfigSource;
+}
+
+export interface ConfigProvenance {
+  semantic: SemanticProvenance;
 }
 
 export interface SchemaConfig {
@@ -216,14 +199,28 @@ export interface FrontmatterSchemaConfig {
 export interface SearchConfig {
   graphIndexFile: string;
   backgroundIndexThresholdMs: number;
+  /** Folder prefixes kept out of search results, e.g. templates or agent logs. */
+  excludeFolders: string[];
 }
 
-export interface WriteGateConfig {
-  diffFormat: "markdown" | "json";
+/** Local-embedding tier. Every field has a working default; none is required. */
+export interface SemanticConfig {
+  /** Off disables the tier outright; on still degrades quietly without Ollama. */
+  enabled: boolean;
+  /** Ollama base URL. Loopback by default — nothing leaves the machine. */
+  endpoint: string;
+  model: string;
+  /** Vector sidecar, relative to the vault root. */
+  indexFile: string;
+  /** Cosine floor below which a note is treated as unrelated. */
+  minScore: number;
+  batchSize: number;
+  /** Per-input request budget; a batch gets this multiplied by its size. */
+  timeoutMs: number;
+}
+
+export interface AuditConfig {
   logAllWrites: boolean;
-  batchDiffMaxNotes: number;
-  autoConfirmedSections: string[];
-  autoConfirmedOperations: string[];
 }
 
 // ─── Phase 3: Cross-MCP & Hygiene Types ───────────────────────────────────────
@@ -237,21 +234,6 @@ export interface PrefetchIds {
   milestoneIds: string[];
   milestoneNumbers: string[];
   teamMembers: TeamMember[];
-}
-
-/** Entity reference from an external system (CRM, M365, WorkIQ). */
-export interface ExternalEntity {
-  name: string;
-  type: "person" | "customer" | "meeting" | "opportunity" | "other";
-  date?: string;
-}
-
-/** Result of correlating an external entity with vault notes. */
-export interface CorrelationMatch {
-  entity: ExternalEntity;
-  matchedNotes: NoteRef[];
-  customerAssociations: string[];
-  confidence: "exact" | "fuzzy" | "unresolved";
 }
 
 /** Freshness report for a single customer's vault data. */
@@ -298,14 +280,4 @@ export interface VaultHealthReport {
   orphanedMeetings: string[];
   rosterGaps: string[];
   structuralIssues: StructuralIssue[];
-}
-
-/** Vault-side data for drift comparison against live CRM state. */
-export interface DriftSnapshot {
-  customer: string;
-  opportunities: OpportunityRef[];
-  milestones: MilestoneRef[];
-  team: TeamMember[];
-  lastAgentInsightDate: string | null;
-  frontmatter: NoteFrontmatter;
 }

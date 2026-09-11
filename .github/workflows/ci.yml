@@ -1,0 +1,55 @@
+# Verification on every change — including the startup contract, which is the
+# one failure mode a client meets before any tool runs.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, test & startup contract
+    # Startup cost is platform-sensitive: Windows vaults are where synced
+    # folders and file locks actually bite, so the contract is proven on both.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Unit & integration tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Guards the handshake budget against the built artifact over real stdio.
+      # Kept separate from `npm test` so a failure here names the regression as
+      # a startup one rather than a tool one.
+      - name: Startup contract (spawned process)
+        run: npm run test:startup:e2e
+
+      - name: Package smoke test
+        run: npm run test:package

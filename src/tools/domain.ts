@@ -131,7 +131,6 @@ export function registerDomainTools(
           return errorResponse("NOT_FOUND", `Customer file not found: ${customerFile}`, {
             customer: resolvedCustomer,
             customer_path: customerFile,
-            customer_ref: noteRef(customerFile),
           });
         }
       }
@@ -203,7 +202,6 @@ export function registerDomainTools(
       const envelope = {
         customer: resolvedCustomer,
         customer_path: customerFile,
-        customer_ref: noteRef(customerFile),
         customer_mtime_ms: customerStats.mtimeMs,
         customer_version: customerStats.mtimeMs,
         view: requestedView,
@@ -233,7 +231,6 @@ export function registerDomainTools(
           ...result,
           write_targets: {
             customer_note: customerFile,
-            customer_ref: noteRef(customerFile),
             meetings_root: config.schema.meetingsRoot,
             headings: {
               agent_insights: "Agent Insights",
@@ -285,7 +282,6 @@ export function registerDomainTools(
           return {
             ...p,
             customer_path: customerPath,
-            customer_ref: customerPath ? noteRef(customerPath) : null,
             odata_hints: {
               opportunity_filter: p.opportunityGuids.length
                 ? p.opportunityGuids
@@ -373,7 +369,6 @@ export function registerDomainTools(
       return jsonResponse({
         report,
         issues,
-        orphaned_meeting_refs: report.orphanedMeetings.map((path) => noteRef(path)),
         summary:
           issues.length > 0
             ? `${issues.length} issue(s) found across ${report.totalCustomers} customers`

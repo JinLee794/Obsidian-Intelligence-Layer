@@ -54,7 +54,6 @@ describe("core tools — get_health", () => {
 
     expect(result.server.name).toBe("obsidian-intelligence-layer");
     expect(result.server.version).toBe(SERVER_VERSION);
-    expect(result.tool_surface.total).toBe(14);
     expect(result.index.note_count).toBeGreaterThan(0);
     expect(result.cache.cachedNotes).toBe(0);
     expect(result.watcher.active).toBe(false);
@@ -89,12 +88,10 @@ describe("core tools — get_health", () => {
     expect(result.config.agent_log).toBe("_agent-log/");
   });
 
-  // Spec §10.8 — Accounting clarity: tiered breakdown sums to total
-  it("tool_surface tiers sum to declared total", async () => {
+  // The client already holds tools/list; restating it in a response is dead weight.
+  it("does not restate the tool surface", async () => {
     const health = await server.callToolJson("get_health", {});
-    const surface = health.tool_surface;
-    const sumOfTiers = surface.core + surface.primitives + surface.aggregators;
-    expect(sumOfTiers).toBe(surface.total);
+    expect(health.tool_surface).toBeUndefined();
   });
 
   // Spec §10.9 — Version identity

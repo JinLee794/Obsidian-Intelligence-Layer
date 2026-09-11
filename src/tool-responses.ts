@@ -1,5 +1,3 @@
-import type { NoteRef } from "./types.js";
-
 export type ToolErrorCode =
   | "INVALID_INPUT"
   | "NOT_FOUND"
@@ -17,8 +15,10 @@ export interface ToolErrorGuidance {
 }
 
 export function jsonResponse(payload: unknown) {
+  // Compact, not pretty-printed: indentation was ~25% of every payload and no
+  // consumer of an MCP tool result renders it.
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+    content: [{ type: "text" as const, text: JSON.stringify(payload) }],
   };
 }
 
@@ -50,15 +50,60 @@ export function noteRef(path: string, heading?: string): string {
   return heading ? `${path}#${heading}` : path;
 }
 
-export function enrichNoteRef<T extends Pick<NoteRef, "path">>(ref: T): T & { ref: string } {
+/**
+ * Spread into a response to carry an anchored reference. Omitted entirely when
+ * there is no heading, because then `ref` is byte-for-byte the `path` already
+ * in the payload — `path` is itself the addressable reference.
+ */
+export function refField(path: string, heading?: string): { heading?: string; ref?: string } {
+  return heading ? { heading, ref: `${path}#${heading}` } : {};
+}
+
+// ─── Payload budgets ──────────────────────────────────────────────────────────
+
+/**
+ * Per-response ceilings, derived from the 32k-char turn budget asserted in
+ * budget-guards.test.ts: no single tool result may consume more than a quarter
+ * of a turn. Without these, one pathological note — a 50 KB section, a note
+ * with 300 headings — silently blows out the caller's context.
+ */
+export const MAX_TEXT_CHARS = 8_000;
+export const MAX_LIST_ITEMS = 50;
+
+export interface TruncatedText {
+  text: string;
+  truncated: boolean;
+  total_chars: number;
+}
+
+/** Keep `edge` = "head" for documents, "tail" for append-only logs. */
+export function truncateText(
+  text: string,
+  max: number = MAX_TEXT_CHARS,
+  edge: "head" | "tail" = "head",
+): TruncatedText {
+  if (text.length <= max) {
+    return { text, truncated: false, total_chars: text.length };
+  }
   return {
-    ...ref,
-    ref: noteRef(ref.path),
+    text: edge === "head" ? text.slice(0, max) : text.slice(text.length - max),
+    truncated: true,
+    total_chars: text.length,
   };
 }
 
-export function enrichNoteRefs<T extends Pick<NoteRef, "path">>(refs: T[]): Array<T & { ref: string }> {
-  return refs.map((ref) => enrichNoteRef(ref));
+export interface TruncatedList<T> {
+  items: T[];
+  truncated: boolean;
+  total_count: number;
+}
+
+export function truncateList<T>(items: T[], max: number = MAX_LIST_ITEMS): TruncatedList<T> {
+  return {
+    items: items.length <= max ? items : items.slice(0, max),
+    truncated: items.length > max,
+    total_count: items.length,
+  };
 }
 
 export function errorCodeFromUnknown(

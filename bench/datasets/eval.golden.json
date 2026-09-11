@@ -1,0 +1,267 @@
+{
+  "name": "eval vault — committed golden set (N=30)",
+  "vault": "bench/fixtures/eval-vault",
+  "notes": "Answers are authored from what a person reading the vault would call correct, not from what the current ranker happens to return. A case this set fails is a finding, not a bug in the set. Regenerate the vault with `node bench/fixtures/generate-eval-vault.mjs`; it is deterministic and the output is committed.",
+  "cases": [
+    {
+      "id": "tpid-woodgrove",
+      "scenario": "identifier",
+      "query": "TP-700800",
+      "relevant": ["Customers/Woodgrove.md"],
+      "primary": "Customers/Woodgrove.md",
+      "expectTiers": ["frontmatter"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "accountid-proseware",
+      "scenario": "identifier",
+      "query": "ACC-PROSEWARE-001",
+      "relevant": ["Customers/Proseware.md"],
+      "primary": "Customers/Proseware.md",
+      "expectTiers": ["frontmatter"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "accountid-lucerne",
+      "scenario": "identifier",
+      "query": "ACC-LUCERNE-001",
+      "relevant": ["Customers/Lucerne.md"],
+      "primary": "Customers/Lucerne.md",
+      "expectTiers": ["frontmatter"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "guid-telemetry",
+      "scenario": "identifier",
+      "query": "55667788-99aa-bbcc-ddee-ff0011223344",
+      "relevant": ["Customers/Litware.md"],
+      "primary": "Customers/Litware.md",
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "milestone-northwind",
+      "scenario": "identifier",
+      "query": "MS-NWD-002",
+      "relevant": ["Customers/Northwind.md"],
+      "primary": "Customers/Northwind.md",
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-woodgrove",
+      "scenario": "exact-entity",
+      "query": "Woodgrove",
+      "relevant": ["Customers/Woodgrove.md"],
+      "primary": "Customers/Woodgrove.md",
+      "expectTiers": ["lexical"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-tailspin",
+      "scenario": "exact-entity",
+      "query": "Tailspin",
+      "relevant": ["Customers/Tailspin.md"],
+      "primary": "Customers/Tailspin.md",
+      "expectTiers": ["lexical"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-person-sofia",
+      "scenario": "exact-entity",
+      "query": "Sofia Renard",
+      "relevant": ["People/Sofia Renard.md"],
+      "primary": "People/Sofia Renard.md",
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-person-tomas",
+      "scenario": "exact-entity",
+      "query": "Tomas Lindqvist",
+      "relevant": ["People/Tomas Lindqvist.md"],
+      "primary": "People/Tomas Lindqvist.md",
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-project-resiliency",
+      "scenario": "exact-entity",
+      "query": "Grid Control Resiliency",
+      "relevant": ["Projects/grid-control-resiliency.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "entity-project-telemetry",
+      "scenario": "exact-entity",
+      "query": "Factory Telemetry Platform",
+      "relevant": ["Projects/factory-telemetry-platform.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "typo-northwind",
+      "scenario": "typo",
+      "query": "Nrothwind",
+      "relevant": ["Customers/Northwind.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "typo-woodgrove",
+      "scenario": "typo",
+      "query": "Woodgrve",
+      "relevant": ["Customers/Woodgrove.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "typo-proseware",
+      "scenario": "typo",
+      "query": "Prosewrae",
+      "relevant": ["Customers/Proseware.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "typo-lucerne",
+      "scenario": "typo",
+      "query": "Lucern",
+      "relevant": ["Customers/Lucerne.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "typo-tailspin",
+      "scenario": "typo",
+      "query": "Tailspn",
+      "relevant": ["Customers/Tailspin.md"],
+      "expectTiers": ["fuzzy"]
+    },
+    {
+      "id": "para-churn",
+      "scenario": "paraphrase",
+      "query": "which customer relationship is deteriorating",
+      "relevant": [
+        "Customers/Northwind.md",
+        "Meetings/2026-02-25-Northwind-Northwind-escalation.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-cost",
+      "scenario": "paraphrase",
+      "query": "our monthly cloud bill has grown too large",
+      "relevant": [
+        "Projects/cloud-spend-reduction.md",
+        "Customers/Tailspin.md",
+        "Meetings/2026-02-06-Tailspin-Spend-baseline-walkthrough.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-privacy",
+      "scenario": "paraphrase",
+      "query": "keeping patient information confidential",
+      "relevant": [
+        "Projects/clinical-records-modernisation.md",
+        "Customers/Proseware.md",
+        "People/Hannah Vogt.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-outage",
+      "scenario": "paraphrase",
+      "query": "recovering after we lose an entire region",
+      "relevant": [
+        "Projects/grid-control-resiliency.md",
+        "Customers/Lucerne.md",
+        "People/Ingrid Solberg.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-regulator",
+      "scenario": "paraphrase",
+      "query": "gathering proof for a banking supervisor",
+      "relevant": [
+        "Projects/regulatory-evidence-platform.md",
+        "Customers/Woodgrove.md",
+        "People/Marcus Bello.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-machine-failure",
+      "scenario": "paraphrase",
+      "query": "knowing in advance when a machine will break down",
+      "relevant": [
+        "Projects/factory-telemetry-platform.md",
+        "Customers/Litware.md",
+        "Meetings/2026-03-20-Litware-Predictive-maintenance-validation.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-assistant",
+      "scenario": "paraphrase",
+      "query": "who can help us roll out a generative AI assistant",
+      "relevant": ["People/Dev Okonkwo.md", "Projects/copilot-adoption-pilot.md"],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-datacentre",
+      "scenario": "paraphrase",
+      "query": "closing down our own server halls",
+      "relevant": [
+        "Projects/datacentre-exit-phase-2.md",
+        "Customers/Contoso.md",
+        "Meetings/2026-02-20-Contoso-Datacentre-exit-review.md"
+      ],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "para-escalation",
+      "scenario": "paraphrase",
+      "query": "a problem that had to be raised to leadership",
+      "relevant": ["Meetings/2026-02-25-Northwind-Northwind-escalation.md"],
+      "expectTiers": ["semantic"],
+      "requiresSemantic": true
+    },
+    {
+      "id": "attr-at-risk",
+      "scenario": "attribute",
+      "query": "at-risk",
+      "relevant": ["Customers/Northwind.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "attr-regulated",
+      "scenario": "attribute",
+      "query": "regulated",
+      "relevant": ["Customers/Woodgrove.md", "Customers/Proseware.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "attr-banking",
+      "scenario": "attribute",
+      "query": "banking",
+      "relevant": ["Customers/Woodgrove.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "attr-energy",
+      "scenario": "attribute",
+      "query": "energy",
+      "relevant": ["Customers/Lucerne.md"],
+      "forbidTiers": ["semantic"]
+    },
+    {
+      "id": "attr-healthcare",
+      "scenario": "attribute",
+      "query": "healthcare",
+      "relevant": ["Customers/Proseware.md"],
+      "forbidTiers": ["semantic"]
+    }
+  ]
+}

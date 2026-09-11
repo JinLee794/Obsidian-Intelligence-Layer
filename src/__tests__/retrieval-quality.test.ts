@@ -11,20 +11,22 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { resolve } from "node:path";
 import { GraphIndex } from "../graph.js";
-import { loadConfig } from "../config.js";
-import { fuzzySearch, searchVault } from "../search.js";
-import type { OilConfig } from "../types.js";
+import { cascadeSearch, fuzzySearch } from "../search.js";
 
 const VAULT_PATH = resolve(import.meta.dirname, "../../bench/fixtures/vault");
 
 let graph: GraphIndex;
-let config: OilConfig;
 
 beforeAll(async () => {
-  config = await loadConfig(VAULT_PATH);
   graph = new GraphIndex(VAULT_PATH);
   await graph.build();
 });
+
+/** Run the production search path and return just the ranked list. */
+async function search(query: string, limit = 10): Promise<{ path: string }[]> {
+  const { results } = await cascadeSearch(graph, query, limit, undefined);
+  return results;
+}
 
 /** Return 0-based rank of `target` in results, or -1 if absent. */
 function rankOf(results: { path: string }[], target: string): number {
@@ -41,15 +43,15 @@ function firstRankInFolder(results: { path: string }[], prefix: string): number 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Rank-position ceilings", () => {
-  it("'Contoso' → customer note is rank 0 (top-1)", () => {
-    const results = searchVault(graph, config, "Contoso", undefined, 10);
+  it("'Contoso' → customer note is rank 0 (top-1)", async () => {
+    const results = await search("Contoso");
     const rank = rankOf(results, "Customers/Contoso.md");
     expect(rank).toBeGreaterThanOrEqual(0);
     expect(rank).toBeLessThanOrEqual(0);
   });
 
-  it("'migration' → project or meeting in top-2", () => {
-    const results = searchVault(graph, config, "migration", undefined, 10);
+  it("'migration' → project or meeting in top-2", async () => {
+    const results = await search("migration");
     const projectRank = rankOf(results, "Projects/azure-migration.md");
     const meetingRank = rankOf(results, "Meetings/2026-02-20-Contoso-Migration-Review.md");
     const bestRank = [projectRank, meetingRank].filter((r) => r >= 0);
@@ -57,22 +59,22 @@ describe("Rank-position ceilings", () => {
     expect(Math.min(...bestRank)).toBeLessThanOrEqual(1);
   });
 
-  it("'Dave Wilson' → person note is rank 0 (top-1)", () => {
-    const results = searchVault(graph, config, "Dave Wilson", undefined, 10);
+  it("'Dave Wilson' → person note is rank 0 (top-1)", async () => {
+    const results = await search("Dave Wilson");
     const rank = rankOf(results, "People/Dave Wilson.md");
     expect(rank).toBeGreaterThanOrEqual(0);
     expect(rank).toBeLessThanOrEqual(0);
   });
 
-  it("'AI copilot' → project note in top-2", () => {
-    const results = searchVault(graph, config, "AI copilot", undefined, 10);
+  it("'AI copilot' → project note in top-2", async () => {
+    const results = await search("AI copilot");
     const rank = rankOf(results, "Projects/ai-copilot-pilot.md");
     expect(rank).toBeGreaterThanOrEqual(0);
     expect(rank).toBeLessThanOrEqual(1);
   });
 
-  it("'risk' → Northwind (at-risk customer) in top-3", () => {
-    const results = searchVault(graph, config, "risk", undefined, 10);
+  it("'risk' → Northwind (at-risk customer) in top-3", async () => {
+    const results = await search("risk");
     const rank = rankOf(results, "Customers/Northwind.md");
     expect(rank).toBeGreaterThanOrEqual(0);
     expect(rank).toBeLessThanOrEqual(2);
@@ -84,21 +86,21 @@ describe("Rank-position ceilings", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Recall minimums", () => {
-  it("'Contoso' returns ≥3 results (customer + meeting + people)", () => {
-    const results = searchVault(graph, config, "Contoso", undefined, 10);
+  it("'Contoso' returns ≥3 results (customer + meeting + people)", async () => {
+    const results = await search("Contoso");
     expect(results.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("'migration' returns ≥2 results from Projects/ or Meetings/", () => {
-    const results = searchVault(graph, config, "migration", undefined, 10);
+  it("'migration' returns ≥2 results from Projects/ or Meetings/", async () => {
+    const results = await search("migration");
     const relevant = results.filter(
       (r) => r.path.startsWith("Projects/") || r.path.startsWith("Meetings/"),
     );
     expect(relevant.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("'risk' surfaces results across ≥2 folders", () => {
-    const results = searchVault(graph, config, "risk", undefined, 10);
+  it("'risk' surfaces results across ≥2 folders", async () => {
+    const results = await search("risk");
     const folders = new Set(results.map((r) => r.path.split("/")[0]));
     expect(folders.size).toBeGreaterThanOrEqual(2);
   });
@@ -109,16 +111,16 @@ describe("Recall minimums", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("Cascade / fuzzy tier agreement", () => {
-  it("top-1 agreement on unambiguous entity queries", () => {
+  it("top-1 agreement on unambiguous entity queries", async () => {
     for (const q of ["Contoso", "Dave Wilson", "AI copilot"]) {
-      const cascade = searchVault(graph, config, q, undefined, 5);
+      const cascade = await search(q, 5);
       const fuzzy = fuzzySearch(graph, q, 5);
       expect(cascade[0].path).toBe(fuzzy[0].path);
     }
   });
 
-  it("fuzzy finds same primary note as cascade for 'migration'", () => {
-    const cascade = searchVault(graph, config, "migration", undefined, 5);
+  it("fuzzy finds same primary note as cascade for 'migration'", async () => {
+    const cascade = await search("migration", 5);
     const fuzzy = fuzzySearch(graph, "migration", 5);
     // Both should include the migration project or meeting
     const cascadePaths = cascade.map((r) => r.path);

@@ -6,8 +6,7 @@ import {
   jsonResponse,
   errorResponse,
   noteRef,
-  enrichNoteRef,
-  enrichNoteRefs,
+  refField,
   errorCodeFromUnknown,
 } from "../tool-responses.js";
 
@@ -20,9 +19,9 @@ describe("jsonResponse", () => {
     expect(parsed).toEqual({ foo: "bar" });
   });
 
-  it("pretty-prints JSON with indentation", () => {
-    const result = jsonResponse({ a: 1 });
-    expect(result.content[0].text).toContain("\n");
+  it("emits compact JSON — indentation is ~25% of a payload and nothing renders it", () => {
+    const result = jsonResponse({ a: 1, b: { c: 2 } });
+    expect(result.content[0].text).toBe('{"a":1,"b":{"c":2}}');
   });
 });
 
@@ -87,30 +86,16 @@ describe("noteRef", () => {
   });
 });
 
-describe("enrichNoteRef", () => {
-  it("adds ref field to a NoteRef-like object", () => {
-    const input = { path: "Customers/Contoso.md", title: "Contoso", tags: [] };
-    const result = enrichNoteRef(input);
-    expect(result.ref).toBe("Customers/Contoso.md");
-    expect(result.path).toBe("Customers/Contoso.md");
-    expect(result.title).toBe("Contoso");
-  });
-});
-
-describe("enrichNoteRefs", () => {
-  it("enriches an array of refs", () => {
-    const input = [
-      { path: "a.md", title: "A", tags: [] },
-      { path: "b.md", title: "B", tags: [] },
-    ];
-    const result = enrichNoteRefs(input);
-    expect(result).toHaveLength(2);
-    expect(result[0].ref).toBe("a.md");
-    expect(result[1].ref).toBe("b.md");
+describe("refField", () => {
+  it("emits nothing when there is no heading, because ref would equal path", () => {
+    expect(refField("Customers/Contoso.md")).toEqual({});
   });
 
-  it("returns empty array for empty input", () => {
-    expect(enrichNoteRefs([])).toEqual([]);
+  it("emits heading and anchored ref when the result is section-scoped", () => {
+    expect(refField("Customers/Contoso.md", "Team")).toEqual({
+      heading: "Team",
+      ref: "Customers/Contoso.md#Team",
+    });
   });
 });
 

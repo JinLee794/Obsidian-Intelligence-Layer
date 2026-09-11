@@ -196,7 +196,7 @@ tiers:
 capabilities:
   freshness_model: mtime_ms
   write_audit: true
-  semantic_search: true
+  ranking: bm25
   watcher: chokidar
 addressing:
   note_ref: "path#anchor"
@@ -443,7 +443,7 @@ A conforming implementation should demonstrate:
 2. **Manifest discovery across servers.** If an agent has multiple substrates connected (e.g. OIL + a code-memory MCP), how does the skill disambiguate? Proposal: namespaced capabilities (`oil:search_vault` vs. `code:search_symbols`).
 3. **Schema cache lifetime.** Per-session is safe but wasteful across sessions. Is there a versioned cache on the skill side keyed by `substrate:version`?
 4. **Streaming aggregators.** Should Tier 2 tools support streaming for large snapshots, or always return token-capped summaries?
-5. **Embedding ownership.** If semantic search is a Tier 1 capability, who owns the embedding model — substrate, skill, or a separate service?
+5. **Embedding ownership.** ~~If semantic search is a Tier 1 capability, who owns the embedding model — substrate, skill, or a separate service?~~ **Resolved for OIL (2026-08): no embeddings.** Retrieval quality was traced to the lexical ranker, not to a missing meaning layer; BM25 plus graph traversal covers the entity-keyed workload OIL targets. An embedding tier was built, measured, and removed — an in-process ONNX backend cost 371 MB across 50 packages, and the vault's curated wikilinks proved a higher-precision relatedness signal than inferred similarity. Revisit only against a concrete query traversal cannot answer.
 6. **Deterministic helper scope.** Which workload helpers deserve server-owned determinism versus staying as skill-only policy?
 7. **Skill-to-skill dependency.** Can a `journal` skill depend on a `memory` skill, or must all skills talk to substrates directly?
 8. **Policy testability.** What does unit-testing a SKILL.md look like? Fixture-based substrate mock?
@@ -473,7 +473,7 @@ Suggested tiering for OIL's current runtime surface:
 
 - **Tier 0 (current-client optimized):** `get_health`.
 - **Tier 0 (future-compatible, optional):** `list_capabilities`, `describe_tool` once client behavior makes them net-positive.
-- **Tier 1:** `search_vault`, `semantic_search`, `query_frontmatter`, `get_note_metadata`, `read_note_section`, `get_related_entities`, `atomic_append`, `atomic_replace`, `create_note`, `get_agent_log`.
+- **Tier 1:** `search_vault`, `query_frontmatter`, `get_note_metadata`, `read_note_section`, `get_related_entities`, `atomic_append`, `atomic_replace`, `create_note`, `get_agent_log`.
 - **Tier 2:** `get_customer_context`, `prepare_crm_prefetch`, `check_vault_health`.
 
 This is the balance point for this repository: keep deterministic, state-backed assembly in MCP; keep remember/retrieve policy, summarization, note naming, retry rules, and escalation in the skill.
