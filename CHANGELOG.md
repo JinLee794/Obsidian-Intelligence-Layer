@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [0.7.0] - 2026-10-01
 
+OIL becomes an installable Copilot plugin, and the plugin ships a canvas that
+shows what the agent did in your vault. The MCP tool surface is unchanged.
+
 ### Changed
 
 - **`get_health` reports a `remedy`, not just a `reason`.** `semantic.reason`
@@ -20,6 +23,54 @@ All notable changes to this project will be documented in this file.
   16th tool would spend context on every request to serve one moment per machine.
 
 ### Added
+
+- **OIL Vault Activity canvas.** The plugin now ships a Copilot canvas extension
+  (`plugins/obsidian-intelligence-layer/extensions/oil-canvas/`). It shows which
+  notes OIL changed, read, or surfaced in the current session, rendered with the
+  vault's own theme and CSS snippets.
+  - Each write gets a line-level before/after diff. A pre-tool hook snapshots
+    the note just before the write runs.
+  - Writes that OIL rejected, such as an mtime conflict, are reported as
+    failures instead of changes.
+  - The vault picker reads Obsidian's own vault list or lets you browse to a
+    folder.
+  - Analytics are stored in a local SQLite file under
+    `~/.copilot/extensions/oil-canvas/artifacts/`, and can be backfilled from
+    past Copilot session logs.
+  - Obsidian itself is an Electron app and can't be proxied, so the canvas hands
+    off to it with an `obsidian://` link.
+  - Served on loopback only, behind a per-process token, a Host check and a
+    strict CSP.
+  - `.github/extensions/oil-canvas/` is a dev shim that imports the plugin copy.
+    New manifest tests check that the extension stays where the CLI discovers
+    it, and that it imports only Node built-ins and the SDK.
+  - An Obsidian-style **Explorer**, with:
+    - a vault file tree;
+    - wikilink and tag navigation with back and forward;
+    - hover previews;
+    - a Ctrl+O quick switcher;
+    - side panels for backlinks, related notes, a local graph, the outline,
+      properties and history.
+  - A **markdown editor** with syntax highlighting, `[[` autocomplete and split
+    preview. Saves that conflict with a change on disk are refused.
+  - Richer **analytics charts**: area chart, punchcard, heatmap, donut, latency
+    histogram, treemap.
+  - A **vault health** scan with a score and **Fix with Copilot**, which sends
+    the findings into the session once you confirm.
+  - **Search analytics**: how many searches the agent needed per prompt, how
+    each search type performs (hits, zero-hit rate, how often a result was
+    opened, latency), step-by-step search chains, and repeated zero-hit
+    queries with **Fix with Copilot**. Also available to the agent as the
+    `get_search_analytics` action.
+  - **Lean across sessions.**
+    - The store, server and importer load lazily, and sessions that don't call
+      OIL never touch SQLite.
+    - The server stops when the last panel closes, and the link graph is
+      released after 5 minutes idle.
+    - A shared-DB `busy_timeout` plus `BEGIN IMMEDIATE` took concurrent-writer
+      `SQLITE_BUSY` failures to zero. A lock file allows one history import at a
+      time.
+    - A hidden panel defers refreshes and pauses animations.
 
 - **Copilot plugin and marketplace.** `plugins/obsidian-intelligence-layer/`
   packages the MCP server as an installable Copilot plugin, and

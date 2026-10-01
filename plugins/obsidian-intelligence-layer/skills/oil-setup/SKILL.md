@@ -47,7 +47,7 @@ running.
 something needs attention:
 
 ```bash
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.6.0 -- \
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.7.0 -- \
   obsidian-intelligence-layer doctor --vault=/absolute/path/to/vault
 ```
 

@@ -169,6 +169,42 @@ describe("marketplace manifest", () => {
   });
 });
 
+describe("bundled canvas extension", () => {
+  const EXT_ROOT = resolve(PLUGIN_ROOT, "extensions/oil-canvas");
+
+  it("sits where the CLI discovers plugin extensions", async () => {
+    // A manifest without `$schema` loads `extensions/<name>/extension.mjs` from
+    // the plugin root. Declaring the Agent Plugins `$schema` moves discovery to
+    // `com.github.copilot/extensions/`, which would silently drop the canvas.
+    expect(pluginJson.$schema).toBeUndefined();
+    await expect(stat(resolve(EXT_ROOT, "extension.mjs"))).resolves.toBeDefined();
+  });
+
+  it("imports nothing a plugin install cannot provide", async () => {
+    // Plugins are copied, not `npm install`ed: only Node built-ins and the SDK
+    // the CLI injects are guaranteed to resolve.
+    const files = ["extension.mjs", ...(await readdir(resolve(EXT_ROOT, "lib"))).map((f) => `lib/${f}`)];
+    for (const file of files.filter((f) => f.endsWith(".mjs"))) {
+      const body = await readFile(resolve(EXT_ROOT, file), "utf-8");
+      for (const [, fromSpec, dynSpec, bareSpec] of body.matchAll(
+        /\bfrom\s+"([^"]+)"|\bimport\(\s*"([^"]+)"\s*\)|^\s*import\s+"([^"]+)"/gm,
+      )) {
+        const spec = fromSpec ?? dynSpec ?? bareSpec;
+        if (spec.startsWith(".")) continue;
+        expect(spec, `${file} imports ${spec}`).toMatch(/^(node:|@github\/copilot-sdk\/extension$)/);
+      }
+    }
+  });
+
+  it("is loaded in development through a shim, not a copy", async () => {
+    // A copied extension drifts from the shipped one; the shim cannot.
+    const shim = await readFile(resolve(REPO_ROOT, ".github/extensions/oil-canvas/extension.mjs"), "utf-8");
+    expect(shim.trim()).toBe(
+      'import "../../../plugins/obsidian-intelligence-layer/extensions/oil-canvas/extension.mjs";',
+    );
+  });
+});
+
 describe("bundled skills", () => {
   it("keeps the bundled skill set minimal and deliberate", async () => {
     // Every bundled skill is loaded into the skill index for the whole session.
