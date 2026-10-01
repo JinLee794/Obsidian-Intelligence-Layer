@@ -14,129 +14,108 @@ import {
   errorCodeFromUnknown,
   errorResponse,
   jsonResponse,
-  noteRef,
+  refField,
+  truncateList,
+  truncateText,
 } from "../tool-responses.js";
 import { validateVaultPath, validationError } from "../validation.js";
 import { readNote, securePath } from "../vault.js";
-import { fuzzySearch, searchVault } from "../search.js";
-import type { SearchResult } from "../types.js";
+import { cascadeSearch, semanticSearch, type CascadeHit } from "../search.js";
+import { getSemanticIndex } from "../semantic.js";
+import { queryNotes } from "../query.js";
+import { flattenFrontmatter, normalizeValue } from "../frontmatter.js";
 
 // ─── Frontmatter Index ────────────────────────────────────────────────────────
 
-interface FrontmatterIndexEntry {
-  path: string;
-  value: string;
+interface FacetValue {
+  /** First-seen original casing, for display. */
+  display: string;
+  paths: Set<string>;
 }
 
-/**
- * Build the frontmatter index from the current graph.
- * Takes ~5ms for 1,696 notes — cheap enough to rebuild on every call.
- */
-function buildFrontmatterIndex(graph: GraphIndex): Map<string, FrontmatterIndexEntry[]> {
-  const index = new Map<string, FrontmatterIndexEntry[]>();
-  const all = graph.getNotesByFolder("");
+/** key → normalised value → notes carrying it. */
+type FrontmatterFacets = Map<string, Map<string, FacetValue>>;
 
-  for (const ref of all) {
+/**
+ * Build frontmatter facets from the current graph.
+ *
+ * Keys are the flattened dotted paths, so a custom structure like
+ * `opportunities[].guid` is queryable as `opportunities.guid`.
+ */
+function buildFacets(graph: GraphIndex): FrontmatterFacets {
+  const facets: FrontmatterFacets = new Map();
+
+  for (const ref of graph.getNotesByFolder("")) {
     const node = graph.getNode(ref.path);
     if (!node) continue;
 
-    for (const [rawKey, rawValue] of Object.entries(node.frontmatter)) {
-      const key = rawKey.toLowerCase();
-      const values = normalizeFrontmatterValues(rawValue);
-      if (values.length === 0) continue;
-
-      const bucket = index.get(key) ?? [];
-      for (const value of values) {
-        bucket.push({ path: node.path, value });
+    for (const field of flattenFrontmatter(node.frontmatter)) {
+      let bucket = facets.get(field.key);
+      if (!bucket) {
+        bucket = new Map();
+        facets.set(field.key, bucket);
       }
-      index.set(key, bucket);
-    }
-  }
 
-  return index;
-}
+      const normalized = normalizeValue(field.value);
+      if (!normalized) continue;
 
-function normalizeFrontmatterValues(value: unknown): string[] {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return [String(value).toLowerCase()];
-  }
-  if (Array.isArray(value)) {
-    return value
-      .filter((entry) => typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean")
-      .map((entry) => String(entry).toLowerCase());
-  }
-  // Nested objects — stringify so they're at least findable
-  if (typeof value === "object" && value !== null) {
-    return [JSON.stringify(value).toLowerCase()];
-  }
-  return [];
-}
-
-// ─── Content Search (fallback) ────────────────────────────────────────────────
-
-/**
- * In-memory content search using bodySnippet from the graph index.
- * Scans the first ~500 chars of each note already loaded in memory.
- * No disk I/O — runs in <5ms for ~1,700 notes.
- */
-function contentSearch(
-  graph: GraphIndex,
-  query: string,
-  limit: number,
-): Array<{ path: string; title: string; score: number }> {
-  const terms = query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((term) => term.length >= 2);
-
-  if (terms.length === 0) return [];
-
-  const scored: Array<{ path: string; title: string; score: number }> = [];
-  const refs = graph.getNotesByFolder("");
-
-  for (const ref of refs) {
-    const node = graph.getNode(ref.path);
-    if (!node?.bodySnippet) continue;
-    const lower = node.bodySnippet.toLowerCase();
-
-    let totalHits = 0;
-    let matchedTerms = 0;
-    for (const term of terms) {
-      let termHits = 0;
-      let idx = lower.indexOf(term);
-      while (idx >= 0) {
-        termHits++;
-        idx = lower.indexOf(term, idx + term.length);
+      let entry = bucket.get(normalized);
+      if (!entry) {
+        entry = { display: field.value, paths: new Set() };
+        bucket.set(normalized, entry);
       }
-      if (termHits > 0) matchedTerms++;
-      totalHits += termHits;
-    }
-
-    // Require at least half the query terms to match to reduce false positives
-    if (totalHits > 0 && matchedTerms >= Math.ceil(terms.length / 2)) {
-      scored.push({
-        path: ref.path,
-        title: ref.title,
-        score: Math.min(totalHits / terms.length / 10, 1),
-      });
+      entry.paths.add(node.path);
     }
   }
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit);
+  return facets;
 }
 
-/**
- * Build a contextual snippet around the first matching term.
- */
+// ─── Snippets ─────────────────────────────────────────────────────────────────
+
 function getWordCount(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * Tell the caller when meaning-based search would have run but could not.
+ *
+ * The semantic tier is optional and fails quietly by design, which leaves a user
+ * inside an MCP client with no way to discover that it exists or why it is off —
+ * startup logs go to stderr, which most clients hide. Reported only on a query
+ * the lexical tiers could not cover, so it costs nothing when search is working
+ * and never nags someone who turned the tier off deliberately.
+ */
+function semanticNotice(
+  graph: GraphIndex,
+  escalation: string | null,
+  tiersUsed: string[],
+): Record<string, string> {
+  if (!escalation || tiersUsed.includes("semantic")) return {};
+
+  const status = getSemanticIndex(graph)?.stats;
+  if (!status || status.status === "disabled" || status.status === "ready") return {};
+
+  // A search schedules its own background retry, which flips the tier to
+  // `indexing` before this runs. `reason` is only ever set by a failure, so it
+  // distinguishes a genuine first index from a retry after one.
+  if (status.reason) {
+    return {
+      semantic_status:
+        `Meaning-based search is unavailable (${status.reason}), so this used keyword matching only. ` +
+        "It needs Ollama running locally; run `obsidian-intelligence-layer doctor` to check, or set OIL_SEMANTIC=off to silence this.",
+    };
+  }
+
+  return {
+    semantic_status:
+      "Meaning-based search is still indexing this vault; keyword results only for now.",
+  };
 }
 
 function buildSnippet(content: string, query: string): string {
   const compact = content.replace(/\s+/g, " ").trim();
   if (!compact) return "";
-
   const terms = query
     .toLowerCase()
     .split(/\s+/)
@@ -164,6 +143,67 @@ function buildSnippet(content: string, query: string): string {
 }
 
 /**
+ * Shared body of the `semantic_search` tool.
+ *
+ * An empty list is ambiguous here in a way it never is inside the cascade:
+ * there is no other tier to fall back on, so say which case it was.
+ */
+async function semanticOnlySearch(
+  graph: GraphIndex,
+  query: string,
+  limit: number,
+  filters: { folder?: string; tags?: string[] },
+) {
+  const index = getSemanticIndex(graph);
+  index?.ensureFresh(graph);
+
+  const results = await semanticSearch(graph, query, limit, filters);
+
+  if (results.length === 0) {
+    const status = index?.stats.status;
+    if (status !== "ready") {
+      // semanticNotice stays silent for a deliberately disabled tier, which is
+      // right for search_vault and wrong here — the caller asked for this tier.
+      const notice = semanticNotice(graph, "explicit", []);
+      return jsonResponse({
+        count: 0,
+        tiers_used: [],
+        tiers_ran: [],
+        results: [],
+        ...(Object.keys(notice).length > 0
+          ? notice
+          : {
+              semantic_status:
+                "Meaning-based search is turned off for this server, so this tool has nothing to search.",
+            }),
+        next_step: "Retry with search_vault, which answers from the keyword tiers.",
+      });
+    }
+  }
+
+  return jsonResponse({
+    count: results.length,
+    tiers_used: ["semantic"],
+    // Reaching here means the tier was ready and searched, whether or not
+    // anything cleared the floor.
+    tiers_ran: ["semantic"],
+    results: results.map((hit) => ({
+      path: hit.path,
+      title: hit.title,
+      excerpt: hit.excerpt,
+      score: hit.score,
+      matched_by: ["semantic"],
+    })),
+    ...(results.length === 0
+      ? {
+          next_step:
+            "Nothing cleared the similarity floor. Try search_vault, which also matches on wording.",
+        }
+      : {}),
+  });
+}
+
+/**
  * Register all Retrieve tools on the MCP server.
  */
 export function registerRetrieveTools(
@@ -171,24 +211,21 @@ export function registerRetrieveTools(
   vaultPath: string,
   graph: GraphIndex,
   _cache: SessionCache,
-  _config: OilConfig,
+  config: OilConfig,
 ): void {
   server.registerTool(
     "search_vault",
     {
-      description: "Unified search across lexical and fuzzy tiers. Tries lexical first (fast substring), falls back to fuzzy if needed. Returns ranked results.",
+      description:
+        "Primary search over vault notes. Cascades BM25 keyword ranking → fuzzy → meaning-based matching, escalating only when the cheaper tier fails to cover the query. Use for any 'find notes about X' request.",
       inputSchema: {
-        query: z.string().describe("Search query text"),
-        tier: z
-          .enum(["lexical", "fuzzy"])
-          .optional()
-          .describe("Force a specific search tier (default: lexical first, fuzzy fallback)"),
+        query: z.string().describe("Search query text or natural-language description"),
         limit: z.number().optional().describe("Max results (default: 10)"),
         filter_folder: z.string().optional().describe("Restrict to this folder prefix"),
         filter_tags: z.array(z.string()).optional().describe("Restrict to notes with these tags"),
       },
     },
-    async ({ query, tier, limit, filter_folder, filter_tags }) => {
+    async ({ query, limit, filter_folder, filter_tags }) => {
       if (!query || !query.trim()) {
         return validationError("search_vault: query must be a non-empty string");
       }
@@ -198,50 +235,70 @@ export function registerRetrieveTools(
       }
 
       const boundedLimit = limit ?? 10;
-      let results = searchVault(graph, _config, query, tier, boundedLimit, {
+      const { results, tiersUsed, tiersRan, escalation, totalMatched } = await cascadeSearch(
+        graph,
+        query,
+        boundedLimit,
+        { folder: filter_folder, tags: filter_tags },
+      );
+
+      return jsonResponse({
+        count: results.length,
+        ...(totalMatched !== undefined ? { total_matched: totalMatched } : {}),
+        ...(totalMatched !== undefined && totalMatched > results.length
+          ? {
+              truncated: true,
+              next_step:
+                "This query matched a frontmatter value on more notes than were returned. Use query_frontmatter with `where` to filter, or raise `limit`.",
+            }
+          : {}),
+        tiers_used: tiersUsed,
+        tiers_ran: tiersRan,
+        escalated: escalation,
+        ...semanticNotice(graph, escalation, tiersUsed),
+        results: results.map(({ matchedBy, heading, ...rest }: CascadeHit) => ({
+          ...rest,
+          ...refField(rest.path, heading || undefined),
+          matched_by: matchedBy,
+        })),
+      });
+    },
+  );
+
+  // ── semantic_search ───────────────────────────────────────────────────
+
+  server.registerTool(
+    "semantic_search",
+    {
+      description:
+        "Meaning-based search only, with no keyword tier mixed in. Use when a query shares no vocabulary with the notes that answer it — conceptual questions, paraphrases, or 'what have we discussed like X'. For ordinary lookups prefer search_vault. Requires a local Ollama; returns guidance instead of results when unavailable.",
+      inputSchema: {
+        query: z.string().describe("Natural-language description of the idea to match"),
+        limit: z.number().optional().describe("Max results (default: 10)"),
+        filter_folder: z.string().optional().describe("Restrict to this folder prefix"),
+        filter_tags: z.array(z.string()).optional().describe("Restrict to notes with these tags"),
+      },
+    },
+    async ({ query, limit, filter_folder, filter_tags }) => {
+      if (!query || !query.trim()) {
+        return validationError("semantic_search: query must be a non-empty string");
+      }
+      if (filter_folder) {
+        const folderErr = validateVaultPath(filter_folder);
+        if (folderErr) return validationError(`semantic_search: filter_folder — ${folderErr}`);
+      }
+
+      return semanticOnlySearch(graph, query, limit ?? 10, {
         folder: filter_folder,
         tags: filter_tags,
       });
-
-      // Content search fallback: if tiers didn't find enough, search in-memory bodySnippets
-      if (results.length < boundedLimit) {
-        const contentMatches = contentSearch(graph, query, boundedLimit);
-        const seen = new Set(results.map((r: SearchResult) => r.path));
-        for (const candidate of contentMatches) {
-          if (seen.has(candidate.path)) continue;
-          if (filter_folder && !candidate.path.startsWith(filter_folder)) continue;
-          if (filter_tags && filter_tags.length > 0) {
-            const node = graph.getNode(candidate.path);
-            const nodeTags = node?.tags ?? [];
-            if (!filter_tags.some((t) => nodeTags.includes(t))) continue;
-          }
-          const node = graph.getNode(candidate.path);
-          results.push({
-            path: candidate.path,
-            title: candidate.title,
-            excerpt: buildSnippet(node?.bodySnippet ?? "", query),
-            score: candidate.score * 0.4,
-            matchType: "lexical" as const,
-          });
-          seen.add(candidate.path);
-          if (results.length >= boundedLimit) break;
-        }
-      }
-
-      return jsonResponse(
-        results.map((result) => ({
-          ...result,
-          ref: noteRef(result.path),
-        })),
-      );
     },
   );
 
   // ── query_notes ───────────────────────────────────────────────────────
 
   server.registerTool(
-    "get_note_metadata",
-    {
+    "get_note_metadata",    {
       description:
         "Peek at note metadata before loading full content. Returns frontmatter, creation/modification timestamps, word count, and headings.",
       inputSchema: {
@@ -265,10 +322,10 @@ export function registerRetrieveTools(
       try {
         const parsed = await readNote(vaultPath, path);
         const fileStats = await stat(securePath(vaultPath, path));
+        const headings = truncateList([...parsed.sections.keys()]);
 
         const result = {
           path: parsed.path,
-          ref: noteRef(parsed.path),
           title: parsed.title,
           frontmatter: parsed.frontmatter,
           created_at: fileStats.birthtime.toISOString(),
@@ -276,7 +333,9 @@ export function registerRetrieveTools(
           mtime_ms: fileStats.mtimeMs,
           version: fileStats.mtimeMs,
           word_count: getWordCount(parsed.content),
-          headings: [...parsed.sections.keys()],
+          headings: headings.items,
+          heading_count: headings.total_count,
+          ...(headings.truncated ? { headings_truncated: true } : {}),
         };
 
         return jsonResponse(result);
@@ -284,7 +343,7 @@ export function registerRetrieveTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to read note metadata: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path) },
+          { path },
         );
       }
     },
@@ -321,13 +380,14 @@ export function registerRetrieveTools(
         const section = parsed.sections.get(heading);
 
         if (section === undefined) {
+          const headings = truncateList([...parsed.sections.keys()]);
           return errorResponse(
             "NOT_FOUND",
             `Section \"${heading}\" not found in ${path}`,
             {
               path,
-              ref: noteRef(path),
-              available_headings: [...parsed.sections.keys()],
+              available_headings: headings.items,
+              ...(headings.truncated ? { heading_count: headings.total_count } : {}),
             },
             {
               retryable: true,
@@ -339,12 +399,19 @@ export function registerRetrieveTools(
         }
 
         const fileStats = await stat(securePath(vaultPath, path));
+        const body = truncateText(section);
 
         return jsonResponse({
           path,
-          ref: noteRef(path, heading),
-          heading,
-          content: section,
+          ...refField(path, heading),
+          content: body.text,
+          ...(body.truncated
+            ? {
+                truncated: true,
+                total_chars: body.total_chars,
+                note: "Section exceeded the response budget and was cut. Read a narrower sub-heading for the remainder.",
+              }
+            : {}),
           mtime_ms: fileStats.mtimeMs,
           version: fileStats.mtimeMs,
         });
@@ -352,7 +419,7 @@ export function registerRetrieveTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to read section: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path, heading) },
+          { path, ...refField(path, heading) },
         );
       }
     },
@@ -364,29 +431,129 @@ export function registerRetrieveTools(
     "query_frontmatter",
     {
       description:
-        "Fast frontmatter index lookup by key and value fragment. O(1) key lookup instead of full vault scan. Use for quick TPID, customer, status, or tag lookups.",
+        "Structured lookup over note frontmatter and tags, resolved from the in-memory graph. Call with no arguments to discover which keys exist, with `key` alone to list that key's values and counts, with `key`+`value_fragment` to match a substring, or with `where` to filter on several fields at once. Prefer this over search_vault whenever the answer is a property (status, tag, owner, date) rather than wording.",
       inputSchema: {
-        key: z.string().describe("Frontmatter key to search (e.g. 'tpid', 'customer', 'status')"),
-        value_fragment: z.string().describe("Case-insensitive value fragment to match"),
+        key: z.string().optional().describe("Frontmatter key. Omit with no `where` to list all keys."),
+        value_fragment: z.string().optional().describe("Case-insensitive substring of the value. Omit to list the key's distinct values."),
+        where: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Exact-match predicates across fields, e.g. { status: 'at-risk', tags: ['enterprise'] }. Array values must all match."),
+        folder: z.string().optional().describe("Restrict to this folder prefix"),
+        order_by: z.string().optional().describe("Frontmatter field to sort by; prefix with '-' for descending"),
+        limit: z.number().optional().describe("Max results (default: 20)"),
       },
     },
-    async ({ key, value_fragment }) => {
-      const fmIndex = buildFrontmatterIndex(graph);
-      const entries = fmIndex.get(key.toLowerCase()) ?? [];
+    async ({ key, value_fragment, where, folder, order_by, limit }) => {
+      if (folder) {
+        const folderErr = validateVaultPath(folder);
+        if (folderErr) return validationError(`query_frontmatter: folder — ${folderErr}`);
+      }
+
+      const boundedLimit = Math.max(1, limit ?? 20);
+
+      // ── Predicate mode ──────────────────────────────────────────────
+      if (where && Object.keys(where).length > 0) {
+        const matched = queryNotes(graph, config, {
+          where: where as Record<string, unknown>,
+          folder,
+          orderBy: order_by,
+        });
+
+        return jsonResponse({
+          mode: "query",
+          where,
+          total_matched: matched.length,
+          returned: Math.min(matched.length, boundedLimit),
+          ...(matched.length > boundedLimit ? { truncated: true } : {}),
+          results: matched.slice(0, boundedLimit).map((ref) => ({
+            path: ref.path,
+            title: ref.title,
+            tags: ref.tags,
+          })),
+        });
+      }
+
+      const facets = buildFacets(graph);
+      const inFolder = (path: string) => !folder || path.startsWith(folder);
+
+      // ── Schema mode — what can I filter on? ─────────────────────────
+      if (!key) {
+        const keys = [...facets.entries()]
+          .map(([name, values]) => {
+            const notes = new Set<string>();
+            for (const entry of values.values()) {
+              for (const path of entry.paths) if (inFolder(path)) notes.add(path);
+            }
+            return { key: name, distinct_values: values.size, notes: notes.size };
+          })
+          .filter((k) => k.notes > 0)
+          .sort((a, b) => b.notes - a.notes);
+
+        return jsonResponse({
+          mode: "schema",
+          ...(folder ? { folder } : {}),
+          key_count: keys.length,
+          keys,
+          next_step:
+            "Call query_frontmatter with `key` to list that key's values, or `where` to filter notes.",
+        });
+      }
+
+      const bucket = facets.get(key.toLowerCase());
+      if (!bucket) {
+        return errorResponse(
+          "NOT_FOUND",
+          `No frontmatter key "${key}" found in this vault.`,
+          { key, available_keys: [...facets.keys()].sort() },
+          {
+            retryable: true,
+            suggested_tools: ["query_frontmatter"],
+            next_step: "Pick a key from available_keys, or call query_frontmatter with no arguments.",
+          },
+        );
+      }
+
+      // ── Facet mode — what values does this key take? ────────────────
+      if (value_fragment === undefined) {
+        const values = [...bucket.values()]
+          .map((entry) => ({
+            value: entry.display,
+            count: [...entry.paths].filter(inFolder).length,
+          }))
+          .filter((v) => v.count > 0)
+          .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+
+        return jsonResponse({
+          mode: "facet",
+          key,
+          ...(folder ? { folder } : {}),
+          distinct_values: values.length,
+          returned: Math.min(values.length, boundedLimit),
+          ...(values.length > boundedLimit ? { truncated: true } : {}),
+          values: values.slice(0, boundedLimit),
+        });
+      }
+
+      // ── Match mode — substring against the key's values ─────────────
       const fragment = value_fragment.toLowerCase();
+      const matchedPaths = new Set<string>();
+      for (const [normalized, entry] of bucket) {
+        if (!normalized.includes(fragment)) continue;
+        for (const path of entry.paths) if (inFolder(path)) matchedPaths.add(path);
+      }
 
-      const paths = [...new Set(
-        entries
-          .filter((entry) => entry.value.includes(fragment))
-          .map((entry) => entry.path),
-      )].slice(0, 20);
-
+      const paths = [...matchedPaths];
       return jsonResponse({
+        mode: "match",
         key,
         value_fragment,
-        count: paths.length,
-        paths,
-        matches: paths.map((path) => ({ path, ref: noteRef(path) })),
+        // Reported before truncation so the caller can tell a partial result
+        // from a complete one.
+        total_matched: paths.length,
+        returned: Math.min(paths.length, boundedLimit),
+        ...(paths.length > boundedLimit ? { truncated: true } : {}),
+        paths: paths.slice(0, boundedLimit),
       });
     },
   );
@@ -417,62 +584,15 @@ export function registerRetrieveTools(
         );
       }
 
-      const related = graph.getRelatedNotes(path, max_hops ?? 2);
+      const related = truncateList(graph.getRelatedNotes(path, max_hops ?? 2));
 
       return jsonResponse({
         path,
-        ref: noteRef(path),
         max_hops: max_hops ?? 2,
-        related,
+        count: related.total_count,
+        ...(related.truncated ? { truncated: true } : {}),
+        related: related.items,
       });
-    },
-  );
-
-  // ── semantic_search ──────────────────────────────────────────────────
-
-  server.registerTool(
-    "semantic_search",
-    {
-      description:
-        "Natural-language search across vault notes. Combines fuzzy matching with full-content search for broad recall. Returns ranked results with short snippets.",
-      inputSchema: {
-        query: z.string().describe("Natural language search query"),
-        limit: z.number().optional().describe("Max results (default: 10)"),
-      },
-    },
-    async ({ query, limit }) => {
-      if (!query || !query.trim()) {
-        return validationError("semantic_search: query must be a non-empty string");
-      }
-      const boundedLimit = limit ?? 10;
-
-      // Fuzzy search + in-memory content search for broad recall
-      const fuzzyResults = fuzzySearch(graph, query, boundedLimit);
-      const contentResults = contentSearch(graph, query, boundedLimit);
-
-      const seen = new Set<string>();
-      const merged: Array<{ path: string; title: string; score: number }> = [];
-      for (const r of [...fuzzyResults, ...contentResults]) {
-        if (!seen.has(r.path)) {
-          seen.add(r.path);
-          merged.push(r);
-        }
-      }
-      merged.sort((a, b) => b.score - a.score);
-
-      const results = merged.slice(0, boundedLimit).map((r) => {
-        const node = graph.getNode(r.path);
-        const snippet = buildSnippet(node?.bodySnippet ?? "", query);
-        return {
-          path: r.path,
-          ref: noteRef(r.path),
-          title: r.title,
-          snippet: snippet.slice(0, 220),
-          score: r.score,
-        };
-      });
-
-      return jsonResponse({ count: results.length, results });
     },
   );
 }

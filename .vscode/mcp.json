@@ -9,7 +9,7 @@
     },
     "oil": {
         "command": "node",
-        "args": ["dist/index.js"],
+        "args": ["${workspaceFolder}/dist/index.js"],
         "envFile": "${workspaceFolder}/.env"
     }
   }

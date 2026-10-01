@@ -5,6 +5,7 @@
  */
 
 import type { GraphIndex } from "./graph.js";
+import { flattenFrontmatter, normalizeValue } from "./frontmatter.js";
 import type { NoteRef, GraphNode, OilConfig } from "./types.js";
 
 // ─── Predicate Types ──────────────────────────────────────────────────────────
@@ -131,6 +132,20 @@ function matchesField(
   // Map config field names to frontmatter keys
   const frontmatterKey = resolveFieldName(key, config);
   const actual = node.frontmatter[frontmatterKey];
+
+  // Nested/custom field addressed by dotted path, e.g. "opportunities.guid".
+  if (actual === undefined && key.includes(".")) {
+    const target = key.toLowerCase();
+    const values = flattenFrontmatter(node.frontmatter)
+      .filter((f) => f.key === target)
+      .map((f) => normalizeValue(f.value));
+    if (values.length === 0) return false;
+
+    const wanted = Array.isArray(expected) ? expected : [expected];
+    return wanted.every(
+      (w) => typeof w !== "object" && values.includes(normalizeValue(String(w))),
+    );
+  }
 
   // If expected is a string and actual is an array, check inclusion
   if (Array.isArray(actual) && typeof expected === "string") {

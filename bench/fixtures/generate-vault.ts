@@ -342,15 +342,8 @@ tags: [agent-log]
 search:
   graph_index_file: "_oil-graph.json"
 
-write_gate:
-  diff_format: markdown
+audit:
   log_all_writes: true
-  auto_confirmed_sections:
-    - Agent Insights
-    - Connect Hooks
-  auto_confirmed_operations:
-    - log_agent_action
-    - capture_connect_hook
 `,
     "utf-8",
   );

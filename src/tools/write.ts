@@ -14,11 +14,14 @@ import {
   errorCodeFromUnknown,
   errorResponse,
   jsonResponse,
-  noteRef,
+  refField,
+  truncateList,
+  truncateText,
+  MAX_TEXT_CHARS,
 } from "../tool-responses.js";
 import { validateVaultPath, validationError } from "../validation.js";
-import { securePath, noteExists } from "../vault.js";
-import { appendToSection, executeWrite, logWrite } from "../gate.js";
+import { securePath, noteExists, readNote } from "../vault.js";
+import { appendToSection, executeWrite, logWrite, replaceSection } from "../gate.js";
 import { invalidateSearchIndex } from "../search.js";
 
 /**
@@ -38,11 +41,14 @@ export function registerWriteTools(
    * absent or throttled entirely). Doing it inline makes write→read
    * consistency deterministic: a note created or edited through these tools is
    * immediately visible to graph traversal, frontmatter lookups and search.
+   * The resulting mtime is recorded so the watcher can drop its own echo
+   * instead of re-indexing the same state a second time.
    */
   const syncIndexes = async (path: string): Promise<void> => {
     cache.invalidateNote(path);
     try {
       await graph.updateNote(path);
+      cache.markSelfWrite(path, await getMtime(vaultPath, path));
     } catch {
       // A failed re-index must never fail an otherwise successful write.
     }
@@ -100,7 +106,7 @@ export function registerWriteTools(
               "Stale write rejected: expected_mtime does not match current file state",
               {
                 path,
-                ref: noteRef(path, heading),
+                ...refField(path, heading),
                 expected_mtime,
                 current_mtime: before,
               },
@@ -121,7 +127,6 @@ export function registerWriteTools(
           // Audit log (fire-and-forget)
           try {
             await logWrite(vaultPath, config, {
-              tier: "auto",
               operation: "atomic_append",
               path,
               detail: `append to §${heading} (mtime ${before} → ${after})`,
@@ -131,8 +136,7 @@ export function registerWriteTools(
           return jsonResponse({
             status: "executed",
             path,
-            ref: noteRef(path, heading),
-            heading,
+            ...refField(path, heading),
             previous_mtime: before,
             mtime_ms: after,
             version: after,
@@ -142,7 +146,7 @@ export function registerWriteTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to append: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path, heading) },
+          { path, ...refField(path, heading) },
         );
       }
     },
@@ -198,7 +202,6 @@ export function registerWriteTools(
               "Stale write rejected: expected_mtime does not match current file state",
               {
                 path,
-                ref: noteRef(path),
                 expected_mtime,
                 current_mtime: before,
               },
@@ -219,7 +222,6 @@ export function registerWriteTools(
           // Audit log (fire-and-forget)
           try {
             await logWrite(vaultPath, config, {
-              tier: "auto",
               operation: "atomic_replace",
               path,
               detail: `full replace (mtime ${before} → ${after})`,
@@ -229,7 +231,6 @@ export function registerWriteTools(
           return jsonResponse({
             status: "executed",
             path,
-            ref: noteRef(path),
             previous_mtime: before,
             mtime_ms: after,
             version: after,
@@ -239,7 +240,124 @@ export function registerWriteTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to replace: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path) },
+          { path },
+        );
+      }
+    },
+  );
+
+  // ── atomic_replace_section ────────────────────────────────────────────
+
+  server.registerTool(
+    "atomic_replace_section",
+    {
+      description:
+        "Overwrite the body of one heading section, leaving the rest of the note untouched, only if the file mtime matches expected_mtime. Use this instead of atomic_replace to edit part of a note — atomic_replace requires you to supply the whole file.",
+      inputSchema: {
+        path: z.string().describe("Note path within the vault"),
+        heading: z.string().describe("Heading whose body is replaced (without markdown # markers)"),
+        content: z.string().describe("Replacement body for the section, excluding the heading line"),
+        expected_mtime: z
+          .number()
+          .describe("Expected file modification timestamp in milliseconds (use get_note_metadata.mtime_ms)"),
+      },
+    },
+    async ({ path, heading, content, expected_mtime }) => {
+      const pathErr = validateVaultPath(path);
+      if (pathErr) {
+        return validationError(
+          `atomic_replace_section: ${pathErr}`,
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            next_step:
+              "Use a vault-relative path like Customers/Contoso.md without ../ segments or absolute prefixes, then retry atomic_replace_section.",
+          },
+        );
+      }
+      if (!Number.isFinite(expected_mtime)) {
+        return validationError(
+          "atomic_replace_section: expected_mtime must be a finite number",
+          "INVALID_INPUT",
+          {
+            retryable: true,
+            suggested_tools: ["get_note_metadata"],
+            next_step:
+              "Call get_note_metadata on the target note and retry atomic_replace_section with its mtime_ms as expected_mtime.",
+          },
+        );
+      }
+
+      try {
+        return await withWriteLock(path, async () => {
+          const before = await getMtime(vaultPath, path);
+          if (!mtimeMatches(before, expected_mtime)) {
+            return errorResponse(
+              "CONFLICT",
+              "Stale write rejected: expected_mtime does not match current file state",
+              {
+                path,
+                ...refField(path, heading),
+                expected_mtime,
+                current_mtime: before,
+              },
+              {
+                retryable: true,
+                suggested_tools: ["get_note_metadata"],
+                next_step:
+                  "Call get_note_metadata on the same path to fetch the latest mtime_ms, then retry atomic_replace_section with that fresh value.",
+              },
+            );
+          }
+
+          // Unlike atomic_append, a missing heading is an error rather than a
+          // new section: replacing something that is not there is never intent.
+          const replaced = await replaceSection(vaultPath, path, heading, content);
+          if (!replaced) {
+            const parsed = await readNote(vaultPath, path);
+            const headings = truncateList([...parsed.sections.keys()]);
+            return errorResponse(
+              "NOT_FOUND",
+              `Section "${heading}" not found in ${path}`,
+              {
+                path,
+                available_headings: headings.items,
+                ...(headings.truncated ? { heading_count: headings.total_count } : {}),
+              },
+              {
+                retryable: true,
+                suggested_tools: ["atomic_append", "atomic_replace_section"],
+                next_step:
+                  "Pick a heading from available_headings, or use atomic_append which creates the section when it is missing.",
+              },
+            );
+          }
+
+          await syncIndexes(path);
+          const after = await getMtime(vaultPath, path);
+
+          try {
+            await logWrite(vaultPath, config, {
+              operation: "atomic_replace_section",
+              path,
+              detail: `replace §${heading} (mtime ${before} → ${after})`,
+            });
+          } catch {}
+
+          return jsonResponse({
+            status: "executed",
+            path,
+            ...refField(path, heading),
+            previous_mtime: before,
+            mtime_ms: after,
+            version: after,
+          });
+        });
+      } catch (err) {
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Failed to replace section: ${err instanceof Error ? err.message : String(err)}`,
+          { path, ...refField(path, heading) },
         );
       }
     },
@@ -278,7 +396,7 @@ export function registerWriteTools(
             return errorResponse(
               "CONFLICT",
               "Note already exists — use atomic_replace to update it",
-              { path, ref: noteRef(path) },
+              { path },
               {
                 retryable: false,
                 suggested_tools: ["get_note_metadata", "atomic_replace"],
@@ -293,7 +411,6 @@ export function registerWriteTools(
 
           try {
             await logWrite(vaultPath, config, {
-              tier: "auto",
               operation: "create_note",
               path,
               detail: "created new note",
@@ -307,7 +424,6 @@ export function registerWriteTools(
           return jsonResponse({
             status: "created",
             path,
-            ref: noteRef(path),
             mtime_ms: after,
             version: after,
           });
@@ -316,7 +432,7 @@ export function registerWriteTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Failed to create: ${err instanceof Error ? err.message : String(err)}`,
-          { path, ref: noteRef(path) },
+          { path },
         );
       }
     },
@@ -346,17 +462,21 @@ export function registerWriteTools(
       try {
         const fullPath = securePath(vaultPath, logPath);
         const content = await readFile(fullPath, "utf-8");
+        // Tail, not head: a busy day's log is append-only and the recent
+        // entries are the ones worth spending context on.
+        const body = truncateText(content, MAX_TEXT_CHARS, "tail");
         return jsonResponse({
           date: dateStr,
           path: logPath,
-          ref: noteRef(logPath),
-          log: content,
+          log: body.text,
+          ...(body.truncated
+            ? { truncated: true, total_chars: body.total_chars, showing: "most recent entries" }
+            : {}),
         });
       } catch {
         return jsonResponse({
           date: dateStr,
           path: logPath,
-          ref: noteRef(logPath),
           log: null,
           message: "No log entries for this date.",
         });

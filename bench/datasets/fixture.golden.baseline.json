@@ -1,0 +1,39 @@
+{
+  "dataset": "fixture vault — committed golden set",
+  "mode": "semantic",
+  "cases": 12,
+  "skipped": 0,
+  "semantic": "on",
+  "hit_rate": 1,
+  "mrr": 0.9167,
+  "recall": 1,
+  "primary_accuracy": 1,
+  "tier_routing": 1,
+  "by_scenario": {
+    "identifier": {
+      "cases": 2,
+      "hit_rate": 1,
+      "mrr": 1
+    },
+    "exact-entity": {
+      "cases": 2,
+      "hit_rate": 1,
+      "mrr": 1
+    },
+    "typo": {
+      "cases": 2,
+      "hit_rate": 1,
+      "mrr": 0.75
+    },
+    "paraphrase": {
+      "cases": 4,
+      "hit_rate": 1,
+      "mrr": 0.875
+    },
+    "attribute": {
+      "cases": 2,
+      "hit_rate": 1,
+      "mrr": 1
+    }
+  }
+}

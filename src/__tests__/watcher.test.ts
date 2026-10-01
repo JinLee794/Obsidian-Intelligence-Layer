@@ -5,7 +5,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { VaultWatcher } from "../watcher.js";
 import { GraphIndex } from "../graph.js";
 import { SessionCache } from "../cache.js";
-import { mkdtemp, rm, mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, unlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -47,6 +47,31 @@ describe("VaultWatcher — lifecycle", () => {
     const cache = new SessionCache();
     const watcher = new VaultWatcher(vaultRoot, graph, cache);
     await watcher.stop(); // Should not throw
+  });
+
+  it("reports readiness only once the initial scan has finished", async () => {
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const cache = new SessionCache();
+    const watcher = new VaultWatcher(vaultRoot, graph, cache);
+
+    expect(watcher.getStatus().ready).toBe(false);
+
+    watcher.start();
+    // Changes made before this resolves are simply not observed by chokidar,
+    // which silently loses edits on a vault large enough to make the scan slow.
+    await watcher.whenReady();
+    expect(watcher.getStatus().ready).toBe(true);
+
+    await watcher.stop();
+    expect(watcher.getStatus().ready).toBe(false);
+  });
+
+  it("whenReady resolves immediately when never started", async () => {
+    const graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    const watcher = new VaultWatcher(vaultRoot, graph, new SessionCache());
+    await expect(watcher.whenReady()).resolves.toBeUndefined();
   });
 });
 
@@ -177,5 +202,154 @@ describe("VaultWatcher — file change detection", () => {
     // Clean up
     await unlink(join(vaultRoot, "notes/data.json"));
     await new Promise((r) => setTimeout(r, 600));
+  });
+
+  it("skips the echo of a write OIL already indexed", { retry: 2 }, async () => {
+    graph = new GraphIndex(vaultRoot);
+    await graph.build();
+    cache = new SessionCache();
+    watcher = new VaultWatcher(vaultRoot, graph, cache);
+    watcher.start();
+    await new Promise((r) => setTimeout(r, 500));
+
+    const notePath = "notes/self-written.md";
+    const fullPath = join(vaultRoot, notePath);
+
+    // Stand in for a write tool: write, then mark the resulting mtime the way
+    // syncIndexes does. The graph is deliberately left un-indexed so that any
+    // re-index by the watcher is observable.
+    await writeFile(fullPath, `---\ntags: [self]\n---\n# Self Written\n`, "utf-8");
+    cache.markSelfWrite(notePath, (await stat(fullPath)).mtimeMs);
+
+    await new Promise((r) => setTimeout(r, 2000));
+    expect(graph.getNode(notePath)).toBeUndefined();
+
+    // A genuine external edit still gets picked up
+    await writeFile(
+      fullPath,
+      `---\ntags: [self]\n---\n# Self Written\nEdited by hand.\n`,
+      "utf-8",
+    );
+
+    let detected = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (graph.getNode(notePath)) {
+        detected = true;
+        break;
+      }
+    }
+    expect(detected).toBe(true);
+
+    await unlink(fullPath).catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+  });
+});
+
+describe("VaultWatcher — coalescing a burst", () => {
+  let watcher: VaultWatcher;
+  let burstDir: string;
+
+  afterEach(async () => {
+    if (watcher) await watcher.stop();
+    if (burstDir) await rm(burstDir, { recursive: true, force: true });
+  });
+
+  /**
+   * A sync landing, a `git pull`, or a bulk rename writes many notes at once.
+   * Each one used to get its own timer, its own re-index, and its own
+   * whole-vault link resolve — so the cost of a burst was quadratic in the
+   * worst case. These check the burst arrives as one batch.
+   */
+  it("applies a burst of writes as a single batch", { retry: 2 }, async () => {
+    burstDir = await mkdtemp(join(tmpdir(), "oil-burst-"));
+    const vault = join(burstDir, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "seed.md"), "# Seed\n", "utf-8");
+
+    const graph = new GraphIndex(vault);
+    await graph.build();
+
+    const batches: number[] = [];
+    const realUpdate = graph.updateNotes.bind(graph);
+    graph.updateNotes = async (paths: readonly string[]) => {
+      batches.push(paths.length);
+      return realUpdate(paths);
+    };
+
+    watcher = new VaultWatcher(vault, graph, new SessionCache());
+    watcher.start();
+    await watcher.whenReady();
+    await new Promise((r) => setTimeout(r, 300));
+
+    const BURST = 12;
+    for (let i = 0; i < BURST; i++) {
+      await writeFile(join(vault, `burst-${i}.md`), `# Burst ${i}\n`, "utf-8");
+    }
+
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (graph.nodeCount >= BURST + 1) break;
+    }
+
+    expect(graph.nodeCount).toBe(BURST + 1);
+    // The burst may straddle a window boundary, but it must not degenerate into
+    // one call per file.
+    expect(batches.length).toBeLessThan(BURST);
+    expect(batches.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(BURST);
+  });
+
+  it("collapses repeated writes to one path into a single update", { retry: 2 }, async () => {
+    burstDir = await mkdtemp(join(tmpdir(), "oil-burst-repeat-"));
+    const vault = join(burstDir, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "hot.md"), "# Hot\n\nv0\n", "utf-8");
+
+    const graph = new GraphIndex(vault);
+    await graph.build();
+
+    let calls = 0;
+    const realUpdate = graph.updateNotes.bind(graph);
+    graph.updateNotes = async (paths: readonly string[]) => {
+      calls++;
+      return realUpdate(paths);
+    };
+
+    watcher = new VaultWatcher(vault, graph, new SessionCache());
+    watcher.start();
+    await watcher.whenReady();
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Rewrite the same note repeatedly inside one debounce window.
+    for (let i = 1; i <= 8; i++) {
+      await writeFile(join(vault, "hot.md"), `# Hot\n\nv${i}\n`, "utf-8");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (graph.getNode("hot.md")?.title === "Hot" && calls > 0) break;
+    }
+
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThan(8);
+  });
+
+  it("clears a pending window on stop", async () => {
+    burstDir = await mkdtemp(join(tmpdir(), "oil-burst-stop-"));
+    const vault = join(burstDir, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "seed.md"), "# Seed\n", "utf-8");
+
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    watcher = new VaultWatcher(vault, graph, new SessionCache());
+    watcher.start();
+    await watcher.whenReady();
+
+    await writeFile(join(vault, "pending.md"), "# Pending\n", "utf-8");
+    await watcher.stop();
+
+    expect(watcher.getStatus().pendingUpdates).toBe(0);
   });
 });

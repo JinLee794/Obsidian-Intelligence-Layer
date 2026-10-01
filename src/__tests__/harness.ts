@@ -57,14 +57,59 @@ export class MockMcpServer {
     return [...this.tools.keys()].sort();
   }
 
-  /** Total serialized chars of all tool schemas (name + config JSON). */
+  /**
+   * Serialized size of what the client actually receives from tools/list.
+   *
+   * Stringifying the raw zod objects instead would measure `_def` internals and
+   * silently drop every `.describe()` string — a real cost driver — so it can
+   * neither catch description bloat nor track the true idle footprint.
+   */
   totalSchemaChars(): number {
-    let combined = "";
-    for (const [name, { config }] of this.tools) {
-      combined += JSON.stringify({ name, ...config }) + "\n";
-    }
-    return combined.length;
+    return JSON.stringify(
+      [...this.tools].map(([name, { config }]) => ({
+        name,
+        description: config.description,
+        inputSchema: toJsonSchema(config.inputSchema ?? {}),
+      })),
+    ).length;
   }
+}
+
+/** Mirrors the SDK's zod-shape → JSON Schema conversion closely enough to size it. */
+function toJsonSchema(shape: Record<string, any>): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+
+  for (const [key, schema] of Object.entries(shape)) {
+    const description = schema?.description ?? schema?.def?.description;
+    let inner = schema;
+    let optional = false;
+    while (inner?.def?.type === "optional") {
+      optional = true;
+      inner = inner.def.innerType;
+    }
+    if (!optional) required.push(key);
+
+    const type = inner?.def?.type ?? "string";
+    const node: Record<string, unknown> =
+      type === "array"
+        ? { type: "array", items: { type: "string" } }
+        : type === "enum"
+          ? { type: "string", enum: Object.values(inner.def.entries ?? {}) }
+          : type === "record"
+            ? { type: "object", additionalProperties: true }
+            : { type };
+    if (description) node.description = description;
+    properties[key] = node;
+  }
+
+  return {
+    type: "object",
+    properties,
+    ...(required.length ? { required } : {}),
+    additionalProperties: false,
+    $schema: "http://json-schema.org/draft-07/schema#",
+  };
 }
 
 // ── Setup helper ──────────────────────────────────────────────────────────────

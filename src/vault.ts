@@ -10,7 +10,6 @@ import matter from "gray-matter";
 import type {
   NoteFrontmatter,
   NoteRef,
-  FolderTree,
   ActionItem,
   OpportunityRef,
   MilestoneRef,
@@ -275,35 +274,6 @@ async function walkDir(
       results.push(relative(root, join(dir, entry.name)).replace(/\\/g, "/"));
     }
   }
-}
-
-/**
- * Build a folder tree structure for vault overview.
- */
-export async function buildFolderTree(vaultPath: string): Promise<FolderTree> {
-  return buildTreeRecursive(vaultPath, vaultPath);
-}
-
-async function buildTreeRecursive(
-  root: string,
-  dir: string,
-): Promise<FolderTree> {
-  const name = dir === root ? "/" : basename(dir);
-  const children: FolderTree[] = [];
-  let noteCount = 0;
-
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.isDirectory() && !isExcludedDir(entry.name)) {
-      const child = await buildTreeRecursive(root, join(dir, entry.name));
-      children.push(child);
-      noteCount += child.noteCount;
-    } else if (entry.isFile() && isAllowedFile(entry.name)) {
-      noteCount++;
-    }
-  }
-
-  return { name, children, noteCount };
 }
 
 /**

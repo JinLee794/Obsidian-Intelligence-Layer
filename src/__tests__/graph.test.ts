@@ -191,31 +191,37 @@ describe("GraphIndex — queries", () => {
     expect(paths).toContain("Meetings/2026-03-01 - Contoso Sync.md");
   });
 
-  it("NoteRef results include stable ref field", () => {
-    const backlinks = graph.getBacklinks("Customers/Contoso.md");
-    for (const note of backlinks) {
-      expect(note.ref).toBe(note.path);
-    }
+  it("NoteRef results carry path as the reference, without duplicating it as ref", () => {
+    const sources = [
+      graph.getBacklinks("Customers/Contoso.md"),
+      graph.getForwardLinks("Customers/Contoso.md"),
+      graph.getNotesByFolder("Customers/"),
+      graph.getRelatedNotes("Customers/Contoso.md", 1),
+      graph.getStats().mostLinkedNotes,
+    ];
 
-    const forward = graph.getForwardLinks("Customers/Contoso.md");
-    for (const note of forward) {
-      expect(note.ref).toBe(note.path);
+    for (const refs of sources) {
+      expect(refs.length).toBeGreaterThan(0);
+      for (const note of refs) {
+        expect(typeof note.path).toBe("string");
+        expect(note.ref).toBeUndefined();
+      }
     }
+  });
 
-    const folder = graph.getNotesByFolder("Customers/");
-    for (const note of folder) {
-      expect(note.ref).toBe(note.path);
-    }
+  it("getRelatedNotes reports hop distance and link direction", () => {
+    const related = graph.getRelatedNotes("Customers/Contoso.md", 2);
+    expect(related.length).toBeGreaterThan(0);
 
-    const related = graph.getRelatedNotes("Customers/Contoso.md", 1);
     for (const note of related) {
-      expect(note.ref).toBe(note.path);
+      expect(note.hops).toBeGreaterThanOrEqual(1);
+      expect(note.hops).toBeLessThanOrEqual(2);
+      expect(["out", "in", "both"]).toContain(note.via);
     }
 
-    const stats = graph.getStats();
-    for (const note of stats.mostLinkedNotes) {
-      expect(note.ref).toBe(note.path);
-    }
+    // Nearest first, so a caller can truncate without losing the closest notes.
+    const hops = related.map((n) => n.hops);
+    expect([...hops].sort((a, b) => a - b)).toEqual(hops);
   });
 
   it("getForwardLinks returns notes linked FROM a note", () => {
@@ -464,5 +470,79 @@ describe("GraphIndex — incremental startup", () => {
       graph.buildIncremental(join("no-such-dir", "graph.json")),
     ).rejects.toThrow();
     expect(graph.building).toBe(false);
+  });
+});
+
+describe("GraphIndex — discarding a persisted index says so", () => {
+  let dir: string;
+  let vault: string;
+  const INDEX = "_oil-graph.json";
+  let errors: string[];
+  let restore: () => void;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "oil-corrupt-"));
+    vault = join(dir, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "A.md"), "# A\n", "utf-8");
+
+    errors = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.join(" "));
+    restore = () => void (console.error = original);
+  });
+
+  afterEach(async () => {
+    restore();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const said = () => errors.join("\n");
+
+  /**
+   * A persisted index can be rejected four ways, and an operator scanning
+   * startup logs has no reason to know which one they hit. So they are asserted
+   * together against one pattern: whatever went wrong, the line has to be
+   * findable by looking for a discarded index.
+   *
+   * The truncated case is the reason this exists. It was reported as logging
+   * nothing at all, because it took the catch-all path and the wording there
+   * shared no words with its three siblings — the line was on stderr the whole
+   * time and a search for it came back empty.
+   */
+  const DISCARDED = /\[OIL\] Graph index.*(corrupt|mismatch).*rebuild/i;
+
+  it("names a truncated file", async () => {
+    await writeFile(join(vault, INDEX), '{"version":2,"nodes":[{"pa', "utf-8");
+    expect(await new GraphIndex(vault).loadFromDisk(INDEX)).toBe(false);
+    expect(said()).toMatch(DISCARDED);
+  });
+
+  it("names a version it cannot read", async () => {
+    await writeFile(join(vault, INDEX), '{"version":99,"nodes":[]}', "utf-8");
+    expect(await new GraphIndex(vault).loadFromDisk(INDEX)).toBe(false);
+    expect(said()).toMatch(DISCARDED);
+  });
+
+  it("names nodes that are not a list", async () => {
+    await writeFile(join(vault, INDEX), '{"version":2,"nodes":{}}', "utf-8");
+    expect(await new GraphIndex(vault).loadFromDisk(INDEX)).toBe(false);
+    expect(said()).toMatch(DISCARDED);
+  });
+
+  it("names a node it cannot make sense of", async () => {
+    await writeFile(
+      join(vault, INDEX),
+      '{"version":2,"nodes":[{"path":"A.md","title":7,"tags":[]}]}',
+      "utf-8",
+    );
+    expect(await new GraphIndex(vault).loadFromDisk(INDEX)).toBe(false);
+    expect(said()).toMatch(DISCARDED);
+  });
+
+  it("stays quiet when there is simply no index yet", async () => {
+    // First run is not a fault, and startup should not imply otherwise.
+    expect(await new GraphIndex(vault).loadFromDisk(INDEX)).toBe(false);
+    expect(said()).toBe("");
   });
 });
