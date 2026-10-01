@@ -14,6 +14,7 @@ import { registerCoreTools } from "../tools/core.js";
 import { registerRetrieveTools } from "../tools/retrieve.js";
 import { registerWriteTools } from "../tools/write.js";
 import { registerDomainTools } from "../tools/domain.js";
+import { registerArchiveTools } from "../tools/archive.js";
 import type { OilConfig } from "../types.js";
 
 // ── Fixture vault path ────────────────────────────────────────────────────────
@@ -140,6 +141,7 @@ export async function setupHarness(
   registerRetrieveTools(server as any, vaultPath, graph, cache, config);
   registerWriteTools(server as any, vaultPath, graph, cache, config);
   registerDomainTools(server as any, vaultPath, graph, cache, config);
+  registerArchiveTools(server as any, vaultPath, graph, cache, config);
 
   return { server, graph, config, cache, watcher };
 }

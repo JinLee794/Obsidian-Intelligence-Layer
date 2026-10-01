@@ -18,11 +18,13 @@ import { SessionCache } from "./cache.js";
 import { VaultWatcher } from "./watcher.js";
 import { SemanticIndex, attachSemanticIndex } from "./semantic.js";
 import { setExcludedFolders } from "./search.js";
+import { applyArchivePolicy, startArchiveScheduler } from "./archive.js";
 import { Hydration, type HydrationOptions } from "./hydration.js";
 import { registerCoreTools } from "./tools/core.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
 import { registerDomainTools } from "./tools/domain.js";
+import { registerArchiveTools } from "./tools/archive.js";
 import { SERVER_NAME, SERVER_VERSION } from "./version.js";
 import type { OilConfig } from "./types.js";
 
@@ -77,6 +79,12 @@ export async function createOilServer(
   if (config.search.excludeFolders.length > 0) {
     console.error(`[OIL] Search excludes: ${config.search.excludeFolders.join(", ")}`);
   }
+  applyArchivePolicy(config);
+  if (config.archive.enabled) {
+    console.error(
+      `[OIL] Archive: ${config.archive.mode} mode, root '${config.archive.root}', ${config.archive.rules.length} rule(s), run '${config.archive.run}', search '${config.archive.index.search}'.`,
+    );
+  }
 
   // ── In-memory components (construction only — no vault I/O) ─────────────
   const graph = new GraphIndex(vaultPath);
@@ -90,8 +98,21 @@ export async function createOilServer(
   const watcher = new VaultWatcher(vaultPath, graph, cache);
 
   // ── Hydration: everything that scales with the vault ────────────────────
+  let stopArchive: () => void = () => {};
   const hydration = new Hydration(
-    () => hydrate(vaultPath, config, graph, semantic, watcher, options.watch !== false),
+    () =>
+      hydrate(vaultPath, config, graph, semantic, watcher, options.watch !== false, () => {
+        stopArchive();
+        // Semantic refresh is otherwise lazy (next search). A scheduled run may
+        // happen with no search to follow, so drop archived vectors now — after
+        // any refresh already in flight against the pre-archive graph.
+        stopArchive = startArchiveScheduler(vaultPath, graph, config, cache, () => {
+          void semantic
+            .refresh(graph)
+            .then(() => semantic.ensureFresh(graph))
+            .catch(() => {});
+        });
+      }),
     options.hydration,
   );
 
@@ -103,6 +124,7 @@ export async function createOilServer(
   registerRetrieveTools(gated, vaultPath, graph, cache, config);
   registerWriteTools(gated, vaultPath, graph, cache, config);
   registerDomainTools(gated, vaultPath, graph, cache, config);
+  registerArchiveTools(gated, vaultPath, graph, cache, config);
 
   return {
     server,
@@ -114,6 +136,7 @@ export async function createOilServer(
     semantic,
     shutdown: async () => {
       hydration.stop();
+      stopArchive();
       await watcher.stop();
       // Indexing that is not persisted is indexing the next session repeats.
       // A session that ends mid-rebuild used to discard everything it had just
@@ -144,6 +167,7 @@ async function hydrate(
   semantic: SemanticIndex,
   watcher: VaultWatcher,
   watch: boolean,
+  onGraphCurrent: () => void = () => {},
 ): Promise<void> {
   await preflightVault(vaultPath);
 
@@ -202,9 +226,12 @@ async function hydrate(
     // rebuild is itself re-reading the vault, and the watcher follows directly.
     deferred(async () => {
       await graph.buildIncremental(graphFile);
+      // Archive rules judge notes by the graph, so they wait for it to be current.
+      onGraphCurrent();
       startWatcher();
     }, "Background incremental rebuild");
   } else {
+    onGraphCurrent();
     startWatcher();
   }
 }

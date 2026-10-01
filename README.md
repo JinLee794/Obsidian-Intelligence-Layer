@@ -196,13 +196,13 @@ The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The rel
 
 > **Note:** Use absolute paths in `args` since there's no workspace-relative root. The top-level key is `mcpServers` (not `servers` like the workspace config).
 
-Once configured, the agent can call any of OIL's 13 live tools by name.
+Once configured, the agent can call any of OIL's 16 live tools by name.
 
 ---
 
 ## Tools Reference
 
-OIL exposes **13 live tools** across five categories.
+OIL exposes **16 live tools** across six categories.
 
 ### Core Visibility (1 tool) — Tiny runtime summary
 
@@ -222,7 +222,7 @@ All read-only. No confirmation needed.
 
 | Tool | What It Does |
 |---|---|
-| `search_vault` | The default search tool. Cascades **exact frontmatter value → BM25 → fuzzy → semantic**, escalating only when a cheaper tier fails to cover the query, then fuses whatever ran. Optional `filter_folder`, `filter_tags`, `limit` (default 10). Response reports `tiers_used`, `escalated`, and `matched_by` per result — including which frontmatter field matched, e.g. `frontmatter:tpid`. |
+| `search_vault` | The default search tool. Cascades **exact frontmatter value → BM25 → fuzzy → semantic**, escalating only when a cheaper tier fails to cover the query, then fuses whatever ran. Optional `filter_folder`, `filter_tags`, `limit` (default 10), and `scope` (`active` \| `archive` \| `all` \| `fallback`) when [archiving](#archiving) is on. Response reports `tiers_used`, `escalated`, and `matched_by` per result — including which frontmatter field matched, e.g. `frontmatter:tpid` — and flags archived hits with `archived: true`. |
 | `semantic_search` | The semantic tier on its own, for when the caller *knows* it wants meaning rather than wording — conceptual questions, or "what have we discussed like this". Same filters as `search_vault`. Prefer `search_vault` unless the query deliberately shares no vocabulary with its answer; it consults this tier anyway and outranks it on most queries. Because it has no fallback tier, an empty result says whether nothing matched or the tier never ran. |
 | `query_frontmatter` | Structured lookup over frontmatter and tags, resolved from the in-memory graph — no disk scan. Four modes: **no args** lists every key with counts (schema discovery); **`key`** lists that key's distinct values; **`key`+`value_fragment`** matches a substring; **`where`** filters on several fields at once (`{ status: "at-risk", tags: ["enterprise"] }`). Supports `folder`, `order_by` (`-` prefix for descending), `limit`. Reports `total_matched` before truncation. |
 | `get_note_metadata` | Peek at a note before loading full content — returns frontmatter, timestamps, word count, heading list, and `mtime_ms` (needed for writes). |
@@ -267,6 +267,12 @@ High-level tools that encode business logic the LLM would otherwise need to reco
 | Tool | What It Does |
 |---|---|
 | `get_agent_log` | Read the agent write audit log for a given date (`YYYY-MM-DD`, default: today). Every `atomic_append`, `atomic_replace`, and `create_note` call is logged here with timestamp, path, and operation detail. |
+
+### Archive (1 tool)
+
+| Tool | What It Does |
+|---|---|
+| `manage_archive` | Runs the vault's [archive rules](#archiving). `action: "plan"` previews what would be archived and what a protection kept, without touching anything; `"apply"` archives the plan and returns a `run_id`; `"restore"` brings back one note (`path`, archived or original) or a whole run (`run_id`). Refuses to apply while `archive.enabled` is false. |
 
 ### Write Safety Pattern
 
@@ -343,7 +349,108 @@ semantic:
 # Audit logging
 audit:
   log_all_writes: true                        # Log every write to _agent-log/
+
+# Archiving — off until you turn it on (see "Archiving" below)
+archive:
+  enabled: false
+  mode: move                                  # move → under root/, flag → `archived: true` in place
+  root: "Archive/"
+  run: manual                                 # manual | on_start | daily
+  max_per_run: 200
+  rules: []                                   # first matching rule wins
+  protect:
+    tags: [keep]
+    frontmatter: { pinned: true }
+    folders: []
+    recent_backlink_days: 0                   # 0 disables
+    restored_grace_days: 90
+  index:
+    search: fallback                          # fallback | never | always
+    breadcrumbs: true                         # log archived notes on the customer hub
+    embed_archived: false                     # keep vectors for archived notes
 ```
+
+### Archiving
+
+A vault that only grows makes every search a little worse: old meeting notes and
+closed projects outrank the live ones and dilute the index. Archiving moves
+stale notes out of the working set **without deleting anything** — they stay in
+the vault, stay searchable on request, and can be restored in one call.
+
+Everything is configured in the `archive:` block of `oil.config.yaml`:
+
+```yaml
+archive:
+  enabled: true
+  mode: move
+  run: daily
+  rules:
+    - name: stale-meetings
+      folder: "Meetings/"
+      older_than_days: 365              # by `date` frontmatter, else file mtime
+    - name: closed-projects
+      folder: "Projects/"
+      frontmatter:
+        status: [closed, done, cancelled]
+    - name: old-customer-meetings
+      folder: "Customers/"
+      tags: [meeting]
+      older_than_days: 540
+  protect:
+    tags: [keep, evergreen]
+    recent_backlink_days: 30            # keep a note an active note still cites
+```
+
+**How notes are selected.** Each rule names any of `folder`, `older_than_days`
+(read from `date_field`, defaulting to the schema's date field, then file
+mtime), `frontmatter` (a list matches any value) and `tags`; a note must meet
+every condition the rule names, and the first matching rule wins. A rule naming
+no condition is ignored rather than archiving the whole vault. Customer hub
+notes, the archive itself, the agent log and templates are never archived, and
+`protect` vetoes anything else you want kept — including a note restored within
+`restored_grace_days`, so a restore is never undone by the next run.
+
+**What a run does.**
+
+- In `move` mode a note moves to `Archive/<original path>`. In `flag` mode it
+  stays put and gains `archived: true`. Both modes record `archived_at`,
+  `archived_from` and `archive_reason`.
+- Path-qualified wikilinks, embeds and markdown links that point at a moved
+  note are rewritten, so nothing breaks.
+- When customer notes are archived, the customer hub gains an
+  `## Archived Notes` entry linking to them.
+- Every run is recorded in `.oil-archive.json` and in the `_agent-log/` audit
+  trail. A run is capped at `max_per_run`, oldest notes first.
+
+**How search treats the archive.** Archived notes get their own BM25 and fuzzy
+index partition and, by default, no embeddings (`embed_archived: false`), so
+they cost the active index nothing. `search_vault` takes a `scope`:
+
+| `scope` | Searches |
+|---|---|
+| `active` | Only live notes. The response carries an `archive_hint` saying how to widen it. |
+| `archive` | Only archived notes. Implied when `filter_folder` points inside the archive root. |
+| `all` | Both, ranked together. |
+| `fallback` | Live notes first; archived ones only fill a page the live notes couldn't. |
+
+The default comes from `index.search`: `fallback`, `never` (→ `active`) or
+`always` (→ `all`). Archived hits are marked `archived: true`, and a folder
+filter such as `Meetings/` still finds `Archive/Meetings/...` when searching the
+archive. `get_health` reports the archive's status and last run.
+
+**Running it.** `run: on_start` runs once when the server starts and `daily`
+once a day while it is running; `manual` leaves it to you. Preview before you
+commit:
+
+```bash
+obsidian-intelligence-layer archive --vault=/path/to/vault           # preview only
+obsidian-intelligence-layer archive --apply --vault=/path/to/vault   # archive
+obsidian-intelligence-layer restore "Meetings/2024-01-15 Sync.md" --vault=...
+obsidian-intelligence-layer restore --run=20260510-120000-ab12 --vault=...
+```
+
+Add `--json` for machine-readable output. From an agent, the `manage_archive`
+tool does the same: `plan`, `apply` and `restore`.
 
 ---
 

@@ -16,6 +16,18 @@ import type { GraphIndex } from "./graph.js";
 import { bm25Search, exactFieldSearch, invalidateBm25Index, tokenize } from "./bm25.js";
 import { getSemanticIndex } from "./semantic.js";
 import type { SearchResult } from "./types.js";
+import {
+  archivePolicyGeneration,
+  archiveRoot,
+  archivingEnabled,
+  defaultArchiveScope,
+  inPartition,
+  isArchivedNote,
+  isUnderArchiveRoot,
+  partitionFor,
+  type ArchiveScope,
+  type ArchiveSearchScope,
+} from "./archive-policy.js";
 
 // ─── Search Index Entry ───────────────────────────────────────────────────────
 
@@ -56,26 +68,48 @@ interface BodySearchEntry extends SearchEntry {
 interface CachedIndex {
   fuse: Fuse<SearchEntry>;
   version: number;
+  generation: number;
 }
 
 interface CachedBodyIndex {
   fuse: Fuse<BodySearchEntry>;
   version: number;
+  generation: number;
 }
 
 /**
  * Keyed by graph instance so two vaults (or two test fixtures) in one process
  * never share an index, and by `graph.version` so any mutation — including an
  * in-place content edit, which leaves the node count unchanged — forces a
- * rebuild without depending on callers remembering to invalidate.
+ * rebuild without depending on callers remembering to invalidate. Each archive
+ * partition gets its own index, so archived notes neither cost the active
+ * search anything nor appear in it.
  */
-let indexCache = new WeakMap<GraphIndex, CachedIndex>();
+let indexCache = new WeakMap<GraphIndex, Map<ArchiveScope, CachedIndex>>();
 
 /**
  * Separate cache for the body-bearing index, built lazily the first time a query
  * actually needs it. Most processes never build it at all.
  */
-let bodyIndexCache = new WeakMap<GraphIndex, CachedBodyIndex>();
+let bodyIndexCache = new WeakMap<GraphIndex, Map<ArchiveScope, CachedBodyIndex>>();
+
+function partitionCache<T>(
+  cache: WeakMap<GraphIndex, Map<ArchiveScope, T>>,
+  graph: GraphIndex,
+): Map<ArchiveScope, T> {
+  let partitions = cache.get(graph);
+  if (!partitions) {
+    partitions = new Map();
+    cache.set(graph, partitions);
+  }
+  return partitions;
+}
+
+function includeIn(partition: ArchiveScope, graph: GraphIndex, path: string): boolean {
+  if (partition === "all") return true;
+  const node = graph.getNode(path);
+  return node ? inPartition(partition, path, node.frontmatter) : false;
+}
 
 /** Shortest body term the last-resort pass will try to fuzzy-match. */
 const BODY_TERM_MIN_LENGTH = 4;
@@ -107,9 +141,10 @@ function toSearchEntry(node: {
  * On a version change the graph is asked which notes actually moved, so an edit
  * costs one removal pass plus a re-add rather than re-tokenising the vault.
  */
-function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
-  const cached = indexCache.get(graph);
-  if (cached) {
+function getOrBuildIndex(graph: GraphIndex, partition: ArchiveScope): Fuse<SearchEntry> {
+  const partitions = partitionCache(indexCache, graph);
+  const cached = partitions.get(partition);
+  if (cached && cached.generation === archivePolicyGeneration()) {
     if (cached.version === graph.version) return cached.fuse;
 
     const changed = graph.changesSince(cached.version);
@@ -123,7 +158,7 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
         cached.fuse.remove((entry) => changedPaths.has(entry.path));
         for (const path of changed) {
           const node = graph.getNode(path);
-          if (node) cached.fuse.add(toSearchEntry(node));
+          if (node && includeIn(partition, graph, path)) cached.fuse.add(toSearchEntry(node));
         }
       }
       cached.version = graph.version;
@@ -136,7 +171,7 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
   const allRefs = graph.getNotesByFolder("");
   for (const ref of allRefs) {
     const node = graph.getNode(ref.path);
-    if (!node) continue;
+    if (!node || !includeIn(partition, graph, ref.path)) continue;
     entries.push(toSearchEntry(node));
   }
 
@@ -151,7 +186,11 @@ function getOrBuildIndex(graph: GraphIndex): Fuse<SearchEntry> {
     ignoreLocation: true,
     useExtendedSearch: false,
   });
-  indexCache.set(graph, { fuse, version: graph.version });
+  partitions.set(partition, {
+    fuse,
+    version: graph.version,
+    generation: archivePolicyGeneration(),
+  });
 
   return fuse;
 }
@@ -174,14 +213,21 @@ export function invalidateSearchIndex(): void {
  * small share of queries, so the incremental machinery the cheap index needs
  * would cost more to maintain than it saves here.
  */
-function getOrBuildBodyIndex(graph: GraphIndex): Fuse<BodySearchEntry> {
-  const cached = bodyIndexCache.get(graph);
-  if (cached && cached.version === graph.version) return cached.fuse;
+function getOrBuildBodyIndex(graph: GraphIndex, partition: ArchiveScope): Fuse<BodySearchEntry> {
+  const partitions = partitionCache(bodyIndexCache, graph);
+  const cached = partitions.get(partition);
+  if (
+    cached &&
+    cached.version === graph.version &&
+    cached.generation === archivePolicyGeneration()
+  ) {
+    return cached.fuse;
+  }
 
   const entries: BodySearchEntry[] = [];
   for (const ref of graph.getNotesByFolder("")) {
     const node = graph.getNode(ref.path);
-    if (!node) continue;
+    if (!node || !includeIn(partition, graph, ref.path)) continue;
     const body = node.bodySnippet ?? "";
     // Terms shorter than this are not worth a fuzzy match: an edit distance of
     // one is most of a three-letter word, so they match almost anything.
@@ -205,7 +251,11 @@ function getOrBuildBodyIndex(graph: GraphIndex): Fuse<BodySearchEntry> {
     ignoreLocation: true,
     useExtendedSearch: false,
   });
-  bodyIndexCache.set(graph, { fuse, version: graph.version });
+  partitions.set(partition, {
+    fuse,
+    version: graph.version,
+    generation: archivePolicyGeneration(),
+  });
 
   return fuse;
 }
@@ -224,8 +274,12 @@ export function lexicalSearch(
   limit: number,
   filters?: SearchFilters,
 ): SearchResult[] {
-  const hits = bm25Search(graph, query, limit, (path) =>
-    passesFilters(path, graph, filters),
+  const hits = bm25Search(
+    graph,
+    query,
+    limit,
+    (path) => passesFilters(path, graph, filters),
+    concreteScope(filters),
   );
   if (hits.length === 0) return [];
 
@@ -286,7 +340,7 @@ export function fuzzySearch(
   limit: number,
   filters?: SearchFilters,
 ): SearchResult[] {
-  const fuse = getOrBuildIndex(graph);
+  const fuse = getOrBuildIndex(graph, partitionFor(concreteScope(filters)));
   // Filters are applied after fuse ranks, so a filtered search needs a wider
   // candidate pool or it silently under-returns.
   const hasFilters = Boolean(filters?.folder || filters?.tags?.length || filters?.frontmatter);
@@ -344,7 +398,7 @@ export function fuzzyBodySearch(
   limit: number,
   filters?: SearchFilters,
 ): SearchResult[] {
-  const fuse = getOrBuildBodyIndex(graph);
+  const fuse = getOrBuildBodyIndex(graph, partitionFor(concreteScope(filters)));
   const hasFilters = Boolean(filters?.folder || filters?.tags?.length || filters?.frontmatter);
   const raw = fuse.search(query, { limit: hasFilters ? limit * 10 : limit * 2 });
 
@@ -420,6 +474,8 @@ export interface CascadeHit {
   score: number;
   heading: string | null;
   matchedBy: string[];
+  /** Present and true only for notes from the archive partition. */
+  archived?: boolean;
 }
 
 export interface CascadeResult {
@@ -445,6 +501,13 @@ export interface CascadeResult {
   escalation: string | null;
   /** Matches before the limit was applied, when the tier can count them. */
   totalMatched?: number;
+  /**
+   * Which archive partition answered. Absent when archiving is off, so the
+   * feature-off response is unchanged.
+   */
+  scope?: ArchiveSearchScope;
+  /** Archived notes appended because the active vault could not fill the page. */
+  archiveFallback?: number;
 }
 
 /**
@@ -495,6 +558,63 @@ export async function cascadeSearch(
   limit: number,
   filters: SearchFilters | undefined,
 ): Promise<CascadeResult> {
+  if (!archivingEnabled()) return cascadeSearchPartition(graph, query, limit, filters);
+
+  const scope = requestedScope(filters);
+  if (scope !== "fallback") {
+    const result = await cascadeSearchPartition(graph, query, limit, { ...filters, scope });
+    return { ...result, results: markArchived(graph, result.results), scope };
+  }
+
+  // Active first: the archive is consulted only when the live vault cannot
+  // fill the page, so it never competes with current notes for a slot.
+  const active = await cascadeSearchPartition(graph, query, limit, {
+    ...filters,
+    scope: "active",
+  });
+  const room = limit - active.results.length;
+  if (room <= 0) return { ...active, scope };
+
+  const archive = await cascadeSearchPartition(graph, query, room, {
+    ...filters,
+    scope: "archive",
+  });
+  if (archive.results.length === 0) return { ...active, scope, archiveFallback: 0 };
+
+  // Archive scores are relative to the archive's own top hit; scaling them
+  // under the weakest active hit keeps the list monotone and the archive below.
+  const floor = active.results.at(-1)?.score ?? 1;
+  const appended = archive.results.map((hit) => ({
+    ...hit,
+    score: Number((hit.score * floor).toFixed(4)),
+    archived: true,
+  }));
+
+  return {
+    results: [...active.results, ...appended],
+    tiersUsed: [...new Set([...active.tiersUsed, ...archive.tiersUsed])],
+    tiersRan: [...new Set([...active.tiersRan, ...archive.tiersRan])],
+    escalation: active.escalation,
+    ...(active.totalMatched !== undefined ? { totalMatched: active.totalMatched } : {}),
+    scope,
+    archiveFallback: appended.length,
+  };
+}
+
+function markArchived(graph: GraphIndex, results: CascadeHit[]): CascadeHit[] {
+  return results.map((hit) =>
+    isArchivedNote(hit.path, graph.getNode(hit.path)?.frontmatter)
+      ? { ...hit, archived: true }
+      : hit,
+  );
+}
+
+async function cascadeSearchPartition(
+  graph: GraphIndex,
+  query: string,
+  limit: number,
+  filters: SearchFilters | undefined,
+): Promise<CascadeResult> {
   const accept = (path: string) => passesFilters(path, graph, filters);
   const candidateDepth = Math.max(limit * 3, 20);
   const tiersUsed: string[] = [];
@@ -515,7 +635,7 @@ export async function cascadeSearch(
   // those would suppress the very note the user named.
   if (!graph.resolveTitle(query.trim())) {
     tiersRan.push("frontmatter");
-    const exact = exactFieldSearch(graph, query, accept);
+    const exact = exactFieldSearch(graph, query, accept, concreteScope(filters));
     if (exact.length > 0) {
       tiersUsed.push("frontmatter");
       // Whole-value equality gives no relevance signal to rank by, and the
@@ -704,6 +824,37 @@ export interface SearchFilters {
   folder?: string;
   tags?: string[];
   frontmatter?: Record<string, unknown>;
+  /**
+   * Archive partition to search. Ignored while archiving is off. Defaults to
+   * the vault's configured strategy, or to the archive itself when `folder`
+   * names a path inside the archive root.
+   */
+  scope?: ArchiveSearchScope;
+}
+
+/** The strategy a caller asked for, before `fallback` is resolved. */
+function requestedScope(filters?: SearchFilters): ArchiveSearchScope {
+  if (filters?.scope) return filters.scope;
+  if (filters?.folder && isUnderArchiveRoot(filters.folder)) return "archive";
+  return defaultArchiveScope();
+}
+
+/** The single partition a tier should search. `fallback` starts active. */
+function concreteScope(filters?: SearchFilters): ArchiveScope {
+  if (!archivingEnabled()) return "all";
+  const scope = requestedScope(filters);
+  return scope === "fallback" ? "active" : scope;
+}
+
+/**
+ * Archived notes keep their original folder beneath the archive root, so a
+ * `Customers/Contoso/` filter still finds Contoso's archived meetings at
+ * `Archive/Customers/Contoso/`.
+ */
+function matchesFolder(path: string, folder: string): boolean {
+  if (path.startsWith(folder)) return true;
+  const root = archiveRoot();
+  return archivingEnabled() && isUnderArchiveRoot(path) && path.slice(root.length).startsWith(folder);
 }
 
 /**
@@ -735,9 +886,16 @@ function passesFilters(
     return false;
   }
 
+  if (archivingEnabled()) {
+    const partition = concreteScope(filters);
+    if (partition !== "all" && !inPartition(partition, path, graph.getNode(path)?.frontmatter)) {
+      return false;
+    }
+  }
+
   if (!filters) return true;
 
-  if (filters.folder && !path.startsWith(filters.folder)) {
+  if (filters.folder && !matchesFolder(path, filters.folder)) {
     return false;
   }
 

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import type { GraphIndex } from "./graph.js";
 import { flattenFrontmatter } from "./frontmatter.js";
 import { describeSemanticDisabledBy } from "./config.js";
+import { isArchivedNote, shouldEmbedArchived } from "./archive-policy.js";
 import type { ConfigSource, NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
@@ -158,7 +159,7 @@ export function describeError(err: unknown): string {
  * vector space they are noise that crowds out the fields a person would search.
  */
 const NOISE_VALUE = /^(https?:\/\/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-|\d{4}-\d{2}-\d{2}T\d{2}:)/i;
-const NOISE_KEY = /(^|\.)(id|.*id|timestamp|generated|sources|resource|icon|sticker|.*link|.*sync|last_validated)$/i;
+const NOISE_KEY = /(^|\.)(id|.*id|timestamp|generated|sources|resource|icon|sticker|.*link|.*sync|last_validated|archived(_.*)?|archive_.*)$/i;
 /** Frontmatter share of the budget, so structured notes keep room for prose. */
 const FRONTMATTER_BUDGET = 600;
 
@@ -477,6 +478,10 @@ export class SemanticIndex {
     for (const ref of graph.getNotesByFolder("")) {
       const node = graph.getNode(ref.path);
       if (!node) continue;
+      // Archived notes stay out of vector space unless the vault opts in: the
+      // embedding pass is the expensive one, and the archive is meant to cost
+      // nothing until someone looks in it.
+      if (!shouldEmbedArchived() && isArchivedNote(ref.path, node.frontmatter)) continue;
       const text = embeddingText(node);
       // Ollama rejects an empty input outright, failing the whole batch for one
       // blank note.
@@ -485,10 +490,26 @@ export class SemanticIndex {
       texts.set(ref.path, text);
     }
 
+    // A note that only moved — archived, or restored — keeps its text, so its
+    // vector is carried to the new path instead of being embedded again.
+    const orphaned = new Map<string, Entry>();
+    for (const [path, entry] of this.vectors) {
+      if (!wanted.has(path)) orphaned.set(entry.hash, entry);
+    }
+
     let changed = false;
     for (const path of [...this.vectors.keys()]) {
       if (!wanted.has(path)) {
         this.vectors.delete(path);
+        changed = true;
+      }
+    }
+    for (const [path, hash] of wanted) {
+      if (this.vectors.has(path)) continue;
+      const carried = orphaned.get(hash);
+      if (carried) {
+        this.vectors.set(path, carried);
+        orphaned.delete(hash);
         changed = true;
       }
     }

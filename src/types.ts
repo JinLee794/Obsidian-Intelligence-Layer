@@ -143,8 +143,76 @@ export interface OilConfig {
   search: SearchConfig;
   semantic: SemanticConfig;
   audit: AuditConfig;
+  archive: ArchiveConfig;
   /** Which layer supplied each overridable value. */
   provenance: ConfigProvenance;
+}
+
+// ─── Archive ──────────────────────────────────────────────────────────────────
+
+/** Where archived notes go: moved under a root, or flagged where they are. */
+export type ArchiveMode = "move" | "flag";
+
+/** When the archive pass runs on its own. `manual` never does. */
+export type ArchiveRun = "manual" | "on_start" | "daily";
+
+/**
+ * How search treats the archive by default.
+ * - `fallback`: active notes first; archived ones only fill an unfilled page.
+ * - `never`: archived notes appear only when a search asks for them.
+ * - `always`: archived and active notes rank together.
+ */
+export type ArchiveSearchMode = "fallback" | "never" | "always";
+
+/** Selects notes to archive. Every condition it names must hold. */
+export interface ArchiveRule {
+  name: string;
+  /** Vault-relative folder prefix the note must sit under. */
+  folder?: string;
+  /** Minimum age in days, read from `dateField`, falling back to file mtime. */
+  olderThanDays?: number;
+  /** Frontmatter field holding the note's date. Defaults to the schema's date field. */
+  dateField?: string;
+  /** Frontmatter values that must match; a list matches any of its values. */
+  frontmatter?: Record<string, unknown>;
+  /** Tags the note must carry (any one of them), without the leading `#`. */
+  tags?: string[];
+}
+
+export interface ArchiveProtect {
+  /** Notes carrying any of these tags are never archived. */
+  tags: string[];
+  /** Notes whose frontmatter matches any of these entries are never archived. */
+  frontmatter: Record<string, unknown>;
+  /** Folder prefixes that are never archived. */
+  folders: string[];
+  /** Keep a note while a note linking to it changed within this many days. 0 disables. */
+  recentBacklinkDays: number;
+  /** A restored note is left alone for this many days. */
+  restoredGraceDays: number;
+}
+
+export interface ArchiveIndexConfig {
+  search: ArchiveSearchMode;
+  /** Append an "Archived Notes" log to the customer hub when its notes are archived. */
+  breadcrumbs: boolean;
+  /** Keep embeddings for archived notes (costs embedding time; off by default). */
+  embedArchived: boolean;
+}
+
+export interface ArchiveConfig {
+  enabled: boolean;
+  mode: ArchiveMode;
+  /** Archive root for `move` mode; archived notes keep their path beneath it. */
+  root: string;
+  run: ArchiveRun;
+  /** Upper bound on notes archived in one pass, so a bad rule cannot sweep the vault. */
+  maxPerRun: number;
+  /** Vault-relative manifest recording every run, for audit and restore. */
+  manifestFile: string;
+  protect: ArchiveProtect;
+  rules: ArchiveRule[];
+  index: ArchiveIndexConfig;
 }
 
 /**

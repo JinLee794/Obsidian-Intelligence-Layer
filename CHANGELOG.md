@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Vault archival, configured from the `archive:` block of `oil.config.yaml`.**
+  Rules select stale notes by folder, age (date frontmatter, else mtime),
+  frontmatter values and tags; protections keep customer hubs, `#keep` and
+  `pinned: true` notes, protected folders, notes with recently edited
+  backlinks and recently restored notes. Notes either move under `Archive/`
+  keeping their original path (`mode: move`) or are flagged `archived: true` in
+  place (`mode: flag`). Runs rewrite path-qualified links, leave an
+  `## Archived Notes` breadcrumb on the customer hub, are capped by
+  `max_per_run`, and are recorded in `.oil-archive.json` and the audit log.
+  Runs are `manual`, `on_start` or `daily`. Off by default.
+- **Archived notes leave the active index but stay retrievable.** BM25 and the
+  fuzzy tiers keep a separate archive partition, and the semantic tier skips
+  archived notes unless `index.embed_archived` is set. `search_vault` takes a
+  `scope` — `active`, `archive`, `all` or `fallback` (active first, archive
+  only to fill the page) — defaulting to `index.search`. Archived hits carry
+  `archived: true`.
+- **`manage_archive` tool** (`plan`, `apply`, `restore` by path or run id) — the
+  tool surface grows to 16 — and `archive` / `restore` CLI commands with
+  `--apply`, `--run=<id>` and `--json`. `get_health` reports archive status.
+
+With `archive.enabled: false` (the default) search, indexing and every response
+behave exactly as before.
+
 ## [0.6.0] - 2026-08-20
 
 Semantic search, incremental indexing, and reliable startup — plus a measurable

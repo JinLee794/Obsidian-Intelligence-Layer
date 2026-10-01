@@ -223,9 +223,15 @@ export function registerRetrieveTools(
         limit: z.number().optional().describe("Max results (default: 10)"),
         filter_folder: z.string().optional().describe("Restrict to this folder prefix"),
         filter_tags: z.array(z.string()).optional().describe("Restrict to notes with these tags"),
+        scope: z
+          .enum(["active", "archive", "all", "fallback"])
+          .optional()
+          .describe(
+            "Archived notes: active excludes them, archive searches only them, all mixes both, fallback adds them only when active results run short. Default is the vault's archive setting.",
+          ),
       },
     },
-    async ({ query, limit, filter_folder, filter_tags }) => {
+    async ({ query, limit, filter_folder, filter_tags, scope }) => {
       if (!query || !query.trim()) {
         return validationError("search_vault: query must be a non-empty string");
       }
@@ -235,12 +241,19 @@ export function registerRetrieveTools(
       }
 
       const boundedLimit = limit ?? 10;
-      const { results, tiersUsed, tiersRan, escalation, totalMatched } = await cascadeSearch(
-        graph,
-        query,
-        boundedLimit,
-        { folder: filter_folder, tags: filter_tags },
-      );
+      const {
+        results,
+        tiersUsed,
+        tiersRan,
+        escalation,
+        totalMatched,
+        scope: usedScope,
+        archiveFallback,
+      } = await cascadeSearch(graph, query, boundedLimit, {
+        folder: filter_folder,
+        tags: filter_tags,
+        scope,
+      });
 
       return jsonResponse({
         count: results.length,
@@ -255,6 +268,11 @@ export function registerRetrieveTools(
         tiers_used: tiersUsed,
         tiers_ran: tiersRan,
         escalated: escalation,
+        ...(usedScope ? { scope: usedScope } : {}),
+        ...(archiveFallback ? { archive_fallback: archiveFallback } : {}),
+        ...(usedScope === "active"
+          ? { archive_hint: "Archived notes were not searched. Retry with scope: \"archive\" or \"all\" to include them." }
+          : {}),
         ...semanticNotice(graph, escalation, tiersUsed),
         results: results.map(({ matchedBy, heading, ...rest }: CascadeHit) => ({
           ...rest,
