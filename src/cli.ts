@@ -6,6 +6,8 @@
  * Usage:
  *   npx obsidian-intelligence-layer mcp [flags]
  *   npx obsidian-intelligence-layer doctor
+ *   npx obsidian-intelligence-layer archive [--apply]
+ *   npx obsidian-intelligence-layer restore <path> | --run=<id>
  *
  * Environment:
  *   OBSIDIAN_VAULT_PATH — absolute path to the Obsidian vault (required).
@@ -40,6 +42,11 @@ Commands:
   doctor                    Check vault, Ollama and effective settings, then exit.
                             Exits 0 if everything checks out, 1 if a check
                             failed, 2 if a check could not be confirmed.
+  archive [--apply]         Preview what the vault's archive rules would move
+                            (oil.config.yaml \`archive:\`); --apply archives them.
+  restore <path>            Restore an archived note (archived or original path).
+  restore --run=<id>        Restore every note archived by one run.
+                            archive/restore accept --json for machine output.
 
 Flags (equivalent env vars in parentheses):
   --vault=<path>            Vault to serve (OBSIDIAN_VAULT_PATH)
@@ -96,7 +103,23 @@ function applyFlags(argv: string[]): string | null {
 }
 
 // ── Route subcommand ───────────────────────────────────────────────
-const [command, ...flags] = process.argv.slice(2);
+const [command, ...rest] = process.argv.slice(2);
+
+// archive/restore take their own arguments; the rest are shared flags.
+const archiveArgs: { apply: boolean; json: boolean; path?: string; runId?: string } = {
+  apply: false,
+  json: false,
+};
+const flags: string[] = [];
+for (const arg of rest) {
+  const isArchiveCommand = command === "archive" || command === "restore";
+  const run = /^--run=(.+)$/.exec(arg);
+  if (isArchiveCommand && arg === "--json") archiveArgs.json = true;
+  else if (command === "archive" && arg === "--apply") archiveArgs.apply = true;
+  else if (command === "restore" && run) archiveArgs.runId = run[1];
+  else if (command === "restore" && !arg.startsWith("--") && !archiveArgs.path) archiveArgs.path = arg;
+  else flags.push(arg);
+}
 const unknown = applyFlags(flags);
 
 if (unknown) {
@@ -107,6 +130,9 @@ if (unknown) {
 } else if (command === "doctor") {
   const { runDoctor } = await import("./doctor.js");
   process.exit(await runDoctor());
+} else if (command === "archive" || command === "restore") {
+  const { runArchiveCli } = await import("./archive-cli.js");
+  process.exit(await runArchiveCli({ command, ...archiveArgs }));
 } else {
   console.error(USAGE);
   process.exit(1);

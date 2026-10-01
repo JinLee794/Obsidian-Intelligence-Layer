@@ -6,7 +6,7 @@
  * requiring a model on the machine running them.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
   semanticRemedy,
 } from "../semantic.js";
 import { cascadeSearch, invalidateSearchIndex } from "../search.js";
+import { setArchivePolicy } from "../archive-policy.js";
 import type { SemanticConfig } from "../types.js";
 
 // ─── Fake Ollama ──────────────────────────────────────────────────────────────
@@ -632,5 +633,46 @@ describe("semanticRemedy", () => {
     for (const remedy of remedies) {
       expect(remedy).not.toMatch(/winget|brew install|apt-get|curl .*\| ?sh/i);
     }
+  });
+});
+
+// ─── Archive ──────────────────────────────────────────────────────────────────
+
+describe("SemanticIndex — archived notes", () => {
+  let archiveVault: string;
+  let archiveGraph: GraphIndex;
+
+  beforeAll(async () => {
+    archiveVault = join(tempDir, "archive-vault");
+    await mkdir(join(archiveVault, "Projects"), { recursive: true });
+    await mkdir(join(archiveVault, "Archive/Projects"), { recursive: true });
+    await writeFile(join(archiveVault, "Projects/Live.md"), "# Live\n\nOngoing work.\n", "utf-8");
+    await writeFile(join(archiveVault, "Projects/Flagged.md"), "---\narchived: true\n---\n# Flagged\n\nDone.\n", "utf-8");
+    await writeFile(join(archiveVault, "Archive/Projects/Moved.md"), "# Moved\n\nShipped.\n", "utf-8");
+    archiveGraph = new GraphIndex(archiveVault);
+    await archiveGraph.build();
+  });
+
+  afterEach(() => setArchivePolicy({ enabled: false, root: "Archive/" }));
+
+  it("embeds only active notes while archiving is on", async () => {
+    setArchivePolicy({ enabled: true, root: "Archive/" });
+    const index = new SemanticIndex(archiveVault, makeConfig());
+    await index.refresh(archiveGraph);
+    expect(index.stats.note_count).toBe(1);
+    expect(stub.embedCalls.flat()).toHaveLength(1);
+  });
+
+  it("embeds archived notes too when embed_archived is set", async () => {
+    setArchivePolicy({ enabled: true, root: "Archive/", embedArchived: true });
+    const index = new SemanticIndex(archiveVault, makeConfig());
+    await index.refresh(archiveGraph);
+    expect(index.stats.note_count).toBe(3);
+  });
+
+  it("embeds everything while archiving is off", async () => {
+    const index = new SemanticIndex(archiveVault, makeConfig());
+    await index.refresh(archiveGraph);
+    expect(index.stats.note_count).toBe(3);
   });
 });

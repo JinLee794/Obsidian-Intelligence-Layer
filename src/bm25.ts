@@ -15,6 +15,12 @@
 import type { GraphIndex } from "./graph.js";
 import type { GraphNode } from "./types.js";
 import { flattenFrontmatter, normalizeValue } from "./frontmatter.js";
+import {
+  archivePolicyGeneration,
+  inPartition,
+  partitionFor,
+  type ArchiveScope,
+} from "./archive-policy.js";
 
 // Standard Okapi parameters. k1 controls TF saturation, b length normalisation.
 const K1 = 1.2;
@@ -104,10 +110,18 @@ class Bm25Index {
   private exactValues = new Map<string, Array<{ path: string; key: string; value: string }>>();
   private totalLength = 0;
 
-  constructor(graph: GraphIndex) {
+  /**
+   * `include` scopes the index to one partition of the vault — active notes or
+   * archived ones — so term statistics describe the notes actually searched.
+   * An archive of old meetings would otherwise dilute every IDF weight.
+   */
+  constructor(
+    graph: GraphIndex,
+    private readonly include: (node: GraphNode) => boolean = () => true,
+  ) {
     for (const ref of graph.getNotesByFolder("")) {
       const node = graph.getNode(ref.path);
-      if (node) this.addNote(node);
+      if (node && this.include(node)) this.addNote(node);
     }
   }
 
@@ -198,7 +212,9 @@ class Bm25Index {
   upsert(graph: GraphIndex, path: string): void {
     this.removeNote(path);
     const node = graph.getNode(path);
-    if (node) this.addNote(node);
+    // Re-evaluated on every edit: archiving in flag mode is a frontmatter
+    // change, which moves a note between partitions without moving the file.
+    if (node && this.include(node)) this.addNote(node);
   }
 
   get size(): number {
@@ -322,11 +338,25 @@ class Bm25Index {
  * every posting list — measured at 10k notes, that is the difference between a
  * ~1s stall on the next query and an imperceptible one.
  */
-let indexCache = new WeakMap<GraphIndex, { index: Bm25Index; version: number }>();
+let indexCache = new WeakMap<
+  GraphIndex,
+  Map<ArchiveScope, { index: Bm25Index; version: number; generation: number }>
+>();
 
-function getOrBuildIndex(graph: GraphIndex): Bm25Index {
-  const cached = indexCache.get(graph);
-  if (cached) {
+/**
+ * One index per partition, built lazily: the archive partition costs nothing
+ * until someone actually searches the archive.
+ */
+function getOrBuildIndex(graph: GraphIndex, scope?: ArchiveScope): Bm25Index {
+  const partition = partitionFor(scope);
+  let partitions = indexCache.get(graph);
+  if (!partitions) {
+    partitions = new Map();
+    indexCache.set(graph, partitions);
+  }
+
+  const cached = partitions.get(partition);
+  if (cached && cached.generation === archivePolicyGeneration()) {
     if (cached.version === graph.version) return cached.index;
 
     const changed = graph.changesSince(cached.version);
@@ -337,8 +367,14 @@ function getOrBuildIndex(graph: GraphIndex): Bm25Index {
     }
   }
 
-  const index = new Bm25Index(graph);
-  indexCache.set(graph, { index, version: graph.version });
+  const index = new Bm25Index(graph, (node) =>
+    inPartition(partition, node.path, node.frontmatter),
+  );
+  partitions.set(partition, {
+    index,
+    version: graph.version,
+    generation: archivePolicyGeneration(),
+  });
   return index;
 }
 
@@ -352,8 +388,9 @@ export function bm25Search(
   query: string,
   limit: number,
   accept?: (path: string) => boolean,
+  scope?: ArchiveScope,
 ): Bm25Hit[] {
-  return getOrBuildIndex(graph).search(query, limit, accept);
+  return getOrBuildIndex(graph, scope).search(query, limit, accept);
 }
 
 /** Notes whose frontmatter carries the query as a complete value. */
@@ -361,6 +398,7 @@ export function exactFieldSearch(
   graph: GraphIndex,
   query: string,
   accept?: (path: string) => boolean,
+  scope?: ArchiveScope,
 ): ExactFieldHit[] {
-  return getOrBuildIndex(graph).exactFieldMatches(query, accept);
+  return getOrBuildIndex(graph, scope).exactFieldMatches(query, accept);
 }

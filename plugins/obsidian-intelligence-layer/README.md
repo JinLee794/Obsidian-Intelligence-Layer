@@ -7,7 +7,7 @@ MCP server, plus a setup skill and a canvas that shows what the agent did in you
 
 | Component | Name | Purpose |
 |---|---|---|
-| MCP server | `oil` | 15 tools over an Obsidian vault: tiered search, graph traversal, mtime-guarded writes, audit log |
+| MCP server | `oil` | 16 tools over an Obsidian vault: tiered search, graph traversal, mtime-guarded writes, archival, audit log |
 | Skill | `oil-setup` | Diagnosing a server that did not start, and the optional Ollama tier |
 | Canvas extension | `oil-canvas` | Side panel showing which notes OIL changed, read, or surfaced in a session, with diffs and analytics — see [Vault activity canvas](#vault-activity-canvas) |
 

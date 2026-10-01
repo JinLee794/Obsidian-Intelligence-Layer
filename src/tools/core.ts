@@ -9,6 +9,7 @@ import { getSemanticIndex, semanticRemedy } from "../semantic.js";
 import type { Hydration } from "../hydration.js";
 import { jsonResponse } from "../tool-responses.js";
 import { SERVER_NAME, SERVER_VERSION } from "../version.js";
+import { archiveStatus } from "../archive.js";
 
 export function registerCoreTools(
   server: McpServer,
@@ -67,6 +68,9 @@ export function registerCoreTools(
         cache: cache.getStats(),
         watcher: watcher.getStatus(),
         audit,
+        archive: config.archive.enabled
+          ? await archiveStatus(vaultPath, graph, config).catch(() => ({ enabled: true }))
+          : { enabled: false },
         config: {
           meetings_root: config.schema.meetingsRoot,
           customers_root: config.schema.customersRoot,
