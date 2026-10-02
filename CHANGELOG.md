@@ -2,6 +2,147 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-10-02
+
+Vaults can now archive stale notes automatically. Archived notes leave the
+search index but can still be found and restored. The published package is now
+one self-contained bundle.
+
+### Added
+
+- **Vault archival, configured from the `archive:` block of `oil.config.yaml`.**
+  Rules select stale notes by folder, age (date frontmatter, else mtime),
+  frontmatter values and tags; protections keep customer hubs, `#keep` and
+  `pinned: true` notes, protected folders, notes with recently edited
+  backlinks and recently restored notes. Notes either move under `Archive/`
+  keeping their original path (`mode: move`) or are flagged `archived: true` in
+  place (`mode: flag`). Runs rewrite path-qualified links, leave an
+  `## Archived Notes` breadcrumb on the customer hub, are capped by
+  `max_per_run`, and are recorded in `.oil-archive.json` and the audit log.
+  Runs are `manual`, `on_start` or `daily`. Off by default.
+- **Archived notes leave the active index but stay retrievable.** BM25 and the
+  fuzzy tiers keep a separate archive partition, and the semantic tier skips
+  archived notes unless `index.embed_archived` is set. `search_vault` takes a
+  `scope` — `active`, `archive`, `all` or `fallback` (active first, archive
+  only to fill the page) — defaulting to `index.search`. Archived hits carry
+  `archived: true`.
+- **`manage_archive` tool** (`plan`, `apply`, `restore` by path or run id) — the
+  tool surface grows to 16 — and `archive` / `restore` CLI commands with
+  `--apply`, `--run=<id>` and `--json`. `get_health` reports archive status.
+
+With `archive.enabled: false` (the default) search, indexing and every response
+behave exactly as before.
+
+### Changed
+
+- **The published package is a single zero-dependency bundle.** The CLI is
+  bundled with esbuild into `bundle/cli.js`, so installing it is a single
+  registry request. On a proxied registry, a cold install drops from about 20s
+  to about 2s. Former runtime dependencies are now devDependencies. The package
+  is published as `@mcaps-microsoft/obsidian-intelligence-layer` to that org's
+  GitHub Packages registry.
+
+## [0.7.0] - 2026-10-01
+
+OIL becomes an installable Copilot plugin, and the plugin ships a canvas that
+shows what the agent did in your vault. The MCP tool surface is unchanged.
+
+### Changed
+
+- **`get_health` reports a `remedy`, not just a `reason`.** `semantic.reason`
+  named the fault — `fetch failed (ECONNREFUSED)` — and left the caller to know
+  that this means "install Ollama". `doctor` has carried remedies since it
+  existed, but it is a CLI no MCP client runs, so the fix never reached an agent.
+  An end-to-end run showed the cost directly: the agent reported the tier as down
+  and stopped. `remedy` is `null` whenever the tier is healthy or merely warming,
+  so the common response pays nothing for it.
+
+  Deliberately *not* added: a `setup` or `install_semantic` tool. The remedy for
+  a missing Ollama is a ~1 GB native install, which the host's shell already
+  performs with approval prompts an MCP tool call has no equivalent of — and a
+  16th tool would spend context on every request to serve one moment per machine.
+
+### Added
+
+- **OIL Vault Activity canvas.** The plugin now ships a Copilot canvas extension
+  (`plugins/obsidian-intelligence-layer/extensions/oil-canvas/`). It shows which
+  notes OIL changed, read, or surfaced in the current session, rendered with the
+  vault's own theme and CSS snippets.
+  - Each write gets a line-level before/after diff. A pre-tool hook snapshots
+    the note just before the write runs.
+  - Writes that OIL rejected, such as an mtime conflict, are reported as
+    failures instead of changes.
+  - The vault picker reads Obsidian's own vault list or lets you browse to a
+    folder.
+  - Analytics are stored in a local SQLite file under
+    `~/.copilot/extensions/oil-canvas/artifacts/`, and can be backfilled from
+    past Copilot session logs.
+  - Obsidian itself is an Electron app and can't be proxied, so the canvas hands
+    off to it with an `obsidian://` link.
+  - Served on loopback only, behind a per-process token, a Host check and a
+    strict CSP.
+  - `.github/extensions/oil-canvas/` is a dev shim that imports the plugin copy.
+    New manifest tests check that the extension stays where the CLI discovers
+    it, and that it imports only Node built-ins and the SDK.
+  - An Obsidian-style **Explorer**, with:
+    - a vault file tree;
+    - wikilink and tag navigation with back and forward;
+    - hover previews;
+    - a Ctrl+O quick switcher;
+    - side panels for backlinks, related notes, a local graph, the outline,
+      properties and history.
+  - A **markdown editor** with syntax highlighting, `[[` autocomplete and split
+    preview. Saves that conflict with a change on disk are refused.
+  - Richer **analytics charts**: area chart, punchcard, heatmap, donut, latency
+    histogram, treemap.
+  - A **vault health** scan with a score and **Fix with Copilot**, which sends
+    the findings into the session once you confirm.
+  - **Search analytics**: how many searches the agent needed per prompt, how
+    each search type performs (hits, zero-hit rate, how often a result was
+    opened, latency), step-by-step search chains, and repeated zero-hit
+    queries with **Fix with Copilot**. Also available to the agent as the
+    `get_search_analytics` action.
+  - **Lean across sessions.**
+    - The store, server and importer load lazily, and sessions that don't call
+      OIL never touch SQLite.
+    - The server stops when the last panel closes, and the link graph is
+      released after 5 minutes idle.
+    - A shared-DB `busy_timeout` plus `BEGIN IMMEDIATE` took concurrent-writer
+      `SQLITE_BUSY` failures to zero. A lock file allows one history import at a
+      time.
+    - A hidden panel defers refreshes and pauses animations.
+
+- **Copilot plugin and marketplace.** `plugins/obsidian-intelligence-layer/`
+  packages the MCP server as an installable Copilot plugin, and
+  `.github/plugin/marketplace.json` makes this repository a marketplace, so the
+  whole setup is two commands and no clone:
+
+  ```bash
+  copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
+  copilot plugin install obsidian-intelligence-layer@oil-marketplace
+  ```
+
+  The plugin registers the server as `oil`, pinned to the latest **released**
+  tag — not to `package.json`, which runs ahead of what is published. Its
+  `.mcp.json` references exactly one variable, `OBSIDIAN_VAULT_PATH`; every other
+  setting stays in `oil.config.yaml`, which survives plugin updates.
+- **`oil-setup` skill — the only bundled skill, deliberately.** OIL's tools
+  already document themselves: descriptions say when to call them, parameter
+  schemas explain each option (`view: brief | full | write`), and a rejected
+  write returns `agent_guidance.next_step` naming the exact recovery sequence. So
+  the skill claims none of that territory. It covers what tool discovery cannot
+  reach: the state where the server failed to start and there *are* no tools to
+  consult, and remediation that lives in the user's shell — environment
+  variables, `doctor`, and the fact that an MCP server is spawned once per
+  session, so setting a variable mid-session fixes nothing.
+- **`src/__tests__/plugin-manifest.test.ts`.** Asserts the plugin manifest, the
+  marketplace entry and every documented `npx --package=...#v` invocation agree
+  with the pin; that the pin names a released, non-prerelease version; and that
+  the skill stays out of the tool surface's territory. None of it is
+  hypothetical — an unpinned `doctor` command resolved to a branch without the
+  `doctor` subcommand, and the prerelease tag the plugin first advertised was
+  later deleted from the remote.
+
 ## [0.6.0] - 2026-08-20
 
 Semantic search, incremental indexing, and reliable startup — plus a measurable

@@ -28,6 +28,7 @@ describe("Tool surface", () => {
         "get_health",
         "get_note_metadata",
         "get_related_entities",
+        "manage_archive",
         "prepare_crm_prefetch",
         "query_frontmatter",
         "read_note_section",
@@ -38,7 +39,7 @@ describe("Tool surface", () => {
   });
 
   it("tool count matches snapshot", () => {
-    expect(server.tools.size).toBe(15);
+    expect(server.tools.size).toBe(16);
   });
 
   // Spec §10.1 — Idle context cost: schema injected into every conversation.

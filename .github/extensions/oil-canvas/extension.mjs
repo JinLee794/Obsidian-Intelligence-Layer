@@ -1,0 +1,1 @@
+import "../../../plugins/obsidian-intelligence-layer/extensions/oil-canvas/extension.mjs";

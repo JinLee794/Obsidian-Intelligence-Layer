@@ -21,6 +21,7 @@ import { join } from "node:path";
 import type { GraphIndex } from "./graph.js";
 import { flattenFrontmatter } from "./frontmatter.js";
 import { describeSemanticDisabledBy } from "./config.js";
+import { isArchivedNote, shouldEmbedArchived } from "./archive-policy.js";
 import type { ConfigSource, NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
@@ -58,6 +59,43 @@ export interface SemanticStats {
   dimensions: number;
   /** Why the tier is not serving, when it isn't. */
   reason: string | null;
+  /**
+   * What to do about it, when there is something to do.
+   *
+   * `reason` names the fault; on its own it leaves the caller to know that
+   * ECONNREFUSED on port 11434 means "install Ollama". The `doctor` command has
+   * carried remedies since it existed, but nothing reached a client over MCP, so
+   * an agent could report the tier as down and stop there. Null whenever the
+   * tier is healthy or merely warming, so the common response pays nothing.
+   */
+  remedy: string | null;
+}
+
+/**
+ * Turn a tier state into an instruction.
+ *
+ * Deliberately never suggests installing anything itself: the fix for a missing
+ * Ollama is a ~1 GB native install, which belongs to the user and their host's
+ * shell — with its approval prompts — not to an MCP server acting on an LLM's
+ * decision.
+ */
+export function semanticRemedy(
+  status: SemanticStatus,
+  reason: string | null,
+  model: string,
+  endpoint: string,
+): string | null {
+  if (status === "disabled") {
+    return "Meaning-based search is off. Set semantic.enabled: true in oil.config.yaml, or OIL_SEMANTIC=on, then restart the server.";
+  }
+  if (status !== "unavailable") return null;
+
+  // A reason naming Ollama came back from Ollama, so it is running and the
+  // fault is the model or the request — not a missing install.
+  if (reason?.includes("Ollama")) {
+    return `Ollama answered but could not embed. Check the model: ollama pull ${model}. Search continues on the keyword tiers.`;
+  }
+  return `Ollama is not reachable at ${endpoint}. Install it from https://ollama.com and leave it running, or set OIL_SEMANTIC=off. Search continues on the keyword tiers either way.`;
 }
 
 /**
@@ -158,7 +196,7 @@ export function describeError(err: unknown): string {
  * vector space they are noise that crowds out the fields a person would search.
  */
 const NOISE_VALUE = /^(https?:\/\/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-|\d{4}-\d{2}-\d{2}T\d{2}:)/i;
-const NOISE_KEY = /(^|\.)(id|.*id|timestamp|generated|sources|resource|icon|sticker|.*link|.*sync|last_validated)$/i;
+const NOISE_KEY = /(^|\.)(id|.*id|timestamp|generated|sources|resource|icon|sticker|.*link|.*sync|last_validated|archived(_.*)?|archive_.*)$/i;
 /** Frontmatter share of the budget, so structured notes keep room for prose. */
 const FRONTMATTER_BUDGET = 600;
 
@@ -265,6 +303,7 @@ export class SemanticIndex {
       note_count: this.vectors.size,
       dimensions: this.dimensions,
       reason: this.reason,
+      remedy: semanticRemedy(this.state, this.reason, this.config.model, this.endpoint),
     };
   }
 
@@ -477,6 +516,10 @@ export class SemanticIndex {
     for (const ref of graph.getNotesByFolder("")) {
       const node = graph.getNode(ref.path);
       if (!node) continue;
+      // Archived notes stay out of vector space unless the vault opts in: the
+      // embedding pass is the expensive one, and the archive is meant to cost
+      // nothing until someone looks in it.
+      if (!shouldEmbedArchived() && isArchivedNote(ref.path, node.frontmatter)) continue;
       const text = embeddingText(node);
       // Ollama rejects an empty input outright, failing the whole batch for one
       // blank note.
@@ -485,10 +528,26 @@ export class SemanticIndex {
       texts.set(ref.path, text);
     }
 
+    // A note that only moved — archived, or restored — keeps its text, so its
+    // vector is carried to the new path instead of being embedded again.
+    const orphaned = new Map<string, Entry>();
+    for (const [path, entry] of this.vectors) {
+      if (!wanted.has(path)) orphaned.set(entry.hash, entry);
+    }
+
     let changed = false;
     for (const path of [...this.vectors.keys()]) {
       if (!wanted.has(path)) {
         this.vectors.delete(path);
+        changed = true;
+      }
+    }
+    for (const [path, hash] of wanted) {
+      if (this.vectors.has(path)) continue;
+      const carried = orphaned.get(hash);
+      if (carried) {
+        this.vectors.set(path, carried);
+        orphaned.delete(hash);
         changed = true;
       }
     }

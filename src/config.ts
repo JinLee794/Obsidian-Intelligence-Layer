@@ -7,6 +7,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type {
+  ArchiveConfig,
+  ArchiveRule,
   ConfigProvenance,
   ConfigSource,
   OilConfig,
@@ -73,8 +75,190 @@ const DEFAULTS: OilConfig = {
   audit: {
     logAllWrites: true,
   },
+  archive: defaultArchiveConfig(),
   provenance: defaultProvenance(),
 };
+
+/** Built fresh every time: the nested arrays must never be shared between configs. */
+export function defaultArchiveConfig(): ArchiveConfig {
+  return {
+    enabled: false,
+    mode: "move",
+    root: "Archive/",
+    run: "manual",
+    maxPerRun: 200,
+    manifestFile: ".oil-archive.json",
+    protect: {
+      tags: ["keep"],
+      frontmatter: { pinned: true },
+      folders: [],
+      recentBacklinkDays: 0,
+      restoredGraceDays: 90,
+    },
+    rules: [],
+    index: { search: "fallback", breadcrumbs: true, embedArchived: false },
+  };
+}
+
+// ─── Archive block ────────────────────────────────────────────────────────────
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+function warnArchive(message: string): void {
+  console.error(`[OIL] Config: archive — ${message}`);
+}
+
+function pickEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+  key: string,
+): T {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) {
+    return value as T;
+  }
+  warnArchive(`ignoring ${key}='${String(value)}' — expected ${allowed.join(" | ")}.`);
+  return fallback;
+}
+
+function pickNumber(value: unknown, fallback: number, key: string): number {
+  if (value === undefined || value === null) return fallback;
+  const n = typeof value === "number" ? value : Number(value);
+  if (Number.isFinite(n) && n >= 0) return n;
+  warnArchive(`ignoring ${key}='${String(value)}' — expected a non-negative number.`);
+  return fallback;
+}
+
+function pickBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function pickStrings(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const list = Array.isArray(value) ? value : [value];
+  return list.map((item) => String(item).trim()).filter(Boolean);
+}
+
+const stripHash = (tag: string) => tag.replace(/^#/, "");
+
+/**
+ * Parse the `archive:` block of `oil.config.yaml`.
+ *
+ * Handled apart from the generic snake→camel remap on purpose: rules and
+ * protections name the user's own frontmatter keys, and a generic remap would
+ * rewrite `date_field: closed_on` into a key the vault does not have.
+ */
+export function parseArchiveConfig(raw: unknown): ArchiveConfig {
+  const config = defaultArchiveConfig();
+  if (raw === undefined || raw === null) return config;
+  if (!isRecord(raw)) {
+    warnArchive("expected a mapping; archiving stays off.");
+    return config;
+  }
+
+  config.enabled = pickBoolean(raw.enabled, config.enabled);
+  config.mode = pickEnum(raw.mode, ["move", "flag"] as const, config.mode, "mode");
+  if (typeof raw.root === "string" && raw.root.trim()) {
+    const root = raw.root.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (root) config.root = `${root}/`;
+  }
+  config.run = pickEnum(raw.run, ["manual", "on_start", "daily"] as const, config.run, "run");
+  config.maxPerRun = pickNumber(raw.max_per_run, config.maxPerRun, "max_per_run");
+  if (typeof raw.manifest_file === "string" && raw.manifest_file.trim()) {
+    config.manifestFile = raw.manifest_file.trim();
+  }
+
+  if (raw.protect !== undefined) {
+    if (!isRecord(raw.protect)) {
+      warnArchive("ignoring protect — expected a mapping.");
+    } else {
+      const p = raw.protect;
+      const tags = pickStrings(p.tags);
+      if (tags) config.protect.tags = tags.map(stripHash);
+      if (p.frontmatter !== undefined) {
+        if (isRecord(p.frontmatter)) config.protect.frontmatter = { ...p.frontmatter };
+        else warnArchive("ignoring protect.frontmatter — expected a mapping.");
+      }
+      const folders = pickStrings(p.folders);
+      if (folders) config.protect.folders = folders;
+      config.protect.recentBacklinkDays = pickNumber(
+        p.recent_backlink_days,
+        config.protect.recentBacklinkDays,
+        "protect.recent_backlink_days",
+      );
+      config.protect.restoredGraceDays = pickNumber(
+        p.restored_grace_days,
+        config.protect.restoredGraceDays,
+        "protect.restored_grace_days",
+      );
+    }
+  }
+
+  if (raw.rules !== undefined) {
+    if (!Array.isArray(raw.rules)) {
+      warnArchive("ignoring rules — expected a list.");
+    } else {
+      raw.rules.forEach((entry, i) => {
+        const rule = parseArchiveRule(entry, i);
+        if (rule) config.rules.push(rule);
+      });
+    }
+  }
+
+  if (raw.index !== undefined) {
+    if (!isRecord(raw.index)) {
+      warnArchive("ignoring index — expected a mapping.");
+    } else {
+      config.index.search = pickEnum(
+        raw.index.search,
+        ["fallback", "never", "always"] as const,
+        config.index.search,
+        "index.search",
+      );
+      config.index.breadcrumbs = pickBoolean(raw.index.breadcrumbs, config.index.breadcrumbs);
+      config.index.embedArchived = pickBoolean(
+        raw.index.embed_archived,
+        config.index.embedArchived,
+      );
+    }
+  }
+
+  return config;
+}
+
+function parseArchiveRule(entry: unknown, index: number): ArchiveRule | null {
+  const label = `rules[${index}]`;
+  if (!isRecord(entry)) {
+    warnArchive(`ignoring ${label} — expected a mapping.`);
+    return null;
+  }
+  const rule: ArchiveRule = {
+    name: typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : label,
+  };
+  if (typeof entry.folder === "string" && entry.folder.trim()) rule.folder = entry.folder.trim();
+  if (entry.older_than_days !== undefined) {
+    const days = pickNumber(entry.older_than_days, NaN, `${label}.older_than_days`);
+    if (Number.isFinite(days)) rule.olderThanDays = days;
+  }
+  if (typeof entry.date_field === "string" && entry.date_field.trim()) {
+    rule.dateField = entry.date_field.trim();
+  }
+  if (entry.frontmatter !== undefined) {
+    if (isRecord(entry.frontmatter)) rule.frontmatter = { ...entry.frontmatter };
+    else warnArchive(`ignoring ${label}.frontmatter — expected a mapping.`);
+  }
+  const tags = pickStrings(entry.tags);
+  if (tags && tags.length) rule.tags = tags.map(stripHash);
+
+  // A rule with no condition would match every note in the vault.
+  if (!rule.folder && rule.olderThanDays === undefined && !rule.frontmatter && !rule.tags) {
+    warnArchive(`ignoring ${label} ('${rule.name}') — it names no condition and would match every note.`);
+    return null;
+  }
+  return rule;
+}
 
 // ─── Flag provenance ──────────────────────────────────────────────────────────
 
@@ -339,7 +523,8 @@ export async function loadConfig(vaultPath: string): Promise<OilConfig> {
     if (!parsed || typeof parsed !== "object") {
       return applyEnvOverrides(freshDefaults());
     }
-    const remapped = remapYaml(applyLegacyAliases(parsed));
+    const { archive: rawArchive, ...rest } = applyLegacyAliases(parsed);
+    const remapped = remapYaml(rest);
     // Provenance is derived, never declared: a `provenance` block in the file
     // would otherwise let a vault assert where its own values came from.
     delete remapped.provenance;
@@ -351,6 +536,7 @@ export async function loadConfig(vaultPath: string): Promise<OilConfig> {
 
     return applyEnvOverrides({
       ...merged,
+      archive: parseArchiveConfig(rawArchive),
       provenance: { semantic: semanticSourcesFromYaml(remapped) },
     });
   } catch {
@@ -361,7 +547,7 @@ export async function loadConfig(vaultPath: string): Promise<OilConfig> {
 
 /** A private copy, so a caller's overrides never write through to DEFAULTS. */
 function freshDefaults(): OilConfig {
-  return { ...DEFAULTS, provenance: defaultProvenance() };
+  return { ...DEFAULTS, archive: defaultArchiveConfig(), provenance: defaultProvenance() };
 }
 
 export { DEFAULTS as DEFAULT_CONFIG };
