@@ -51,7 +51,7 @@ export OBSIDIAN_VAULT_PATH="/absolute/path/to/your/vault"
 Verify before opening a session:
 
 ```bash
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.7.0 -- \
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.0 -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
@@ -282,7 +282,7 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 `.mcp.json` pins the server to a release tag so installs are reproducible:
 
 ```
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.7.0 -- obsidian-intelligence-layer mcp
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.0 -- obsidian-intelligence-layer mcp
 ```
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
@@ -314,8 +314,8 @@ repository is not considered a durable dependency — change the one line in
 `.mcp.json`:
 
 ```diff
-- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.7.0",
-+ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.7.0",
+- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.0",
++ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.0",
 ```
 
 and confirm that every consumer has git credentials for the org available to

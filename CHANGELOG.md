@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] - 2026-10-02
+
+Vaults can now archive stale notes automatically. Archived notes leave the
+search index but can still be found and restored. The published package is now
+one self-contained bundle.
 
 ### Added
 
@@ -28,6 +32,15 @@ All notable changes to this project will be documented in this file.
 
 With `archive.enabled: false` (the default) search, indexing and every response
 behave exactly as before.
+
+### Changed
+
+- **The published package is a single zero-dependency bundle.** The CLI is
+  bundled with esbuild into `bundle/cli.js`, so installing it is a single
+  registry request. On a proxied registry, a cold install drops from about 20s
+  to about 2s. Former runtime dependencies are now devDependencies. The package
+  is published as `@mcaps-microsoft/obsidian-intelligence-layer` to that org's
+  GitHub Packages registry.
 
 ## [0.7.0] - 2026-10-01
 
