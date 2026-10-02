@@ -2,7 +2,7 @@ import { closeSync, createReadStream, openSync, readdirSync, readFileSync, readS
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { sessionStateDir } from "./paths.mjs";
-import { analyzeResult, compactArgs, oilToolName, resultTextOf, touchesFromArgs } from "./activity.mjs";
+import { analyzeResult, batchTimings, compactArgs, oilToolName, resultTextOf, touchesFromArgs } from "./activity.mjs";
 
 /** Record a tool.execution_start event if it is an OIL call. Returns the bare tool name or null. */
 export function ingestStart(store, sessionId, data, ts, source = "live") {
@@ -13,8 +13,9 @@ export function ingestStart(store, sessionId, data, ts, source = "live") {
     return tool;
 }
 
-/** Record a tool.execution_complete event for a previously started OIL call. Returns the call row or null. */
-export function ingestComplete(store, data, ts) {
+/** Record a tool.execution_complete event for a previously started OIL call. Returns the call row or null.
+ *  `timing` carries what the completion event lacks: when OIL received the call and its parallel batch. */
+export function ingestComplete(store, data, ts, { mcpStartedAt = null, timing = null, batchSize = null } = {}) {
     if (!data?.toolCallId) return null;
     const call = store.getCall(data.toolCallId);
     if (!call) return null;
@@ -33,6 +34,9 @@ export function ingestComplete(store, data, ts) {
         success: data.success !== false && !errorCode,
         error,
         resultBytes: text ? Buffer.byteLength(text) : null,
+        mcpStartedAt,
+        timing,
+        batchSize,
     });
     store.recordCallContext(data.toolCallId, { interactionId: data.interactionId ?? null, turnId: data.turnId ?? null, search });
     store.addTouches(data.toolCallId, call.session_id, touches, ts);
@@ -115,6 +119,8 @@ async function importFile(store, sessionId, file) {
     const started = new Set();
     const prompts = new Map();
     const answered = new Set();
+    const timings = new Map();
+    const mcpStarts = new Map();
     let calls = 0;
     const rl = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
     const batch = [];
@@ -131,6 +137,19 @@ async function importFile(store, sessionId, file) {
             if (ev?.data?.interactionId) prompts.set(ev.data.interactionId, { ts: ev.timestamp, prompt: ev.data.content });
             continue;
         }
+        if (line.startsWith('{"type":"assistant.message"')) {
+            if (!line.includes('"toolRequests":[{') || !line.includes('"mcpToolName"')) continue;
+            const ev = parse(line);
+            for (const [id, t] of batchTimings(ev?.data?.toolRequests)) timings.set(id, t);
+            continue;
+        }
+        if (line.startsWith('{"type":"hook.start"')) {
+            if (!line.includes('"preMcpToolCall"')) continue;
+            const ev = parse(line);
+            const id = ev?.data?.input?.toolCallId;
+            if (id && started.has(id)) mcpStarts.set(id, ev.timestamp);
+            continue;
+        }
         if (!line.includes('"type":"tool.execution_')) continue;
         if (line.startsWith('{"type":"tool.execution_start"')) {
             if (!line.includes('"mcpToolName"')) continue;
@@ -145,7 +164,8 @@ async function importFile(store, sessionId, file) {
             const ev = parse(line);
             if (!ev) continue;
             if (ev.data?.interactionId) answered.add(ev.data.interactionId);
-            batch.push(() => ingestComplete(store, ev.data, ev.timestamp));
+            const timing = { mcpStartedAt: mcpStarts.get(m[1]) ?? null, ...timings.get(m[1]) };
+            batch.push(() => ingestComplete(store, ev.data, ev.timestamp, timing));
         }
         if (batch.length >= 200) flush();
     }

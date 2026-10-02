@@ -129,6 +129,27 @@ export function oilToolNameFromQualified(toolName) {
     return /oil|obsidian/i.test(m[1]) ? m[2] : null;
 }
 
+// Tools that return at once, so they never hold back a parallel batch's completion.
+const INSTANT_TOOLS = new Set(["report_intent", "tool_search_tool"]);
+
+/**
+ * How trustworthy the timing of each OIL call in one assistant turn is. The runtime emits the
+ * completion events of parallel tool calls only once the whole batch has finished, so a call batched
+ * with non-OIL tools gets the slowest sibling's end time (`masked`, an upper bound). Calls batched only
+ * with other OIL calls (`parallel`) still measure OIL, bounded by the slowest of them.
+ * Returns Map<toolCallId, { timing: "solo" | "parallel" | "masked", batchSize }>.
+ */
+export function batchTimings(toolRequests) {
+    const out = new Map();
+    if (!Array.isArray(toolRequests)) return out;
+    const reqs = toolRequests.filter((r) => r?.toolCallId && !INSTANT_TOOLS.has(r.name));
+    const oil = reqs.filter((r) => oilToolName({ mcpToolName: r.mcpToolName, mcpServerName: r.mcpServerName, toolName: r.name }));
+    if (!oil.length) return out;
+    const timing = reqs.length === 1 ? "solo" : oil.length === reqs.length ? "parallel" : "masked";
+    for (const r of oil) out.set(r.toolCallId, { timing, batchSize: reqs.length });
+    return out;
+}
+
 /** Remembers recent user prompts so a prompt is stored only once an OIL call answers it. */
 export class PromptBuffer {
     constructor(max = 50) {

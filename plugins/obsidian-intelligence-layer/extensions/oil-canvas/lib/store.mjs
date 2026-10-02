@@ -76,10 +76,15 @@ const CALL_COLUMNS = {
     search_mode: "TEXT",
     hits: "INTEGER",
     top_score: "REAL",
+    // When OIL actually received the call (preMcpToolCall), after permission prompts and hooks.
+    mcp_started_at: "TEXT",
+    // solo | parallel | masked — see batchTimings() in activity.mjs. NULL = unknown.
+    timing: "TEXT",
+    batch_size: "INTEGER",
 };
 
 // Bump when the importer extracts new fields, so past session logs are re-read to backfill them.
-const IMPORT_VERSION = "2";
+const IMPORT_VERSION = "3";
 
 function migrate(db) {
     const have = new Set(db.prepare(`PRAGMA table_info(tool_calls)`).all().map((c) => c.name));
@@ -97,6 +102,8 @@ function migrate(db) {
 const WRITE_LIST = [...WRITE_TOOLS].map((t) => `'${t}'`).join(",");
 // The call hasn't failed (in-flight calls have success = NULL and count as OK).
 const OK = "(COALESCE(c.success, 1) = 1 AND c.error IS NULL)";
+// The duration measures OIL, not a slower non-OIL tool that ran in the same parallel batch (or a canvas edit).
+const TIMED = "(c.duration_ms IS NOT NULL AND COALESCE(c.timing, '') <> 'masked' AND c.tool <> 'canvas_edit')";
 
 export async function openStore(file = join(artifactsDir(), "oil-activity.db")) {
     const { DatabaseSync } = await import("node:sqlite");
@@ -115,7 +122,9 @@ export class ActivityStore {
         this.q = {
             insertCall: s(`INSERT INTO tool_calls (tool_call_id, session_id, tool, args_json, started_at, source)
                            VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(tool_call_id) DO NOTHING`),
-            completeCall: s(`UPDATE tool_calls SET completed_at = ?, duration_ms = ?, success = ?, error = ?, result_bytes = ?
+            completeCall: s(`UPDATE tool_calls SET completed_at = ?, duration_ms = ?, success = ?, error = ?, result_bytes = ?,
+                                    mcp_started_at = COALESCE(?, mcp_started_at), timing = COALESCE(?, timing),
+                                    batch_size = COALESCE(?, batch_size)
                              WHERE tool_call_id = ?`),
             getCall: s(`SELECT * FROM tool_calls WHERE tool_call_id = ?`),
             insertTouch: s(`INSERT OR IGNORE INTO touches (tool_call_id, session_id, path, kind, ts) VALUES (?, ?, ?, ?, ?)`),
@@ -160,12 +169,13 @@ export class ActivityStore {
         return this.q.insertCall.run(toolCallId, sessionId, tool, args == null ? null : JSON.stringify(args), ts, source).changes > 0;
     }
 
-    recordComplete({ toolCallId, ts, success, error, resultBytes }) {
+    recordComplete({ toolCallId, ts, success, error, resultBytes, mcpStartedAt = null, timing = null, batchSize = null }) {
         const call = this.q.getCall.get(toolCallId);
         if (!call) return null;
-        const duration = call.started_at && ts ? Math.max(0, Date.parse(ts) - Date.parse(call.started_at)) : null;
-        this.q.completeCall.run(ts, duration, success ? 1 : 0, error ?? null, resultBytes ?? null, toolCallId);
-        return { ...call, completed_at: ts, duration_ms: duration, success: success ? 1 : 0, error };
+        const start = mcpStartedAt ?? call.mcp_started_at ?? call.started_at;
+        const duration = start && ts ? Math.max(0, Date.parse(ts) - Date.parse(start)) : null;
+        this.q.completeCall.run(ts, duration, success ? 1 : 0, error ?? null, resultBytes ?? null, mcpStartedAt, timing, batchSize, toolCallId);
+        return { ...call, completed_at: ts, duration_ms: duration, success: success ? 1 : 0, error, timing: timing ?? call.timing };
     }
 
     getCall(toolCallId) {
@@ -237,7 +247,7 @@ export class ActivityStore {
             .all(sessionId, limitNotes);
         const calls = this.db
             .prepare(
-                `SELECT c.tool_call_id, c.session_id, c.tool, c.args_json, c.started_at, c.duration_ms, c.success, c.error,
+                `SELECT c.tool_call_id, c.session_id, c.tool, c.args_json, c.started_at, c.duration_ms, c.timing, c.success, c.error,
                         (SELECT json_group_array(json_object('path', t.path, 'kind', t.kind))
                            FROM touches t WHERE t.tool_call_id = c.tool_call_id) AS touches_json,
                         EXISTS (SELECT 1 FROM snapshots s WHERE s.tool_call_id = c.tool_call_id) AS has_snapshot
@@ -289,7 +299,8 @@ export class ActivityStore {
                         COUNT(DISTINCT c.session_id) AS sessions,
                         SUM(c.tool IN (${WRITE_LIST})) AS writes,
                         SUM(c.success = 0 OR c.error IS NOT NULL) AS errors,
-                        ROUND(AVG(c.duration_ms)) AS avg_ms,
+                        ROUND(AVG(CASE WHEN ${TIMED} THEN c.duration_ms END)) AS avg_ms,
+                        SUM(c.timing = 'masked') AS masked,
                         MIN(c.started_at) AS first_ts,
                         MAX(c.started_at) AS last_ts
                    FROM tool_calls c WHERE ${where}`,
@@ -297,13 +308,13 @@ export class ActivityStore {
             .get(sessionId, sinceIso);
         const byTool = this.db
             .prepare(
-                `SELECT c.tool, COUNT(*) AS calls, ROUND(AVG(c.duration_ms)) AS avg_ms,
+                `SELECT c.tool, COUNT(*) AS calls, ROUND(AVG(CASE WHEN ${TIMED} THEN c.duration_ms END)) AS avg_ms,
                         SUM(c.success = 0 OR c.error IS NOT NULL) AS errors
                    FROM tool_calls c WHERE ${where} GROUP BY c.tool ORDER BY calls DESC`,
             )
             .all(sessionId, sinceIso);
         const durations = this.db
-            .prepare(`SELECT c.duration_ms AS d FROM tool_calls c WHERE ${where} AND c.duration_ms IS NOT NULL ORDER BY d`)
+            .prepare(`SELECT c.duration_ms AS d FROM tool_calls c WHERE ${where} AND ${TIMED} ORDER BY d`)
             .all(sessionId, sinceIso)
             .map((r) => r.d);
         const byDay = this.db
@@ -321,7 +332,7 @@ export class ActivityStore {
             )
             .all(sessionId, sinceIso);
         const timed = this.db
-            .prepare(`SELECT c.tool, c.started_at AS ts, c.duration_ms AS d FROM tool_calls c WHERE ${where} AND c.started_at IS NOT NULL`)
+            .prepare(`SELECT c.tool, c.started_at AS ts, CASE WHEN ${TIMED} THEN c.duration_ms END AS d FROM tool_calls c WHERE ${where} AND c.started_at IS NOT NULL`)
             .all(sessionId, sinceIso);
         const noteRows = this.db
             .prepare(
@@ -380,7 +391,7 @@ export class ActivityStore {
         }
 
         return {
-            totals: { ...totals, notes: noteRows.length, p50_ms: pct(0.5), p95_ms: pct(0.95) },
+            totals: { ...totals, notes: noteRows.length, timed: durations.length, p50_ms: pct(0.5), p95_ms: pct(0.95) },
             byTool,
             byDay,
             byKind,
@@ -399,7 +410,7 @@ export class ActivityStore {
         const calls = this.db
             .prepare(
                 `SELECT c.tool_call_id, c.session_id, c.interaction_id, c.tool, c.search_query, c.search_mode, c.hits, c.top_score,
-                        c.duration_ms, c.success, c.error, c.started_at, s.name AS session_name
+                        c.duration_ms, c.timing, c.success, c.error, c.started_at, s.name AS session_name
                    FROM tool_calls c LEFT JOIN sessions s USING (session_id)
                   WHERE ${where}
                ORDER BY c.session_id, c.started_at, c.rowid`,
@@ -421,7 +432,7 @@ export class ActivityStore {
     recordCanvasEdit({ toolCallId, sessionId, path, beforeText, afterText, beforeExists, ts }) {
         this.transaction(() => {
             this.q.insertCall.run(toolCallId, sessionId, "canvas_edit", JSON.stringify({ path }), ts, "canvas");
-            this.q.completeCall.run(ts, 0, 1, null, Buffer.byteLength(afterText ?? ""), toolCallId);
+            this.q.completeCall.run(ts, null, 1, null, Buffer.byteLength(afterText ?? ""), null, null, null, toolCallId);
             this.q.insertTouch.run(toolCallId, sessionId, path, beforeExists ? "modified" : "created", ts);
             this.q.upsertSnapshot.run(toolCallId, path, beforeText ?? null, afterText ?? null, beforeExists ? 1 : 0, ts);
         });

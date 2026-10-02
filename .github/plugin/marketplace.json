@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Obsidian Intelligence Layer — knowledge-layer MCP tooling for AI agent workflows over an Obsidian vault.",
-    "version": "0.8.0"
+    "version": "0.8.1"
   },
   "plugins": [
     {
       "name": "obsidian-intelligence-layer",
       "description": "Knowledge-layer MCP server for Obsidian vaults: tiered search, graph traversal, mtime-guarded writes, and an audit trail. Ships an optional local-embedding semantic tier that requires Ollama; without it search degrades to keyword tiers rather than failing.",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "source": "plugins/obsidian-intelligence-layer",
       "author": {
         "name": "Jin Lee",

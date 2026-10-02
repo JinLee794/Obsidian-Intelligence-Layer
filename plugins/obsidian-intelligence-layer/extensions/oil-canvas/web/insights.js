@@ -86,6 +86,8 @@ export function analyticsView() {
     const series = (k) => tail.map((d) => d[k] || 0);
     const successRate = (100 * (t.calls - t.errors)) / t.calls;
     const writeRatio = (100 * t.writes) / t.calls;
+    // Calls batched with slower non-OIL tools only have an upper-bound duration, so latency stats skip them.
+    const maskedNote = t.masked ? ` · excl. ${t.masked} batched with non-OIL tools` : "";
 
     out.push(
         h(
@@ -96,7 +98,7 @@ export function analyticsView() {
             kpi(t.notes, "Notes touched", { ic: "file", tone: "t2" }),
             kpi(t.writes, "Writes", { ic: "edit", tone: "t4", spark: sparkline(series("writes"), { color: "var(--c4)" }) }),
             kpi(t.errors, "Errors", { ic: "alert", tone: t.errors ? "bad" : "t5", spark: t.errors ? sparkline(series("errors"), { color: "var(--red)" }) : null }),
-            kpi(ms(t.p50_ms), "Median latency", { ic: "clock", tone: "t6", sub: `p95 ${ms(t.p95_ms)}` }),
+            kpi(ms(t.p50_ms), "Median latency", { ic: "clock", tone: "t6", sub: `p95 ${ms(t.p95_ms)}${maskedNote}` }),
         ),
     );
 
@@ -175,7 +177,7 @@ export function analyticsView() {
             { class: "grid g-3" },
             card("Tool mix", "layers", donut(topTools, { center: compact(t.calls), sub: "calls" })),
             card("How notes were touched", "eye", kinds.length ? donut(kinds, { center: compact(t.notes), sub: "notes" }) : h("div", { class: "muted small pad" }, "No note touches yet.")),
-            card("Latency distribution", "zap", a.latency?.length ? histogram(a.latency, { p50: t.p50_ms, p95: t.p95_ms }) : h("div", { class: "muted small pad" }, "No timings yet."), { sub: `p50 ${ms(t.p50_ms)} · p95 ${ms(t.p95_ms)}` }),
+            card("Latency distribution", "zap", a.latency?.length ? histogram(a.latency, { p50: t.p50_ms, p95: t.p95_ms }) : h("div", { class: "muted small pad" }, "No timings yet."), { sub: `p50 ${ms(t.p50_ms)} · p95 ${ms(t.p95_ms)}${maskedNote}` }),
         ),
     );
 
@@ -188,7 +190,7 @@ export function analyticsView() {
                 "Latency by tool",
                 "clock",
                 h("div", null, latencyRanges(a.toolLatency || [], { limit: 9 }), legend([["var(--c1)", "p50 → p95 range"], ["var(--c4)", "p95"]])),
-                { sub: "log scale" },
+                { sub: `log scale${maskedNote}` },
             ),
             card(
                 "Most touched notes",

@@ -177,7 +177,7 @@ function timeline(calls) {
                         { class: "tl-head" },
                         h("span", { class: "tool" }, c.tool),
                         h("span", { class: "grow" }),
-                        running ? h("span", { class: "badge run" }, "running") : c.duration_ms != null ? h("span", { class: "muted small" }, ms(c.duration_ms)) : null,
+                        running ? h("span", { class: "badge run" }, "running") : c.duration_ms != null ? h("span", c.timing === "masked" ? { class: "muted small", title: "Ran in parallel with slower non-OIL tools; this is an upper bound, not OIL's own time." } : { class: "muted small" }, (c.timing === "masked" ? "≤ " : "") + ms(c.duration_ms)) : null,
                         h("span", { class: "muted small", title: c.started_at }, clock(c.started_at)),
                     ),
                     q ? h("div", { class: "q ellipsis", title: q }, icon("search", 12), q) : null,

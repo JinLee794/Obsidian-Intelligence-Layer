@@ -1,7 +1,7 @@
 {
   "name": "obsidian-intelligence-layer",
   "description": "Knowledge-layer MCP server for Obsidian vaults: tiered search, graph traversal, mtime-guarded writes, and an audit trail. Ships an optional local-embedding semantic tier that requires Ollama; without it search degrades to keyword tiers rather than failing.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "author": {
     "name": "Jin Lee",
     "url": "https://github.com/JinLee794"
