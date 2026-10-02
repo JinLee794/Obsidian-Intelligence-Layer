@@ -54,9 +54,14 @@ function resolveNpmCli() {
 const npmCli = resolveNpmCli();
 
 function runNpm(args, cwd) {
+  // `npm publish --dry-run` exports npm_config_dry_run, which this script's own
+  // nested `npm pack` would otherwise inherit — writing no tarball and failing a
+  // check that is meant to validate the real artifact.
+  const env = { ...process.env };
+  delete env.npm_config_dry_run;
   execFileSync(process.execPath, [npmCli, ...args], {
     cwd,
-    env: process.env,
+    env,
     stdio: "inherit",
   });
 }
@@ -96,14 +101,26 @@ try {
   const manifest = JSON.parse(
     await readFile(join(repoRoot, "package.json"), "utf8"),
   );
-  if (!manifest.files?.includes("dist")) {
-    throw new Error("Package manifest must include dist in published files");
+  const binEntry = manifest.bin?.["obsidian-intelligence-layer"];
+  if (!binEntry) {
+    throw new Error("Package manifest must expose the obsidian-intelligence-layer binary");
   }
-  if (manifest.bin?.["obsidian-intelligence-layer"] !== "dist/cli.js") {
-    throw new Error("Package manifest must map the CLI binary to dist/cli.js");
+  const binParts = binEntry.split("/");
+  if (!manifest.files?.includes(binParts[0])) {
+    throw new Error(`Package manifest must include ${binParts[0]} in published files`);
   }
   if (manifest.scripts?.prepare !== "npm run build") {
-    throw new Error("Package manifest must build dist during Git installation");
+    throw new Error("Package manifest must build the artifact during Git installation");
+  }
+
+  // The published artifact carries its own runtime code, so installing it must
+  // not drag a dependency tree behind it. Resolving that tree was the dominant
+  // cost of a cold install, so this is a packaging guarantee, not a preference.
+  const runtimeDeps = Object.keys(manifest.dependencies ?? {});
+  if (runtimeDeps.length > 0) {
+    throw new Error(
+      `Published package must declare no runtime dependencies, found: ${runtimeDeps.join(", ")}`,
+    );
   }
 
   await cp(fixtureVault, smokeVault, { recursive: true });
@@ -132,10 +149,9 @@ try {
   const packageRoot = join(
     consumerRoot,
     "node_modules",
-    "@jinlee794",
-    "obsidian-intelligence-layer",
+    ...manifest.name.split("/"),
   );
-  await access(join(packageRoot, "dist", "cli.js"));
+  await access(join(packageRoot, ...binParts));
 
   const executable = join(
     consumerRoot,
@@ -147,7 +163,7 @@ try {
   );
   await access(executable);
 
-  const packagedCli = join(packageRoot, "dist", "cli.js");
+  const packagedCli = join(packageRoot, ...binParts);
 
   // ── The optional semantic component, as a consumer would meet it ──────────
   //

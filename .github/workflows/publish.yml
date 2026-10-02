@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://npm.pkg.github.com'
-          scope: '@jinlee794'
+          scope: '@mcaps-microsoft'
 
       - run: npm ci
       - run: npm run check:release
