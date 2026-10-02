@@ -6,7 +6,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { joinSession, createCanvas, CanvasError } from "@github/copilot-sdk/extension";
-import { PromptBuffer, WRITE_TOOLS, oilToolName, oilToolNameFromQualified } from "./lib/activity.mjs";
+import { OIL_TOOLS, PromptBuffer, WRITE_TOOLS, batchTimings, oilToolName, oilToolNameFromQualified } from "./lib/activity.mjs";
 import { normalizeNotePath, resolveInVault } from "./lib/paths.mjs";
 
 // Every Copilot session runs its own copy of this extension, so keep the idle
@@ -151,7 +151,7 @@ async function captureAfter(call, ts) {
 // Drop stale pending entries (e.g. a write that never completed).
 setInterval(() => {
     const cutoff = Date.now() - 10 * 60_000;
-    for (const m of [pendingById, pendingByPath]) for (const [k, v] of m) if (v.at < cutoff) m.delete(k);
+    for (const m of [pendingById, pendingByPath, callTiming]) for (const [k, v] of m) if (v.at < cutoff) m.delete(k);
 }, 60_000).unref();
 
 // ── Live capture from session events ────────────────────────────────────
@@ -160,6 +160,16 @@ let sessionRecorded = false;
 const prompts = new PromptBuffer();
 // Tool calls identified as OIL at start; other tools never touch SQLite.
 const oilCalls = new Set();
+// toolCallId → { at, mcpStartedAt?, timing?, batchSize? }: what the completion event can't tell us.
+const callTiming = new Map();
+
+function noteTiming(toolCallId, fields) {
+    callTiming.set(toolCallId, { ...callTiming.get(toolCallId), ...fields, at: Date.now() });
+}
+
+function onAssistantMessage(event) {
+    for (const [id, t] of batchTimings(event.data?.toolRequests)) noteTiming(id, t);
+}
 
 async function onToolStart(event) {
     if (!event.data?.toolCallId || !oilToolName(event.data)) return;
@@ -179,7 +189,9 @@ async function onToolComplete(event) {
     if (!oilCalls.delete(event.data?.toolCallId) && !storeOpen) return;
     const [store, { ingestComplete }] = await Promise.all([getStore(), loadHistory()]);
     const ts = event.timestamp || new Date().toISOString();
-    const call = ingestComplete(store, event.data, ts);
+    const { at, ...timing } = callTiming.get(event.data.toolCallId) ?? {};
+    callTiming.delete(event.data.toolCallId);
+    const call = ingestComplete(store, event.data, ts, timing);
     if (!call) return;
     prompts.flushTo(store, session.sessionId, event.data.interactionId);
     const full = store.getCall(event.data.toolCallId);
@@ -402,6 +414,11 @@ session = await joinSession({
     canvases: [canvas],
     hooks: {
         onPreMcpToolCall: async (input) => {
+            // OIL receives the call now — after permission prompts and other hooks — so time it from here.
+            if (input?.toolCallId && OIL_TOOLS.has(input.toolName)) {
+                const ms = Number.isFinite(input.timestamp) ? input.timestamp : Date.now();
+                noteTiming(input.toolCallId, { mcpStartedAt: new Date(ms).toISOString() });
+            }
             try {
                 if (WRITE_TOOLS.has(input.toolName)) await captureBefore(input.toolName, input.arguments, input.toolCallId);
             } catch (err) {
@@ -423,5 +440,6 @@ session = await joinSession({
 });
 
 session.on("user.message", (e) => prompts.add(e.data, e.timestamp || new Date().toISOString()));
+session.on("assistant.message", onAssistantMessage);
 session.on("tool.execution_start", guard(onToolStart));
 session.on("tool.execution_complete", guard(onToolComplete));

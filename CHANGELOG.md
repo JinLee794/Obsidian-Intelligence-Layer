@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2026-10-02
+
+The OIL Vault Activity canvas now reports OIL's real tool latency.
+
+### Fixed
+
+- **Canvas latency was inflated by the tools that ran alongside OIL.** The
+  runtime reports completions for a parallel tool batch only when the whole
+  batch finishes, so an OIL call batched with a slow tool (for example a
+  WorkIQ or sub-agent call) was charged for that tool's time. On a real
+  history this showed `search_vault` at a p95 of 44 s against an actual 2.9 s.
+  Timing now starts when OIL receives the call (`preMcpToolCall`), not when
+  the agent issues it, so permission prompts are excluded too. Calls batched
+  with non-OIL tools are left out of latency stats, and the timeline marks
+  them `≤`, since only an upper bound is known. The latency cards say how
+  many calls were excluded. History is re-imported once to backfill this.
+
 ## [0.8.0] - 2026-10-02
 
 Vaults can now archive stale notes automatically. Archived notes leave the

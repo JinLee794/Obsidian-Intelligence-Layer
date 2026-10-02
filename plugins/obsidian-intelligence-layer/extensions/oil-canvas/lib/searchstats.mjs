@@ -149,7 +149,7 @@ export function computeSearchAnalytics({ calls, touches, interactions }) {
                     st.scoreSum += c.top_score;
                     st.scoreN++;
                 }
-                if (c.duration_ms != null) st.durations.push(c.duration_ms);
+                if (c.duration_ms != null && c.timing !== "masked") st.durations.push(c.duration_ms);
                 st.next[next]++;
             }
 
@@ -176,7 +176,7 @@ export function computeSearchAnalytics({ calls, touches, interactions }) {
                 }
             }
             if (steps.length < MAX_CHAIN_STEPS) {
-                steps.push({ tool: c.tool, mode: c.search_mode, query: c.search_query, hits: c.hits, ms: c.duration_ms, useful, failed, next });
+                steps.push({ tool: c.tool, mode: c.search_mode, query: c.search_query, hits: c.hits, ms: c.timing === "masked" ? null : c.duration_ms, useful, failed, next });
             }
         });
 
