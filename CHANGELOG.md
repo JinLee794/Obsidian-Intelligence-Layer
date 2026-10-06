@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-10-06
+
+`check_vault_health` now checks link integrity, and the link graph follows
+every link Obsidian does.
+
+### Added
+
+- **Broken wikilinks in `check_vault_health`.** The report gains
+  `brokenLinks: [{ path, target }]`: every wikilink the graph cannot resolve,
+  found by the graph's own resolver, so the report can't drift from what
+  traversal sees. The issue list gains "N broken wikilink(s) across M unresolved
+  target(s)".
+  - The check is vault-wide; the `customers` filter still narrows only the
+    customer checks.
+  - Attachment embeds (`![[diagram.png]]`, `![[deck.pdf]]`) are not counted.
+    A missing `[[Note.md]]` still is.
+  - Measured on a 472-note vault: ~0.7 s for the whole call, ~10 KB response.
+
+### Fixed
+
+- **`[[alias]]` links resolve through frontmatter `aliases`.** Obsidian
+  resolves a link to any name in a note's `aliases` (or `alias`, any key case,
+  scalar or list); OIL resolved none of them. So those links had no backlinks
+  and were invisible to `get_related_entities`.
+  - A real title or filename always wins over another note's alias.
+  - Alias changes follow the incremental-update rules titles already use:
+    - adding or dropping an alias re-resolves the vault once per batch;
+    - when an alias's owner is deleted, another note that declares it takes
+      it over;
+    - a body edit that keeps the same aliases stays on the cheap path.
+- **Links inside markdown tables.** In a table, Obsidian writes
+  `[[Target\|Alias]]` with an escaped pipe. OIL kept the `\` as part of the
+  target, so every such link dangled. On a 472-note vault, this fix alone took
+  unresolved links from 69 to 32; the remaining 32 point at notes that don't
+  exist.
+  - An existing `_oil-graph.json` is repaired as it loads, with no rebuild and
+    no format change. Older and newer installs can keep sharing a vault.
+
 ## [0.8.4] - 2026-10-06
 
 Past-session history in the canvas now syncs itself, cheaply and quietly.

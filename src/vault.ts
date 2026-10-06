@@ -206,6 +206,15 @@ export function parseSections(content: string): Map<string, string> {
 }
 
 /**
+ * Normalize a raw wikilink target. Inside a markdown table Obsidian writes the
+ * alias pipe escaped, as `[[Target\|Alias]]`; the `\` belongs to the escape,
+ * not the target.
+ */
+export function normalizeWikilinkTarget(raw: string): string {
+  return raw.trim().replace(/\\+$/, "").trim();
+}
+
+/**
  * Extract all `[[wikilinks]]` from content. Returns resolved link targets.
  */
 export function extractWikilinks(content: string): string[] {
@@ -213,7 +222,8 @@ export function extractWikilinks(content: string): string[] {
   const regex = /\[\[([^\]|#]+)(?:[|#][^\]]*)?]]/g;
   let match;
   while ((match = regex.exec(content)) !== null) {
-    links.push(match[1].trim());
+    const target = normalizeWikilinkTarget(match[1]);
+    if (target) links.push(target);
   }
   return [...new Set(links)];
 }

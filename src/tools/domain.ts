@@ -320,7 +320,7 @@ export function registerDomainTools(
     "check_vault_health",
     {
       description:
-        "Comprehensive vault health report. Surfaces stale Agent Insights (>30d), incomplete opportunity/milestone IDs, missing sections, orphaned meetings, and roster gaps.",
+        "Comprehensive vault health report. Surfaces stale Agent Insights (>30d), incomplete opportunity/milestone IDs, missing sections, orphaned meetings, broken wikilinks, and roster gaps.",
       inputSchema: {
         customers: z
           .array(z.string())
@@ -363,6 +363,12 @@ export function registerDomainTools(
       if (report.orphanedMeetings.length > 0) {
         issues.push(
           `${report.orphanedMeetings.length} meeting(s) not linked to tracked customers`,
+        );
+      }
+      if (report.brokenLinks.length > 0) {
+        const distinct = new Set(report.brokenLinks.map((l) => l.target));
+        issues.push(
+          `${report.brokenLinks.length} broken wikilink(s) across ${distinct.size} unresolved target(s)`,
         );
       }
 

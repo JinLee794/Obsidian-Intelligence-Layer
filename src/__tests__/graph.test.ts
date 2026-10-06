@@ -1,7 +1,7 @@
 /**
  * Tests for graph.ts — GraphIndex: build, queries, incremental updates, persistence.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { GraphIndex } from "../graph.js";
 import { mkdtemp, rm, mkdir, writeFile, readFile, unlink, stat, utimes } from "node:fs/promises";
 import { join } from "node:path";
@@ -172,6 +172,216 @@ describe("GraphIndex — full build", () => {
   it("resolves title to path", () => {
     expect(graph.resolveTitle("Contoso")).toBe("Customers/Contoso.md");
     expect(graph.resolveTitle("Alice Smith")).toBe("People/Alice Smith.md");
+  });
+});
+
+describe("GraphIndex — frontmatter alias resolution", () => {
+  let aliasDir: string;
+  let aliasVault: string;
+  let graph: GraphIndex;
+
+  beforeAll(async () => {
+    aliasDir = await mkdtemp(join(tmpdir(), "oil-alias-"));
+    aliasVault = join(aliasDir, "vault");
+    await mkdir(join(aliasVault, "Customers/BCBS OF KANSAS CITY"), { recursive: true });
+    await mkdir(join(aliasVault, "People"), { recursive: true });
+    await mkdir(join(aliasVault, "Reference"), { recursive: true });
+
+    await writeFile(
+      join(aliasVault, "Customers/BCBS OF KANSAS CITY/BCBS OF KANSAS CITY.md"),
+      `---
+type: Customer
+tags: [customer]
+aliases:
+  - "BlueKC"
+  - "BCBS OF KANSAS CITY"
+---
+
+# BCBS OF KANSAS CITY
+`,
+      "utf-8",
+    );
+
+    // Singular \`alias\`, scalar value, and a non-canonical key case.
+    await writeFile(
+      join(aliasVault, "Reference/My Profile.md"),
+      `---
+type: Reference
+Alias: "Jin Lee (HLS US SE)"
+---
+
+# My Profile
+`,
+      "utf-8",
+    );
+
+    // A real note whose filename collides with another note's alias.
+    await writeFile(
+      join(aliasVault, "People/Shadow.md"),
+      `---
+type: Person
+---
+
+# Shadow
+`,
+      "utf-8",
+    );
+
+    await writeFile(
+      join(aliasVault, "People/Decoy.md"),
+      `---
+type: Person
+aliases: ["Shadow"]
+---
+
+# Decoy
+`,
+      "utf-8",
+    );
+
+    await writeFile(
+      join(aliasVault, "People/Linker.md"),
+      `---
+type: Person
+---
+
+# Linker
+
+Works on [[BlueKC | AI-Assisted Prior Authorization]] with [[Jin Lee (HLS US SE)]].
+Also mentions [[Shadow]].
+`,
+      "utf-8",
+    );
+
+    graph = new GraphIndex(aliasVault);
+    await graph.build();
+  });
+
+  afterAll(async () => {
+    await rm(aliasDir, { recursive: true, force: true });
+  });
+
+  it("resolves a wikilink that targets a frontmatter alias", () => {
+    const linker = graph.getNode("People/Linker.md");
+    expect(linker!.outLinks.has("Customers/BCBS OF KANSAS CITY/BCBS OF KANSAS CITY.md")).toBe(true);
+  });
+
+  it("records the backlink on the aliased note", () => {
+    const customer = graph.getNode("Customers/BCBS OF KANSAS CITY/BCBS OF KANSAS CITY.md");
+    expect(customer!.inLinks.has("People/Linker.md")).toBe(true);
+  });
+
+  it("accepts singular `alias` and a case-variant frontmatter key", () => {
+    const linker = graph.getNode("People/Linker.md");
+    expect(linker!.outLinks.has("Reference/My Profile.md")).toBe(true);
+  });
+
+  it("prefers a real filename over another note's alias", () => {
+    const linker = graph.getNode("People/Linker.md");
+    expect(linker!.outLinks.has("People/Shadow.md")).toBe(true);
+    expect(linker!.outLinks.has("People/Decoy.md")).toBe(false);
+  });
+
+  it("survives a persistence round-trip", async () => {
+    await graph.saveToDisk("_oil-graph.json");
+    const reloaded = new GraphIndex(aliasVault);
+    expect(await reloaded.loadFromDisk("_oil-graph.json")).toBe(true);
+
+    const linker = reloaded.getNode("People/Linker.md");
+    expect(linker!.outLinks.has("Customers/BCBS OF KANSAS CITY/BCBS OF KANSAS CITY.md")).toBe(true);
+    expect(linker!.outLinks.has("Reference/My Profile.md")).toBe(true);
+  });
+
+  it("drops alias entries when the aliased note is removed", async () => {
+    const scratch = new GraphIndex(aliasVault);
+    await scratch.build();
+    scratch.removeNote("Customers/BCBS OF KANSAS CITY/BCBS OF KANSAS CITY.md");
+
+    const linker = scratch.getNode("People/Linker.md");
+    expect(linker!.outLinks.has("Customers/BCBS OF KANSAS CITY/BCBS OF KANSAS CITY.md")).toBe(false);
+  });
+});
+
+describe("GraphIndex — alias changes on the incremental path", () => {
+  let dir: string;
+  let vault: string;
+
+  const note = (title: string, aliases: string[] = [], body = "") =>
+    `---\naliases: [${aliases.map((a) => JSON.stringify(a)).join(", ")}]\n---\n\n# ${title}\n\n${body}\n`;
+
+  async function freshLinks(path: string): Promise<string[]> {
+    const rebuilt = new GraphIndex(vault);
+    await rebuilt.build();
+    return [...(rebuilt.getNode(path)?.outLinks ?? [])].sort();
+  }
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "oil-alias-inc-"));
+    vault = join(dir, "vault");
+    await mkdir(vault, { recursive: true });
+    await writeFile(join(vault, "Linker.md"), note("Linker", [], "See [[Nick]]."), "utf-8");
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("an edit that adds an alias resolves a link that was dangling", async () => {
+    await writeFile(join(vault, "Alpha.md"), note("Alpha"), "utf-8");
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    expect(graph.getBrokenLinks()).toEqual([{ path: "Linker.md", target: "Nick" }]);
+
+    await writeFile(join(vault, "Alpha.md"), note("Alpha", ["Nick"]), "utf-8");
+    await graph.updateNote("Alpha.md");
+
+    expect(graph.getNode("Linker.md")!.outLinks.has("Alpha.md")).toBe(true);
+    expect(graph.getNode("Alpha.md")!.inLinks.has("Linker.md")).toBe(true);
+    expect(graph.getBrokenLinks()).toEqual([]);
+    expect([...graph.getNode("Linker.md")!.outLinks].sort()).toEqual(await freshLinks("Linker.md"));
+  });
+
+  it("an edit that drops an alias breaks the links that went through it", async () => {
+    await writeFile(join(vault, "Alpha.md"), note("Alpha", ["Nick"]), "utf-8");
+    const graph = new GraphIndex(vault);
+    await graph.build();
+    expect(graph.getBrokenLinks()).toEqual([]);
+
+    await writeFile(join(vault, "Alpha.md"), note("Alpha"), "utf-8");
+    await graph.updateNote("Alpha.md");
+
+    expect(graph.getNode("Linker.md")!.outLinks.has("Alpha.md")).toBe(false);
+    expect(graph.getNode("Alpha.md")!.inLinks.has("Linker.md")).toBe(false);
+    expect(graph.getBrokenLinks()).toEqual([{ path: "Linker.md", target: "Nick" }]);
+  });
+
+  it("removing an alias's owner hands the alias to another note that declares it", async () => {
+    await writeFile(join(vault, "Alpha.md"), note("Alpha", ["Nick"]), "utf-8");
+    await writeFile(join(vault, "Gamma.md"), note("Gamma", ["Nick"]), "utf-8");
+    const graph = new GraphIndex(vault);
+    await graph.build();
+
+    const owner = [...graph.getNode("Linker.md")!.outLinks][0];
+    const other = owner === "Alpha.md" ? "Gamma.md" : "Alpha.md";
+    await unlink(join(vault, owner));
+    graph.removeNote(owner);
+
+    expect([...graph.getNode("Linker.md")!.outLinks]).toEqual([other]);
+    expect(graph.getBrokenLinks()).toEqual([]);
+    expect([...graph.getNode("Linker.md")!.outLinks].sort()).toEqual(await freshLinks("Linker.md"));
+  });
+
+  it("a body edit that keeps the same aliases stays on the cheap path", async () => {
+    await writeFile(join(vault, "Alpha.md"), note("Alpha", ["Nick"]), "utf-8");
+    const graph = new GraphIndex(vault);
+    await graph.build();
+
+    const fullPass = vi.spyOn(graph as unknown as { resolveAllBacklinks: () => void }, "resolveAllBacklinks");
+    await writeFile(join(vault, "Alpha.md"), note("Alpha", ["Nick"], "New body text."), "utf-8");
+    await graph.updateNote("Alpha.md");
+
+    expect(fullPass).not.toHaveBeenCalled();
+    expect(graph.getNode("Linker.md")!.outLinks.has("Alpha.md")).toBe(true);
   });
 });
 

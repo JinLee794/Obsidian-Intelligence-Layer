@@ -9,8 +9,18 @@ import { readFile, writeFile, rename, unlink, readdir, stat } from "node:fs/prom
 import { randomUUID } from "node:crypto";
 import { join, dirname, basename, extname } from "node:path";
 import matter from "gray-matter";
-import type { GraphNode, GraphStats, NoteRef, RelatedNoteRef, TagCount } from "./types.js";
-import { listAllNotes, extractWikilinks, isAllowedFile, normalizeLineEndings } from "./vault.js";
+import type {
+  BrokenLink,
+  GraphNode,
+  GraphStats,
+  NoteRef,
+  RelatedNoteRef,
+  TagCount,
+} from "./types.js";
+import { listAllNotes, extractWikilinks, normalizeWikilinkTarget, isAllowedFile, normalizeLineEndings } from "./vault.js";
+
+/** Extensions a wikilink may carry and still target an indexed note. */
+const MARKDOWN_LINK_EXTENSIONS = new Set([".md", ".markdown", ".txt"]);
 
 // ─── Persisted Graph Format ───────────────────────────────────────────────────
 
@@ -110,6 +120,39 @@ export function normalizeNotePath(notePath: string): string {
   return notePath.replace(/\\/g, "/");
 }
 
+/**
+ * Read Obsidian frontmatter aliases. Obsidian accepts both `aliases` and the
+ * singular `alias`, as either a scalar or a list, and OIL matches frontmatter
+ * keys case-insensitively — so all of those spellings resolve here.
+ */
+export function readAliases(frontmatter: Record<string, unknown>): string[] {
+  if (!frontmatter || typeof frontmatter !== "object") return [];
+
+  const aliases: string[] = [];
+  for (const [key, value] of Object.entries(frontmatter)) {
+    const normalized = key.toLowerCase();
+    if (normalized !== "aliases" && normalized !== "alias") continue;
+
+    const candidates = Array.isArray(value) ? value : [value];
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string") continue;
+      const trimmed = candidate.trim();
+      if (trimmed) aliases.push(trimmed);
+    }
+  }
+  return aliases;
+}
+
+/**
+ * True when a wikilink target names a non-markdown file — an attachment embed
+ * such as `![[diagram.png]]`. A bare title like "Jin Lee (HLS US SE)" has no
+ * extension and is never mistaken for one.
+ */
+function isAttachmentTarget(target: string): boolean {
+  const ext = extname(target).toLowerCase();
+  return ext !== "" && !MARKDOWN_LINK_EXTENSIONS.has(ext);
+}
+
 export class GraphIndex {
   /** path → GraphNode */
   private nodes = new Map<string, GraphNode>();
@@ -138,6 +181,14 @@ export class GraphIndex {
    * delete pays one pass over the vault instead of one per file.
    */
   private orphanedNames = new Set<string>();
+  /**
+   * frontmatter alias (lowercase) → path. Kept separate from titleIndex so a
+   * real filename or H1 title always wins over another note's alias, whatever
+   * order notes happen to be indexed in.
+   */
+  private aliasIndex = new Map<string, string>();
+  /** Aliases given up by an edit or removal; the alias analogue of `orphanedNames`. */
+  private orphanedAliases = new Set<string>();
   /** path → raw wikilink targets (before resolution) — kept for persistence */
   private rawOutLinks = new Map<string, string[]>();
   /** path → file mtime (ms) — for incremental rebuild */
@@ -249,6 +300,7 @@ export class GraphIndex {
     this.nodes.clear();
     this.tagIndex.clear();
     this.titleIndex.clear();
+    this.aliasIndex.clear();
     this.rawOutLinks.clear();
     this.fileMtimes.clear();
     this.resetMutationLog();
@@ -267,6 +319,7 @@ export class GraphIndex {
     // Phase 2: Resolve wikilinks → paths and compute backlinks
     this.resolveLinks();
     this.orphanedNames.clear();
+    this.orphanedAliases.clear();
     this._namesDirty = false;
 
     this._lastIndexed = new Date();
@@ -352,6 +405,8 @@ export class GraphIndex {
     // Also index by filename without extension
     const fileName = basename(notePath, extname(notePath));
     this.indexTitle(fileName.toLowerCase(), notePath);
+    // Obsidian resolves `[[alias]]` via frontmatter aliases — mirror that.
+    this.indexAliases(notePath, parsed.frontmatter as Record<string, unknown>);
 
     // Build tag index
     for (const tag of parsed.tags) {
@@ -402,8 +457,38 @@ export class GraphIndex {
   }
 
   /**
+   * Register a note's frontmatter aliases so `[[alias]]` resolves to it.
+   */
+  private indexAliases(
+    notePath: string,
+    frontmatter: Record<string, unknown>,
+  ): void {
+    for (const alias of readAliases(frontmatter)) {
+      const key = alias.toLowerCase();
+      if (this.aliasIndex.get(key) === notePath) continue;
+      this.aliasIndex.set(key, notePath);
+      this._namesDirty = true;
+    }
+  }
+
+  /** Drop aliases this note claims, other than those in `keep`. */
+  private unindexAliases(
+    notePath: string,
+    frontmatter: Record<string, unknown>,
+    keep: ReadonlySet<string> = new Set(),
+  ): void {
+    for (const alias of readAliases(frontmatter)) {
+      const key = alias.toLowerCase();
+      if (keep.has(key) || this.aliasIndex.get(key) !== notePath) continue;
+      this.aliasIndex.delete(key);
+      this.orphanedAliases.add(key);
+      this._namesDirty = true;
+    }
+  }
+
+  /**
    * Resolve a wikilink target to a note path.
-   * Tries: exact path match → title match → filename match.
+   * Tries: exact path match → title match → filename match → frontmatter alias.
    */
   private resolveWikilink(target: string): string | undefined {
     // Direct path match (e.g., "Customers/Contoso")
@@ -411,7 +496,11 @@ export class GraphIndex {
     if (this.nodes.has(withExt)) return withExt;
 
     // Title/filename match
-    return this.titleIndex.get(target.toLowerCase());
+    const byTitle = this.titleIndex.get(target.toLowerCase());
+    if (byTitle) return byTitle;
+
+    // Frontmatter alias match
+    return this.aliasIndex.get(target.toLowerCase());
   }
 
   // ─── Incremental Updates ────────────────────────────────────────────────
@@ -471,6 +560,10 @@ export class GraphIndex {
         if (previousTitle !== note.title.toLowerCase()) {
           this.unindexTitle(previousTitle, key);
         }
+        const nextAliases = new Set(
+          readAliases(note.frontmatter as Record<string, unknown>).map((a) => a.toLowerCase()),
+        );
+        this.unindexAliases(key, existing.frontmatter as Record<string, unknown>, nextAliases);
       }
 
       this.applyNote(note);
@@ -562,6 +655,7 @@ export class GraphIndex {
     this.unindexTitle(title, notePath);
     const fileName = basename(notePath, extname(notePath)).toLowerCase();
     this.unindexTitle(fileName, notePath);
+    this.unindexAliases(notePath, node.frontmatter as Record<string, unknown>);
   }
 
   /**
@@ -605,18 +699,29 @@ export class GraphIndex {
    * but only between notes that are equally valid answers to the name.
    */
   private reclaimOrphanedNames(): void {
-    if (this.orphanedNames.size === 0) return;
     const unclaimed = new Set(
       [...this.orphanedNames].filter((name) => !this.titleIndex.has(name)),
     );
+    const unclaimedAliases = new Set(
+      [...this.orphanedAliases].filter((name) => !this.aliasIndex.has(name)),
+    );
     this.orphanedNames.clear();
-    if (unclaimed.size === 0) return;
+    this.orphanedAliases.clear();
+    if (unclaimed.size === 0 && unclaimedAliases.size === 0) return;
 
     for (const [notePath, node] of this.nodes) {
-      const title = node.title.toLowerCase();
-      if (unclaimed.has(title)) this.indexTitle(title, notePath);
-      const fileName = basename(notePath, extname(notePath)).toLowerCase();
-      if (fileName !== title && unclaimed.has(fileName)) this.indexTitle(fileName, notePath);
+      if (unclaimed.size > 0) {
+        const title = node.title.toLowerCase();
+        if (unclaimed.has(title)) this.indexTitle(title, notePath);
+        const fileName = basename(notePath, extname(notePath)).toLowerCase();
+        if (fileName !== title && unclaimed.has(fileName)) this.indexTitle(fileName, notePath);
+      }
+      if (unclaimedAliases.size > 0) {
+        for (const alias of readAliases(node.frontmatter as Record<string, unknown>)) {
+          const key = alias.toLowerCase();
+          if (unclaimedAliases.has(key)) this.aliasIndex.set(key, notePath);
+        }
+      }
     }
   }
 
@@ -749,11 +854,17 @@ export class GraphIndex {
       this.nodes.clear();
       this.tagIndex.clear();
       this.titleIndex.clear();
+      this.aliasIndex.clear();
       this.rawOutLinks.clear();
       this.fileMtimes.clear();
       this.resetMutationLog();
 
       for (const pn of data.nodes) {
+        // Re-normalize: an index saved by an older release may hold targets
+        // the current parser no longer produces (e.g. a table link's `\`).
+        const rawLinks = Array.isArray(pn.rawOutLinks)
+          ? [...new Set(pn.rawOutLinks.map(normalizeWikilinkTarget).filter(Boolean))]
+          : pn.rawOutLinks;
         const node: GraphNode = {
           path: pn.path,
           title: pn.title,
@@ -761,16 +872,17 @@ export class GraphIndex {
           headings: pn.headings ?? [],
           bodySnippet: pn.bodySnippet ?? "",
           frontmatter: pn.frontmatter,
-          outLinks: new Set(pn.rawOutLinks), // Will be resolved below
+          outLinks: new Set(rawLinks), // Will be resolved below
           inLinks: new Set(),
         };
 
         this.nodes.set(pn.path, node);
-        this.rawOutLinks.set(pn.path, pn.rawOutLinks);
+        this.rawOutLinks.set(pn.path, rawLinks);
         this.fileMtimes.set(pn.path, pn.lastModified);
         this.titleIndex.set(pn.title.toLowerCase(), pn.path);
         const fileName = basename(pn.path, extname(pn.path));
         this.titleIndex.set(fileName.toLowerCase(), pn.path);
+        this.indexAliases(pn.path, pn.frontmatter as Record<string, unknown>);
 
         for (const tag of pn.tags) {
           let paths = this.tagIndex.get(tag);
@@ -785,6 +897,7 @@ export class GraphIndex {
       // Resolve wikilinks → paths and compute backlinks
       this.resolveLinks();
       this.orphanedNames.clear();
+      this.orphanedAliases.clear();
       this._namesDirty = false;
 
       this._lastIndexed = new Date(data.builtAt);
@@ -1067,6 +1180,26 @@ export class GraphIndex {
    */
   resolveTitle(title: string): string | undefined {
     return this.titleIndex.get(title.toLowerCase());
+  }
+
+  /**
+   * Wikilink targets that resolve to no note, paired with the note that wrote
+   * them. Runs the graph's own resolver, so anything reported here is exactly a
+   * link the graph could not follow — the report cannot drift from reality.
+   *
+   * Attachment embeds (`![[chart.png]]`) are skipped: the graph only indexes
+   * markdown, so a non-markdown target is a file reference, not a broken link.
+   */
+  getBrokenLinks(): BrokenLink[] {
+    const broken: BrokenLink[] = [];
+    for (const [path, targets] of this.rawOutLinks) {
+      for (const target of targets) {
+        if (isAttachmentTarget(target)) continue;
+        if (this.resolveWikilink(target)) continue;
+        broken.push({ path, target });
+      }
+    }
+    return broken;
   }
 
   /**

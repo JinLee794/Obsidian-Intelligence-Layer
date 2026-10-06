@@ -341,6 +341,14 @@ export interface StructuralIssue {
   detail: string;
 }
 
+/** A wikilink whose target resolves to no note in the vault. */
+export interface BrokenLink {
+  /** Note containing the link. */
+  path: string;
+  /** Raw wikilink target that failed to resolve. */
+  target: string;
+}
+
 /** Vault-level health summary. */
 export interface VaultHealthReport {
   totalCustomers: number;
@@ -348,4 +356,5 @@ export interface VaultHealthReport {
   orphanedMeetings: string[];
   rosterGaps: string[];
   structuralIssues: StructuralIssue[];
+  brokenLinks: BrokenLink[];
 }

@@ -152,6 +152,7 @@ export async function checkVaultHealth(
       orphanedMeetings: [],
       rosterGaps: [],
       structuralIssues: [],
+      brokenLinks: graph.getBrokenLinks(),
     };
   }
 
@@ -181,12 +182,17 @@ export async function checkVaultHealth(
   // Detect structural issues (flat-layout customers, misplaced entities)
   const structuralIssues = await detectStructuralIssues(vaultPath, config);
 
+  // Link integrity — wikilinks the graph cannot follow. Vault-wide, so it is
+  // not narrowed by the customer filter.
+  const brokenLinks = graph.getBrokenLinks();
+
   return {
     totalCustomers: customerNames.length,
     customers,
     orphanedMeetings,
     rosterGaps: [], // Populated by copilot after CRM comparison
     structuralIssues,
+    brokenLinks,
   };
 }
 
