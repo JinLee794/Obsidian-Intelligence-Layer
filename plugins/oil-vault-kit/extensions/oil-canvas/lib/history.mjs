@@ -1,5 +1,4 @@
 import { closeSync, createReadStream, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
-import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { sessionStateDir } from "./paths.mjs";
 import { analyzeResult, batchTimings, compactArgs, oilToolName, resultTextOf, touchesFromArgs } from "./activity.mjs";
@@ -69,19 +68,33 @@ function readWorkspaceMeta(dir) {
     }
 }
 
+// A log is resumed from the last point where no OIL call was in flight. If a call never completes
+// (e.g. the session was killed), stop waiting for it once this much log has accumulated after it.
+const MAX_UNSETTLED_BYTES = 4 * 1024 * 1024;
+// Bytes just before the resume offset, compared on the next pass to detect a rewritten log.
+const TAIL_BYTES = 64;
+const MAX_CARRY_PROMPT = 4000;
+// Only these event types are decoded; every other line is skipped after peeking at its prefix.
+const WANTED = ['{"type":"user.message"', '{"type":"assistant.message"', '{"type":"hook.start"', '{"type":"tool.execution_start"', '{"type":"tool.execution_complete"'];
+const PEEK = 40;
+
 /**
  * Import OIL tool calls from Copilot session logs (`session-state/<id>/events.jsonl`).
- * Incremental: files whose size and mtime are unchanged since the last import are skipped.
+ * Incremental: unchanged logs are skipped, and a log that grew is read only from where the last pass
+ * settled, so a frequent sync costs about as much as stat-ing the session folders.
+ * `full` forgets every resume point and re-reads all logs from the start.
  */
-export async function importHistory(store, { onProgress, signal } = {}) {
+export async function importHistory(store, { onProgress, signal, full = false } = {}) {
     const root = sessionStateDir();
     let dirs = [];
     try {
         dirs = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
     } catch {
-        return { files: 0, scanned: 0, skipped: 0, calls: 0 };
+        return { files: 0, scanned: 0, skipped: 0, calls: 0, bytes: 0, sessionsWithOil: 0 };
     }
-    const stats = { files: dirs.length, scanned: 0, skipped: 0, calls: 0, sessionsWithOil: 0 };
+    if (full) store.clearImports();
+    const before = store.countHistoryCalls();
+    const stats = { files: dirs.length, scanned: 0, skipped: 0, calls: 0, bytes: 0, sessionsWithOil: 0 };
     let i = 0;
     for (const id of dirs) {
         if (signal?.aborted) break;
@@ -99,30 +112,49 @@ export async function importHistory(store, { onProgress, signal } = {}) {
             stats.skipped++;
             continue;
         }
-        const found = await importFile(store, id, file);
-        if (found > 0) {
+        let from = 0;
+        let carry = null;
+        if (prev?.read_to != null && prev.read_to <= st.size && readTail(file, prev.read_to) === prev.tail) {
+            from = prev.read_to;
+            carry = parseCarry(prev.carry);
+        }
+        const r = await importFile(store, id, file, { from, to: st.size, carry });
+        if (r.calls > 0) {
             stats.sessionsWithOil++;
             const meta = readWorkspaceMeta(dir);
             store.upsertSession({ sessionId: id, name: meta.name, cwd: meta.cwd, ts: null });
         }
-        store.markImported(file, st.size, st.mtimeMs);
-        stats.calls += found;
+        store.markImported(file, st.size, st.mtimeMs, { readTo: r.settled, tail: readTail(file, r.settled), carry: r.carry ? JSON.stringify(r.carry) : null });
+        stats.bytes += st.size - from;
         stats.scanned++;
         if (onProgress && (i % 25 === 0 || i === dirs.length)) onProgress({ ...stats, done: i });
         // Yield so live events and HTTP requests stay responsive during a long import.
         await new Promise((r) => setImmediate(r));
     }
+    stats.calls = store.countHistoryCalls() - before;
     return stats;
 }
 
-async function importFile(store, sessionId, file) {
+/**
+ * Read one log from byte `from` to byte `to`. Returns the OIL calls seen, the offset to resume from
+ * next time (`settled`: just after the last line where no OIL call was in flight) and the prompt that
+ * was current there (`carry`), since calls after the resume point may still answer it.
+ * Re-reading lines after `settled` is harmless: every write below is idempotent.
+ */
+async function importFile(store, sessionId, file, { from = 0, to, carry = null } = {}) {
     const started = new Set();
     const prompts = new Map();
     const answered = new Set();
     const timings = new Map();
     const mcpStarts = new Map();
+    // Requested or started OIL calls that haven't completed yet.
+    const pending = new Set();
+    let lastPrompt = carry?.prompt?.id ? carry.prompt : null;
+    if (lastPrompt) prompts.set(lastPrompt.id, { ts: lastPrompt.ts, prompt: lastPrompt.prompt });
     let calls = 0;
-    const rl = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+    let pos = from;
+    let settled = from;
+    let settledPrompt = lastPrompt;
     const batch = [];
     const flush = () => {
         if (!batch.length) return;
@@ -131,43 +163,81 @@ async function importFile(store, sessionId, file) {
         });
         batch.length = 0;
     };
-    for await (const line of rl) {
+    const onLine = (line) => {
         if (line.startsWith('{"type":"user.message"')) {
             const ev = parse(line);
-            if (ev?.data?.interactionId) prompts.set(ev.data.interactionId, { ts: ev.timestamp, prompt: ev.data.content });
-            continue;
+            const id = ev?.data?.interactionId;
+            if (id) {
+                const prompt = typeof ev.data.content === "string" ? ev.data.content : null;
+                prompts.set(id, { ts: ev.timestamp, prompt });
+                lastPrompt = { id, ts: ev.timestamp ?? null, prompt: prompt ? prompt.slice(0, MAX_CARRY_PROMPT) : null };
+            }
+            return;
         }
         if (line.startsWith('{"type":"assistant.message"')) {
-            if (!line.includes('"toolRequests":[{') || !line.includes('"mcpToolName"')) continue;
+            if (!line.includes('"toolRequests":[{') || !line.includes('"mcpToolName"')) return;
             const ev = parse(line);
-            for (const [id, t] of batchTimings(ev?.data?.toolRequests)) timings.set(id, t);
-            continue;
+            for (const [id, t] of batchTimings(ev?.data?.toolRequests)) {
+                timings.set(id, t);
+                pending.add(id);
+            }
+            return;
         }
         if (line.startsWith('{"type":"hook.start"')) {
-            if (!line.includes('"preMcpToolCall"')) continue;
+            if (!line.includes('"preMcpToolCall"')) return;
             const ev = parse(line);
             const id = ev?.data?.input?.toolCallId;
             if (id && started.has(id)) mcpStarts.set(id, ev.timestamp);
-            continue;
+            return;
         }
-        if (!line.includes('"type":"tool.execution_')) continue;
         if (line.startsWith('{"type":"tool.execution_start"')) {
-            if (!line.includes('"mcpToolName"')) continue;
+            if (!line.includes('"mcpToolName"')) return;
             const ev = parse(line);
-            if (!ev?.data?.toolCallId || !oilToolName(ev.data)) continue;
+            if (!ev?.data?.toolCallId || !oilToolName(ev.data)) return;
             started.add(ev.data.toolCallId);
+            pending.add(ev.data.toolCallId);
             calls++;
             batch.push(() => ingestStart(store, sessionId, ev.data, ev.timestamp, "history"));
         } else if (line.startsWith('{"type":"tool.execution_complete"')) {
             const m = /"toolCallId":"([^"]+)"/.exec(line);
-            if (!m || !started.has(m[1])) continue;
+            if (!m) return;
+            pending.delete(m[1]);
+            if (!started.has(m[1])) return;
             const ev = parse(line);
-            if (!ev) continue;
+            if (!ev) return;
             if (ev.data?.interactionId) answered.add(ev.data.interactionId);
             const timing = { mcpStartedAt: mcpStarts.get(m[1]) ?? null, ...timings.get(m[1]) };
             batch.push(() => ingestComplete(store, ev.data, ev.timestamp, timing));
         }
-        if (batch.length >= 200) flush();
+    };
+    if (to > from) {
+        // Split on raw bytes so offsets stay exact, and only decode lines of the event types we use.
+        // A trailing line without a newline is still being written; it is left for the next pass.
+        let parts = [];
+        for await (const chunk of createReadStream(file, { start: from, end: to - 1 })) {
+            let i = 0;
+            let nl;
+            while ((nl = chunk.indexOf(10, i)) !== -1) {
+                const piece = chunk.subarray(i, nl);
+                const buf = parts.length ? Buffer.concat([...parts, piece]) : piece;
+                parts = [];
+                pos += buf.length + 1;
+                i = nl + 1;
+                const head = buf.toString("utf8", 0, Math.min(PEEK, buf.length));
+                if (WANTED.some((w) => head.startsWith(w))) {
+                    let line = buf.toString("utf8");
+                    if (line.endsWith("\r")) line = line.slice(0, -1);
+                    onLine(line);
+                }
+                if (pending.size && pos - settled > MAX_UNSETTLED_BYTES) pending.clear();
+                if (!pending.size) {
+                    settled = pos;
+                    settledPrompt = lastPrompt;
+                }
+                if (batch.length >= 200) flush();
+            }
+            if (i < chunk.length) parts.push(chunk.subarray(i));
+        }
     }
     for (const id of answered) {
         const p = prompts.get(id);
@@ -179,7 +249,33 @@ async function importFile(store, sessionId, file) {
         const ctx = first?.type === "session.start" ? first.data : null;
         store.upsertSession({ sessionId, cwd: ctx?.context?.cwd ?? null, ts: ctx?.startTime ?? null });
     }
-    return calls;
+    return { calls, settled, carry: settledPrompt ? { prompt: settledPrompt } : null };
+}
+
+/** The bytes just before `offset`, base64; a mismatch on the next pass means the log was rewritten. */
+function readTail(file, offset) {
+    if (!offset) return "";
+    let fd;
+    try {
+        fd = openSync(file, "r");
+        const len = Math.min(TAIL_BYTES, offset);
+        const buf = Buffer.alloc(len);
+        const n = readSync(fd, buf, 0, len, offset - len);
+        return buf.subarray(0, n).toString("base64");
+    } catch {
+        return null;
+    } finally {
+        if (fd !== undefined) closeSync(fd);
+    }
+}
+
+function parseCarry(text) {
+    if (!text) return null;
+    try {
+        return JSON.parse(text);
+    } catch {
+        return null;
+    }
 }
 
 function readFirstLine(file) {

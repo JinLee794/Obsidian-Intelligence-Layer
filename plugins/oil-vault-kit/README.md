@@ -59,7 +59,7 @@ export OBSIDIAN_VAULT_PATH="/absolute/path/to/your/vault"
 Verify before opening a session:
 
 ```bash
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3 -- \
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.4 -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
@@ -192,9 +192,13 @@ It shows what OIL did to your vault in the current session.
   - the most-touched notes.
 
   You can scope it to this session or all sessions, over 7, 30 or 90 days.
-  **Import past sessions** backfills from the Copilot CLI's own session logs.
-  On one real machine, 1,807 sessions imported in about 12s; later imports
-  skip unchanged logs.
+  History from your other Copilot sessions **syncs automatically** every few
+  minutes while the panel is visible; the header shows "Synced 2m ago", and
+  you can click it to sync now. Each sync resumes every session log where the
+  last one stopped, so a routine pass reads only new bytes: about 100 ms and a
+  few hundred KB across ~1,950 sessions. The first sync on a new machine reads
+  everything (1,807 sessions in about 12s). Hidden panels don't sync, and with
+  several Copilot sessions open only one does the work.
 
   The **Search** sub-view shows how hard the agent worked to find things.
   An "answer" is one user prompt. A search "opened" a result when the agent
@@ -215,9 +219,9 @@ It shows what OIL did to your vault in the current session.
   - Repeated zero-hit queries, with **Fix with Copilot** to close the gaps
     (for example, a missing customer alias).
 
-  Search details are captured live. For older sessions, run
-  **Import past sessions** again; it re-backfills logs imported before this
-  feature existed.
+  Search details are captured live. For older sessions, click
+  **Rescan all logs** on the Search view's banner; it re-reads logs synced
+  before this feature existed.
 - **Health**: a vault hygiene scan with a 0–100 score and a letter grade.
   - It checks for broken links, orphan notes, empty notes, duplicate names,
     missing frontmatter, untagged and stale notes, and unused attachments.
@@ -297,7 +301,7 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 `.mcp.json` pins the server to a release tag so installs are reproducible:
 
 ```
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3 -- obsidian-intelligence-layer mcp
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.4 -- obsidian-intelligence-layer mcp
 ```
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
@@ -329,8 +333,8 @@ repository is not considered a durable dependency — change the one line in
 `.mcp.json`:
 
 ```diff
-- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3",
-+ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.3",
+- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.4",
++ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.4",
 ```
 
 and confirm that every consumer has git credentials for the org available to

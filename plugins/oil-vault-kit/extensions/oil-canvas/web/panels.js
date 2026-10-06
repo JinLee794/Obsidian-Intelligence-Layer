@@ -43,6 +43,18 @@ export function kpi(value, label, { ic, tone, spark, sub } = {}) {
     );
 }
 
+/** Manual "sync past sessions now" button; shows progress while any sync is running. */
+export function syncNowButton({ primary = false } = {}) {
+    const busy = S.importing;
+    const pct = busy?.files ? ` ${Math.round((100 * busy.done) / busy.files)}%` : "";
+    return h(
+        "button",
+        { class: `btn${primary ? " primary" : ""}${busy ? " syncing" : ""}`, onclick: () => A.startImport(), disabled: Boolean(busy), title: "Read your Copilot session logs for OIL calls made since the last sync" },
+        icon("refresh", 14),
+        busy ? `Syncing past sessions…${pct}` : "Sync now",
+    );
+}
+
 export function emptyState(ic, title, text, ...actions) {
     return h(
         "div",
@@ -73,7 +85,7 @@ export function activityView() {
                 S.scope === "session" ? "No OIL activity in this session yet" : "No OIL activity recorded yet",
                 "Notes OIL reads, writes, or surfaces appear here live as Copilot calls the vault tools.",
                 S.scope === "session" ? h("button", { class: "btn", onclick: () => A.setScope("all") }, "Show all sessions") : null,
-                h("button", { class: "btn", onclick: A.startImport, disabled: Boolean(S.importing) }, icon("refresh", 14), S.importing ? "Importing…" : "Import past sessions"),
+                syncNowButton(),
                 S.state?.vault ? h("button", { class: "btn primary", onclick: () => A.setTab("explorer") }, icon("folderOpen", 14), "Browse the vault") : null,
             ),
         ];

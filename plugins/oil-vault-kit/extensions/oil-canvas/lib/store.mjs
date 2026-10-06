@@ -91,6 +91,11 @@ function migrate(db) {
     for (const [name, type] of Object.entries(CALL_COLUMNS)) {
         if (!have.has(name)) db.exec(`ALTER TABLE tool_calls ADD COLUMN ${name} ${type}`);
     }
+    // Resume point for a log that grew (see importFile in history.mjs). NULL = re-read from the start.
+    const haveImport = new Set(db.prepare(`PRAGMA table_info(imports)`).all().map((c) => c.name));
+    for (const [name, type] of Object.entries({ read_to: "INTEGER", tail: "TEXT", carry: "TEXT" })) {
+        if (!haveImport.has(name)) db.exec(`ALTER TABLE imports ADD COLUMN ${name} ${type}`);
+    }
     db.exec(`CREATE INDEX IF NOT EXISTS ix_calls_interaction ON tool_calls(interaction_id)`);
     const v = db.prepare(`SELECT value FROM meta WHERE key = 'import_version'`).get()?.value;
     if (v !== IMPORT_VERSION) {
@@ -141,7 +146,7 @@ export class ActivityStore {
                                 cwd = COALESCE(excluded.cwd, sessions.cwd),
                                 first_seen = MIN(COALESCE(sessions.first_seen, excluded.first_seen), COALESCE(excluded.first_seen, sessions.first_seen)),
                                 last_seen = MAX(COALESCE(sessions.last_seen, excluded.last_seen), COALESCE(excluded.last_seen, sessions.last_seen))`),
-            getImport: s(`SELECT size, mtime_ms FROM imports WHERE file = ?`),
+            getImport: s(`SELECT size, mtime_ms, read_to, tail, carry FROM imports WHERE file = ?`),
             setSearch: s(`UPDATE tool_calls SET search_query = ?, search_mode = ?, hits = ?, top_score = ? WHERE tool_call_id = ?`),
             setInteractionOfCall: s(`UPDATE tool_calls SET interaction_id = COALESCE(?, interaction_id), turn_id = COALESCE(?, turn_id)
                                      WHERE tool_call_id = ?`),
@@ -149,8 +154,9 @@ export class ActivityStore {
                                   ON CONFLICT(interaction_id) DO UPDATE SET
                                     ts = COALESCE(interactions.ts, excluded.ts),
                                     prompt = COALESCE(interactions.prompt, excluded.prompt)`),
-            setImport: s(`INSERT INTO imports (file, size, mtime_ms) VALUES (?, ?, ?)
-                          ON CONFLICT(file) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms`),
+            setImport: s(`INSERT INTO imports (file, size, mtime_ms, read_to, tail, carry) VALUES (?, ?, ?, ?, ?, ?)
+                          ON CONFLICT(file) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms,
+                            read_to = excluded.read_to, tail = excluded.tail, carry = excluded.carry`),
         };
     }
 
@@ -220,8 +226,16 @@ export class ActivityStore {
         return this.q.getImport.get(file) ?? null;
     }
 
-    markImported(file, size, mtimeMs) {
-        this.q.setImport.run(file, size, mtimeMs);
+    markImported(file, size, mtimeMs, { readTo = null, tail = null, carry = null } = {}) {
+        this.q.setImport.run(file, size, mtimeMs, readTo, tail, carry);
+    }
+
+    clearImports() {
+        this.db.exec(`DELETE FROM imports`);
+    }
+
+    countHistoryCalls() {
+        return this.db.prepare(`SELECT COUNT(*) AS n FROM tool_calls WHERE source = 'history'`).get().n;
     }
 
     // ── Read models for the canvas ──────────────────────────────────────

@@ -2,7 +2,7 @@
 import { h, n, ago, ms, compact, noteName, noteFolder, icon, WRITE_TOOLS } from "./dom.js";
 import { S, A } from "./state.js";
 import { PALETTE, fillDays, areaChart, donut, calendarHeatmap, punchcard, histogram, latencyRanges, treemap, gauge, sparkline, rankList, columnChart, percentLines, bubbleScatter, stackedBars, funnel } from "./charts.js";
-import { kpi, emptyState, skeletonCards, skeletonList, vaultBanners } from "./panels.js";
+import { kpi, emptyState, skeletonCards, skeletonList, vaultBanners, syncNowButton } from "./panels.js";
 
 const card = (title, ic, body, { cls = "", extra = null, sub = null } = {}) =>
     h("section", { class: `card ${cls}` }, h("div", { class: "card-h" }, icon(ic, 15), h("h3", null, title), sub ? h("span", { class: "muted small" }, sub) : null, h("span", { class: "grow" }), extra), body);
@@ -12,23 +12,6 @@ const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", 
 const hourLabel = (hr) => (hr === 0 ? "12 am" : hr === 12 ? "12 pm" : hr < 12 ? `${hr} am` : `${hr - 12} pm`);
 
 // ── Analytics ───────────────────────────────────────────────────────────
-
-function importBanner() {
-    if (!S.lastImport) return null;
-    return h(
-        "div",
-        { class: `banner ${S.lastImport.error ? "warn" : "info"}` },
-        icon(S.lastImport.error ? "alert" : "check", 15),
-        h(
-            "span",
-            { class: "grow" },
-            S.lastImport.error
-                ? `Import failed: ${S.lastImport.error}`
-                : `${S.lastImport.auto ? "History was over a day old, so it refreshed automatically: imported" : "Imported"} ${n(S.lastImport.calls)} OIL calls from ${n(S.lastImport.scanned)} changed session logs (${n(S.lastImport.skipped)} unchanged skipped) in ${ms(S.lastImport.elapsedMs)}.`,
-        ),
-        h("button", { class: "icon-btn", title: "Dismiss", onclick: () => ((S.lastImport = null), A.render()) }, icon("x", 14)),
-    );
-}
 
 function analyticsToolbar() {
     return h(
@@ -52,19 +35,11 @@ function analyticsToolbar() {
                 [0, "All"],
             ].map(([d, label]) => h("button", { "aria-pressed": String(S.days === d), onclick: () => A.setDays(d) }, label)),
         ),
-        h("span", { class: "grow" }),
-        S.importing ? h("div", { class: "progress", title: "Importing" }, h("div", { style: { width: `${S.importing.files ? Math.round((100 * S.importing.done) / S.importing.files) : 5}%` } })) : null,
-        h(
-            "button",
-            { class: "btn", onclick: A.startImport, disabled: Boolean(S.importing), title: "Scan Copilot session logs for past OIL tool calls" },
-            icon("refresh", 14),
-            S.importing ? `Importing ${n(S.importing.done)}/${n(S.importing.files)}…` : "Import past sessions",
-        ),
     );
 }
 
 export function analyticsView() {
-    const out = [analyticsToolbar(), importBanner()].filter(Boolean);
+    const out = [analyticsToolbar()];
     if (S.analyticsView === "search") return [...out, ...searchView()];
     const a = S.analytics;
     if (!a) return [...out, skeletonCards(6), skeletonList(6)];
@@ -309,9 +284,9 @@ function searchView() {
                 "search",
                 "No OIL searches yet",
                 S.scope === "session"
-                    ? "Searches the agent runs in this session will show up here. Switch to All sessions, or import past sessions to backfill."
-                    : "Import past sessions to backfill search history from Copilot session logs.",
-                S.scope === "session" ? h("button", { class: "btn", onclick: () => A.setScope("all") }, "Show all sessions") : h("button", { class: "btn primary", onclick: A.startImport, disabled: Boolean(S.importing) }, icon("refresh", 14), "Import past sessions"),
+                    ? "Searches the agent runs in this session will show up here. Switch to All sessions to see history from your other Copilot sessions."
+                    : "Searches from your Copilot sessions sync here automatically every few minutes while this panel is open.",
+                S.scope === "session" ? h("button", { class: "btn", onclick: () => A.setScope("all") }, "Show all sessions") : syncNowButton({ primary: true }),
             ),
         ];
     }
@@ -322,8 +297,8 @@ function searchView() {
                 "div",
                 { class: "banner info" },
                 icon("alert", 15),
-                h("span", { class: "grow" }, `${n(t.unattributed)} answers come from calls recorded before prompts were tracked, so they're grouped by 5-minute idle gaps. Import past sessions again to attribute them to the exact prompt.`),
-                h("button", { class: "btn sm", onclick: A.startImport, disabled: Boolean(S.importing) }, "Re-import"),
+                h("span", { class: "grow" }, `${n(t.unattributed)} answers come from calls recorded before prompts were tracked, so they're grouped by 5-minute idle gaps. Rescan all session logs to attribute them to the exact prompt.`),
+                h("button", { class: "btn sm", onclick: () => A.startImport({ full: true }), disabled: Boolean(S.importing) }, S.importing ? "Syncing…" : "Rescan all logs"),
             ),
         );
     }
