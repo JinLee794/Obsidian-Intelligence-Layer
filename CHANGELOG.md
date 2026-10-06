@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.3] - 2026-10-06
+
+The canvas explorer now previews the non-markdown files in a vault.
+
+### Added
+
+- **File previews in the OIL Vault Activity canvas.** Selecting a file that
+  isn't a note now shows a lightweight preview instead of a placeholder:
+  - **PDF** opens in the webview's built-in viewer.
+  - **HTML** renders in a sandboxed frame with scripts, forms and popups
+    disabled. Remote images and styles load only after you opt in.
+  - **PowerPoint, Word and Excel** (`.pptx`, `.docx`, `.xlsx`) are parsed
+    locally, with no dependencies:
+    - slides show as cards with titles, bullets, tables, images and speaker
+      notes;
+    - documents show as a page with headings, lists, quotes and tables;
+    - workbooks show as sheet tabs with the first 200 rows.
+  - **Audio and video** play natively.
+  - **CSV and TSV** render as tables; **JSON** and other text files render as
+    code.
+  - Every preview has **Open externally**, which opens the file in its default
+    app. This is limited to document and media types.
+  - Office files protected by a sensitivity label (IRM-encrypted) say so
+    instead of failing.
+
+### Security
+
+- Files are served from a token-scoped `/file/<token>/…` route. The route
+  supports Range requests, blocks path traversal, and serves only an
+  allow-list of types.
+- HTML is served under a `sandbox` Content Security Policy with
+  `default-src 'none'`.
+
 ## [0.8.2] - 2026-10-06
 
 The Copilot plugin has clearer names, and the canvas keeps its history fresh
