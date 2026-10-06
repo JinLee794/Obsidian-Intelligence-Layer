@@ -59,7 +59,7 @@ export OBSIDIAN_VAULT_PATH="/absolute/path/to/your/vault"
 Verify before opening a session:
 
 ```bash
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2 -- \
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3 -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
@@ -170,6 +170,13 @@ It shows what OIL did to your vault in the current session.
   - The **Changes** tab shows a line-level diff for every write.
   - Ctrl+O opens a quick switcher that can also create notes.
   - **Open in Obsidian** jumps to the note in the real app.
+  - **Other files preview in place.** PDFs open in the built-in viewer; HTML
+    renders sandboxed with scripts off (remote images and styles are opt-in);
+    images, audio and video play natively. `.pptx`, `.docx` and `.xlsx`
+    show as slide cards with speaker notes, a Word-style page, or sheet
+    tabs. CSV renders as a table and JSON or text as code. Files protected
+    by a sensitivity label, and legacy formats, show **Open externally**,
+    which opens them in their default app.
 - **Editing**: Ctrl+E edits the current note, with Edit, Split or Preview
   modes.
   - The editor has markdown syntax highlighting and `[[` link autocomplete,
@@ -290,7 +297,7 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 `.mcp.json` pins the server to a release tag so installs are reproducible:
 
 ```
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2 -- obsidian-intelligence-layer mcp
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3 -- obsidian-intelligence-layer mcp
 ```
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
@@ -322,8 +329,8 @@ repository is not considered a durable dependency — change the one line in
 `.mcp.json`:
 
 ```diff
-- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2",
-+ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.2",
+- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3",
++ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.3",
 ```
 
 and confirm that every consumer has git credentials for the org available to

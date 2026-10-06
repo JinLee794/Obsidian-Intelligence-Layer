@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Obsidian Intelligence Layer — Copilot plugins for agent workflows over an Obsidian vault.",
-    "version": "0.8.2"
+    "version": "0.8.3"
   },
   "plugins": [
     {
       "name": "oil-vault-kit",
       "description": "Obsidian Intelligence Layer for Copilot: the oil MCP server (tiered vault search, graph traversal, mtime-guarded writes, audit trail), the oil-setup diagnosis skill, and the OIL Vault Activity canvas showing the notes the agent read and changed, with diffs and analytics. Optional local semantic search via Ollama.",
-      "version": "0.8.2",
+      "version": "0.8.3",
       "source": "plugins/oil-vault-kit",
       "author": {
         "name": "Jin Lee",

@@ -192,7 +192,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2",
+        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3",
         "--",
         "obsidian-intelligence-layer",
         "mcp"

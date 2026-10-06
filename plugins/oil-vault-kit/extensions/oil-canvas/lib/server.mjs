@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync, statSync, existsSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
+import { readFileSync, statSync, existsSync, writeFileSync, renameSync, mkdirSync, unlinkSync, createReadStream, openSync, readSync, closeSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform } from "node:os";
@@ -11,6 +11,7 @@ import { browseRoots, detectOilVaults, isObsidianVault, listDirectory, listObsid
 import { renderMarkdown, esc } from "./markdown.mjs";
 import { diffLines } from "./diff.mjs";
 import { VaultGraph, resolveLink } from "./vaultgraph.mjs";
+import { readOffice, readOfficeMedia } from "./office.mjs";
 
 export { resolveLink };
 
@@ -35,6 +36,42 @@ const ASSET_TYPES = {
     // SVG is served with a CSP sandbox so embedded scripts cannot run.
     ".svg": "image/svg+xml",
 };
+// Vault files streamed raw for the HTML/PDF/media previews (and the CSS, fonts and images an
+// HTML page pulls in relatively). Scripts and executables are never served.
+const FILE_TYPES = {
+    ...ASSET_TYPES,
+    ".ico": "image/x-icon",
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".flac": "audio/flac",
+    ".weba": "audio/webm",
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".ogv": "video/ogg",
+    ".mov": "video/quicktime",
+};
+const FILE_ROUTE_RE = /^\/file\/([\w-]+)\/(.+)$/;
+const MAX_TEXT_BYTES = 1024 * 1024;
+// Extensions "Open in default app" will hand to the OS. Documents and media only — never anything executable.
+const OPEN_FILE_EXT = new Set(
+    "pdf html htm ppt pptx pptm potx ppsx pps doc docx docm dotx rtf odt odp ods xls xlsx xlsm xltx csv tsv txt md json xml yaml yml log png jpg jpeg gif webp bmp avif svg tif tiff heic mp3 wav m4a aac ogg flac mp4 m4v webm mov avi mkv vsdx one epub excalidraw canvas drawio"
+        .split(" ")
+        .map((e) => `.${e}`),
+);
 // Any top-level .js/.css file in web/ (no token needed: they contain no data).
 const STATIC_RE = /^\/([\w-]+)\.(js|css)$/;
 const STATIC_TYPES = { js: "text/javascript", css: "text/css" };
@@ -147,6 +184,12 @@ export class CanvasServer {
         const url = new URL(req.url, "http://127.0.0.1");
         const host = req.headers.host || "";
         if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) return this.send(res, 421, "text/plain", "Misdirected request");
+        // /file/<token>/<vault path>: the token lives in the path so an HTML page's relative URLs resolve inside the vault.
+        const fileRoute = FILE_ROUTE_RE.exec(url.pathname);
+        if (fileRoute && (req.method === "GET" || req.method === "HEAD")) {
+            if (fileRoute[1] !== this.token) return this.send(res, 403, "text/plain", "Forbidden");
+            return this.file(req, res, fileRoute[2], { remote: url.searchParams.get("remote") === "1" });
+        }
         const token = url.searchParams.get("t") || req.headers["x-oil-token"];
         if (token !== this.token && !(req.method === "GET" && isStatic(url.pathname))) return this.send(res, 403, "text/plain", "Forbidden");
 
@@ -231,6 +274,16 @@ export class CanvasServer {
                 return this.json(res, this.hygiene());
             case "GET /api/raw":
                 return this.raw(res, q("path"));
+            case "GET /api/text":
+                return this.json(res, this.text(q("path")));
+            case "GET /api/office":
+                return this.json(res, this.office(q("path")));
+            case "GET /office-media":
+                return this.officeMedia(res, q("path"), q("entry"));
+            case "POST /api/open-file": {
+                const body = await this.body(req);
+                return this.json(res, this.openFile(body.path));
+            }
             case "POST /api/save":
                 return this.json(res, await this.save(await this.body(req, MAX_SAVE_BODY_BYTES)));
             case "POST /api/draft":
@@ -459,6 +512,123 @@ ${body}
         }
     }
 
+    /** Resolve a vault-relative path to an existing regular file, or throw 404. */
+    vaultFile(path) {
+        const vault = this.vaultPath();
+        const rel = normalizeNotePath(path);
+        const abs = vault && rel ? resolveInVault(vault, rel) : null;
+        let st = null;
+        try {
+            st = abs ? statSync(abs) : null;
+        } catch {}
+        if (!st?.isFile()) throw httpError(404, "File not found");
+        return { rel, abs, st };
+    }
+
+    /** Stream a vault file for the HTML/PDF/media viewers, with byte-range support for seeking. */
+    file(req, res, encoded, { remote = false } = {}) {
+        let rel;
+        try {
+            rel = encoded.split("/").map(decodeURIComponent).join("/");
+        } catch {
+            return this.send(res, 400, "text/plain", "Bad path");
+        }
+        const ext = extname(rel).toLowerCase();
+        const type = FILE_TYPES[ext];
+        let f;
+        try {
+            if (!type) throw httpError(404, "Not found");
+            f = this.vaultFile(rel);
+        } catch {
+            return this.send(res, 404, "text/plain", "Not found");
+        }
+        const extra = remote ? " https:" : "";
+        const headers = {
+            "Content-Type": type,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=60",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        };
+        if (ext === ".html" || ext === ".htm") {
+            // Scripts never run: the CSP sandbox gives the page an opaque origin with no script, form or popup rights.
+            headers["Content-Security-Policy"] = [
+                "sandbox",
+                "default-src 'none'",
+                `img-src 'self' data:${extra}`,
+                `style-src 'self' 'unsafe-inline'${extra}`,
+                `font-src 'self' data:${extra}`,
+                `media-src 'self'${extra}`,
+                "base-uri 'none'",
+                "form-action 'none'",
+            ].join("; ");
+        } else if (ext !== ".pdf") {
+            // The browser's PDF viewer refuses to load under a sandbox CSP; everything else gets one.
+            headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+        }
+        const size = f.st.size;
+        let start = 0;
+        let end = size - 1;
+        let status = 200;
+        const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
+        if (range && size > 0 && (range[1] || range[2])) {
+            if (range[1]) {
+                start = Number(range[1]);
+                end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+            } else {
+                start = Math.max(0, size - Number(range[2]));
+            }
+            if (start > end || start >= size) {
+                res.writeHead(416, { "Content-Range": `bytes */${size}` });
+                return res.end();
+            }
+            status = 206;
+            headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+        }
+        headers["Content-Length"] = size ? end - start + 1 : 0;
+        res.writeHead(status, headers);
+        if (req.method === "HEAD" || !size) return res.end();
+        const stream = createReadStream(f.abs, { start, end });
+        stream.on("error", () => res.destroy());
+        res.on("close", () => stream.destroy());
+        stream.pipe(res);
+    }
+
+    /** The first 1 MB of a text-like file, for the code / CSV viewers. */
+    text(path) {
+        const { rel, abs, st } = this.vaultFile(path);
+        const len = Math.min(st.size, MAX_TEXT_BYTES);
+        const buf = Buffer.alloc(len);
+        const fd = openSync(abs, "r");
+        try {
+            readSync(fd, buf, 0, len, 0);
+        } finally {
+            closeSync(fd);
+        }
+        const binary = buf.subarray(0, 8192).includes(0);
+        return { path: rel, size: st.size, truncated: st.size > len, binary, text: binary ? "" : buf.toString("utf8") };
+    }
+
+    office(path) {
+        const { rel, abs, st } = this.vaultFile(path);
+        try {
+            return { path: rel, size: st.size, ...readOffice(abs) };
+        } catch (err) {
+            throw httpError(err.status || 422, err.code === "protected" ? err.message : `Couldn't read this file: ${err.message}`);
+        }
+    }
+
+    officeMedia(res, path, entry) {
+        let media = null;
+        try {
+            media = readOfficeMedia(this.vaultFile(path).abs, entry);
+        } catch {}
+        if (!media) return this.send(res, 404, "text/plain", "Not found");
+        return this.send(res, 200, media.type, media.data, {
+            headers: { "Cache-Control": "private, max-age=300", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" },
+        });
+    }
+
     /** Lower-cased lookup tables of vault files for resolving wikilinks. */
     vaultIndex() {
         return this.vaultGraph()?.index ?? null;
@@ -648,6 +818,14 @@ ${body}
         const abs = vault && rel ? resolveInVault(vault, rel) : null;
         if (!abs) throw httpError(400, "Invalid note path");
         openExternal(`obsidian://open?path=${encodeURIComponent(abs)}`);
+        return { opened: true };
+    }
+
+    /** Open a vault document or media file in the OS default app. Executables and scripts are refused. */
+    openFile(path) {
+        const { abs } = this.vaultFile(path);
+        if (!OPEN_FILE_EXT.has(extname(abs).toLowerCase())) throw httpError(400, "This file type can't be opened from the canvas");
+        openExternal(abs);
         return { opened: true };
     }
 

@@ -229,6 +229,15 @@ const ICONS = {
     layers: "M12 3l9 5-9 5-9-5z M3 13l9 5 9-5",
     wand: "M15 4V2 M15 10V8 M19 6h2 M9 6h2 M18 3l1-1 M18 9l1 1 M12 3l-1-1 M3 21l11-11 M12 9l3 3",
     send: "M4 12l16-8-6 16-3-7z M11 13l9-9",
+    globe: "M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0 M3 12h18 M12 3a14 14 0 0 1 0 18 M12 3a14 14 0 0 0 0 18",
+    book: "M4 19.5V5a2 2 0 0 1 2-2h14v15H6.5A2.5 2.5 0 0 0 4 20.5 2.5 2.5 0 0 0 6.5 23H20v-5 M8 7h8 M8 11h6",
+    slides: "M3 4h18v12H3z M12 16v4 M8 20h8 M7 8h6 M7 12h10",
+    doc: "M6 3h8l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z M14 3v5h5 M8 12l1.5 5 2.5-4 2.5 4 1.5-5",
+    table: "M4 5h16v14H4z M4 10h16 M4 15h16 M10 5v14",
+    music: "M9 18V5l11-2v13 M6 18m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0 M17 16m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0",
+    film: "M4 4h16v16H4z M8 4v16 M16 4v16 M4 8h4 M4 12h4 M4 16h4 M16 8h4 M16 12h4 M16 16h4",
+    app: "M4 4h16v16H4z M4 9h16 M7.5 6.5h.01 M10.5 6.5h.01",
+    notes: "M5 4h14v12l-4 4H5z M15 20v-4h4 M8 8h8 M8 12h5",
 };
 
 export function icon(name, size = 16, attrs = {}) {

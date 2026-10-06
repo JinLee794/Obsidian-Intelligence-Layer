@@ -5,11 +5,12 @@ import { h, n, ago, compact, noteName, noteFolder, isMd, icon, fuzzy, markText, 
 import { S, A } from "./state.js";
 import { forceGraph } from "./charts.js";
 import { emptyState, skeletonList, skeletonCards, vaultBanners } from "./panels.js";
+import { fileIcon } from "./filetypes.js";
+import { fileViewer, bytes } from "./viewers.js";
 
 const X = {};
 const enc = encodeURIComponent;
 const KIND_ICON = { created: "plus", modified: "edit", failed: "alert", read: "eye", surfaced: "search" };
-const IMAGE_RE = /\.(png|jpe?g|gif|svg|webp|bmp|avif|ico)$/i;
 const TREE_CAP = 400;
 
 /** Replace children only when they differ, so persistent iframes aren't reloaded. */
@@ -271,7 +272,7 @@ function fileRow(f, depth, active, matchIdx) {
             onclick: () => A.openNote(f.path),
         },
         h("span", { class: "t-chev" }),
-        icon(md ? "file" : IMAGE_RE.test(f.path) ? "image" : "paperclip", 14),
+        icon(fileIcon(f.path), 14),
         label,
         kind ? h("i", { class: `t-dot k-${kind}`, title: `OIL ${kind}` }) : null,
     );
@@ -378,21 +379,10 @@ function renderNoteBody() {
             h("div", { class: "asset-view" }, h("img", { src: `/asset?t=${enc(TOKEN)}&path=${enc(note.path)}&v=${note.version}`, alt: noteName(note.path) }), h("div", { class: "muted small" }, note.path, note.info?.size ? ` · ${bytes(note.info.size)}` : "")),
         );
     }
-    return mount(
-        X.body,
-        h(
-            "div",
-            { class: "pad-lg" },
-            emptyState("paperclip", note.path.split("/").pop(), `${note.info?.size ? `${bytes(note.info.size)} · ` : ""}This file type can't be previewed here.`, h("button", { class: "btn primary", onclick: () => A.openInObsidian(note.path) }, icon("external", 14), "Open in Obsidian")),
-        ),
-    );
-}
-
-function bytes(v) {
-    if (v == null) return "–";
-    if (v < 1024) return `${v} B`;
-    if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
-    return `${(v / 1024 / 1024).toFixed(1)} MB`;
+    if (note.info && !note.info.exists) {
+        return mount(X.body, h("div", { class: "pad-lg" }, emptyState("ghost", note.path.split("/").pop(), "This file isn't in the selected vault.")));
+    }
+    return mount(X.body, fileViewer(note));
 }
 
 function changesView() {
@@ -474,7 +464,7 @@ function noteCard(path, { sub, kind, i = 0 } = {}) {
     return h(
         "button",
         { class: `n-card${k ? ` k-${k}` : ""}`, title: path, style: { "--i": i }, onclick: () => A.openNote(path, k && k !== "read" && k !== "surfaced" ? "changes" : "preview") },
-        h("span", { class: "n-ic" }, icon(k ? KIND_ICON[k] : md ? "file" : IMAGE_RE.test(path) ? "image" : "paperclip", 15)),
+        h("span", { class: "n-ic" }, icon(k ? KIND_ICON[k] : fileIcon(path), 15)),
         h("span", { class: "min0 grow" }, h("div", { class: "n-name ellipsis" }, md ? noteName(path) : path.split("/").pop()), h("div", { class: "n-sub ellipsis" }, noteFolder(path) || "vault root")),
         sub ? h("span", { class: "n-meta" }, sub) : null,
     );
@@ -680,7 +670,7 @@ function sideRow(path, { meta, onclick, ic, cls = "" } = {}) {
     return h(
         "button",
         { class: `side-row ${cls}`, title: path, onclick: onclick || (() => A.openNote(path)) },
-        icon(ic || (md ? "file" : IMAGE_RE.test(path) ? "image" : "paperclip"), 14),
+        icon(ic || fileIcon(path), 14),
         h("span", { class: "min0 grow" }, h("div", { class: "ellipsis sr-name" }, md ? noteName(path) : path.split("/").pop()), noteFolder(path) ? h("div", { class: "ellipsis sr-sub" }, noteFolder(path)) : null),
         kind ? h("i", { class: `t-dot k-${kind}`, title: `OIL ${kind}` }) : null,
         meta != null ? h("span", { class: "sr-meta" }, meta) : null,

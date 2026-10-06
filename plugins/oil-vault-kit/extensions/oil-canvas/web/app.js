@@ -7,9 +7,10 @@ import { explorerView, explorerFrame } from "./explorer.js";
 import { analyticsView, hygieneView } from "./insights.js";
 import { hideTip } from "./charts.js";
 import { createEditor } from "./editor.js";
+import { fileKind, fileIcon } from "./filetypes.js";
+import { parkMedia } from "./viewers.js";
 
 const enc = encodeURIComponent;
-const IMAGE_RE = /\.(png|jpe?g|gif|svg|webp|bmp|avif|ico)$/i;
 const TABS = [
     ["activity", "activity", "Activity"],
     ["explorer", "folderOpen", "Explorer"],
@@ -69,6 +70,11 @@ function renderHeader() {
 }
 
 function render() {
+    renderView();
+    parkMedia();
+}
+
+function renderView() {
     hideTip?.();
     renderHeader();
     const entering = lastTab !== S.tab;
@@ -201,7 +207,7 @@ const scheduleRefresh = debounce(async () => {
 // ── Notes ───────────────────────────────────────────────────────────────
 
 function noteKind(path) {
-    return isMd(path) ? "md" : IMAGE_RE.test(path) ? "image" : "other";
+    return fileKind(path);
 }
 
 async function loadNoteInfo(note) {
@@ -508,6 +514,15 @@ async function openInObsidian(path) {
     }
 }
 
+async function openFile(path) {
+    try {
+        await api("/api/open-file", { method: "POST", body: { path } });
+        toast("Opening in the default app…", "info", 1800);
+    } catch (err) {
+        toast(err.message, "error");
+    }
+}
+
 // ── Modals ──────────────────────────────────────────────────────────────
 
 let modalOpen = null;
@@ -745,7 +760,7 @@ async function quickSwitcher() {
                           return h(
                               "button",
                               { class: "qs-item", role: "option", title: it.path },
-                              icon(isMd(it.path) ? "file" : IMAGE_RE.test(it.path) ? "image" : "paperclip", 14),
+                              icon(fileIcon(it.path), 14),
                               h("span", { class: "qs-name ellipsis" }, ...markText(name, idx.filter((x) => x >= base && x - base < name.length).map((x) => x - base))),
                               h("span", { class: "qs-path ellipsis" }, ...markText(noteFolder(it.path), idx.filter((x) => x < base - 1))),
                               kind ? h("i", { class: `t-dot k-${kind}` }) : null,
@@ -980,6 +995,7 @@ Object.assign(A, {
     setGraphDepth,
     scrollToHeading,
     openInObsidian,
+    openFile,
     quickSwitcher,
     scanHygiene,
     loadTree,

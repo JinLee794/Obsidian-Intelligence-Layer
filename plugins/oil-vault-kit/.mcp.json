@@ -5,7 +5,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2",
+        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.3",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
