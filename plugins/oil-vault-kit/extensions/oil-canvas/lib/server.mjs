@@ -23,8 +23,9 @@ const MAX_ASK_CHARS = 8000;
 const MAX_DRAFTS = 8;
 // Drop the parsed vault graph after this long without a request that needs it; it is rebuilt on demand.
 const GRAPH_IDLE_MS = 5 * 60_000;
-// Opening the canvas re-imports past session logs only when the last import is older than this.
-const IMPORT_MAX_AGE_MS = 24 * 60 * 60_000;
+// Background sync re-reads past session logs when the shared history is older than this. Each pass only
+// stats the session folders and reads what was appended, so it is cheap enough to run every few minutes.
+const SYNC_MAX_AGE_MS = 2 * 60_000;
 const ASSET_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -82,7 +83,7 @@ const isStatic = (pathname) => STATIC_RE.test(pathname);
  * Every request needs the per-process token; the Host header must be loopback.
  */
 export class CanvasServer {
-    constructor({ getStore, sessionId, cwd, log, onAsk, importLockFile, graphIdleMs = GRAPH_IDLE_MS, importMaxAgeMs = IMPORT_MAX_AGE_MS }) {
+    constructor({ getStore, sessionId, cwd, log, onAsk, importLockFile, graphIdleMs = GRAPH_IDLE_MS, importMaxAgeMs = SYNC_MAX_AGE_MS }) {
         this.getStore = getStore;
         this.sessionId = sessionId;
         this.cwd = cwd;
@@ -94,6 +95,8 @@ export class CanvasServer {
         this.token = randomBytes(24).toString("base64url");
         this.clients = new Set();
         this.importJob = null;
+        this.lastSyncAt = null;
+        this.lastSyncError = null;
         this.graph = null;
         this.graphUsedAt = 0;
         this.graphTimer = null;
@@ -175,6 +178,8 @@ export class CanvasServer {
             oilVaults,
             oilMismatch: Boolean(vault && oilVaults.length && !oilVaults.some((v) => sameAs(v.path))),
             importing: this.importJob ? this.importJob.progress : null,
+            lastSyncAt: this.lastSyncAt,
+            lastSyncError: this.lastSyncError,
         };
     }
 
@@ -249,8 +254,13 @@ export class CanvasServer {
                 return this.json(res, this.state());
             }
             case "POST /api/import-history": {
-                const { promise, ...r } = this.startImport();
+                const body = await this.body(req);
+                const { promise, ...r } = this.startImport({ full: body.full === true });
                 return this.json(res, r);
+            }
+            case "POST /api/sync": {
+                const r = await this.importIfStale();
+                return this.json(res, { ...r, lastSyncAt: this.lastSyncAt });
             }
             case "POST /api/open-in-obsidian": {
                 const body = await this.body(req);
@@ -753,57 +763,64 @@ ${body}
     // ── History import ──────────────────────────────────────────────────
 
     /**
-     * Import past session logs in the background only when the shared history is stale: never imported,
-     * invalidated by an importer upgrade, or last imported more than `importMaxAgeMs` ago by any session.
+     * Sync past session logs in the background only when the shared history is stale: never imported,
+     * invalidated by an importer upgrade, or last synced more than `importMaxAgeMs` ago by any session.
+     * Every open canvas (in any Copilot session) calls this while visible; the shared timestamp and the
+     * import lock mean only one of them actually does the work.
      */
     async importIfStale() {
         if (this.importJob) return { started: false, reason: "running" };
         const store = await this.getStore();
         const last = store.getMeta("last_import_at");
+        if (last) this.lastSyncAt = last;
         const age = last ? Date.now() - Date.parse(last) : Infinity;
         if (age < this.importMaxAgeMs) return { started: false, reason: "fresh", lastImportAt: last };
         const job = this.startImport({ auto: true });
-        if (job.started) this.log(`oil-canvas: session history ${last ? `last imported ${last}` : "never imported"}; refreshing in the background`, { ephemeral: true });
         return { started: job.started, reason: job.otherSession ? "other-session" : "stale", lastImportAt: last };
     }
 
-    startImport({ auto = false } = {}) {
+    startImport({ auto = false, full = false } = {}) {
         if (this.importJob) return { started: false, running: true, progress: this.importJob.progress, promise: this.importJob.promise };
         // Only one session at a time scans the session logs; they all share the same database.
         const lock = tryLock(this.importLockFile);
         if (!lock.release) {
-            const error = `A history import is already running in another Copilot session${lock.heldBy ? ` (pid ${lock.heldBy})` : ""}`;
+            const error = `A history sync is already running in another Copilot session${lock.heldBy ? ` (pid ${lock.heldBy})` : ""}`;
             return { started: false, running: false, otherSession: true, error, promise: Promise.resolve({ error, otherSession: true }) };
         }
-        const job = { progress: { done: 0, files: 0, calls: 0 }, startedAt: Date.now() };
+        const job = { progress: { done: 0, files: 0, calls: 0, auto, full }, startedAt: Date.now() };
         this.importJob = job;
         job.promise = (async () => {
             const { importHistory } = await import("./history.mjs");
             const store = await this.getStore();
             const stats = await importHistory(store, {
+                full,
                 onProgress: (p) => {
-                    job.progress = p;
+                    job.progress = { ...p, auto, full };
                     lock.touch();
-                    this.broadcast("import", { running: true, auto, ...p });
+                    // A routine pass finishes in well under a second; only report progress for long ones.
+                    if (Date.now() - job.startedAt > 1500) this.broadcast("import", { running: true, ...job.progress });
                 },
             });
-            store.setMeta("last_import_at", new Date().toISOString());
+            this.lastSyncAt = new Date().toISOString();
+            this.lastSyncError = null;
+            store.setMeta("last_import_at", this.lastSyncAt);
             const elapsedMs = Date.now() - job.startedAt;
-            this.log(`oil-canvas: imported ${stats.calls} OIL calls from ${stats.scanned} session logs in ${elapsedMs} ms`);
-            this.broadcast("import", { running: false, auto, ...stats, elapsedMs });
-            this.broadcast("activity", {});
+            if (!auto || stats.calls) this.log(`oil-canvas: synced ${stats.calls} new OIL calls from ${stats.scanned} session logs (${Math.round(stats.bytes / 1024)} KB) in ${elapsedMs} ms`, { ephemeral: auto });
+            this.broadcast("import", { running: false, auto, full, ...stats, elapsedMs, lastSyncAt: this.lastSyncAt });
+            if (stats.calls) this.broadcast("activity", {});
             return { ...stats, elapsedMs };
         })()
             .catch((err) => {
-                this.log(`oil-canvas: history import failed: ${err.message}`, { level: "error" });
-                this.broadcast("import", { running: false, error: err.message });
+                this.lastSyncError = err.message;
+                this.log(`oil-canvas: history sync failed: ${err.message}`, { level: "error" });
+                this.broadcast("import", { running: false, auto, error: err.message, lastSyncAt: this.lastSyncAt });
                 return { error: err.message };
             })
             .finally(() => {
                 lock.release();
                 this.importJob = null;
             });
-        return { started: true, running: true, promise: job.promise };
+        return { started: true, running: true, progress: job.progress, promise: job.promise };
     }
 
     // ── Openers ─────────────────────────────────────────────────────────
@@ -863,6 +880,8 @@ ${body}
             if (size > max) throw httpError(413, "Request body too large");
             chunks.push(c);
         }
+        // A bodiless POST (e.g. "sync now" with no options) carries no data, so there's nothing to type-check.
+        if (!size) return {};
         if (!/application\/json/.test(req.headers["content-type"] || "")) throw httpError(415, "Expected application/json");
         try {
             return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");

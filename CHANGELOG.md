@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.4] - 2026-10-06
+
+Past-session history in the canvas now syncs itself, cheaply and quietly.
+
+### Changed
+
+- **OIL Vault Activity canvas: past-session history syncs automatically.**
+  - The old "Import past sessions" button re-read any session log that had
+    grown from byte 0. That was too costly to run often and easy to forget.
+  - The importer now resumes each log from the byte offset it reached last
+    time, verified by a 64-byte tail fingerprint. A rewritten log is read in
+    full. It only moves past OIL calls that have completed.
+  - While the panel is visible, the canvas syncs every ~2 minutes. Measured
+    across 1,950 session dirs: ~100 ms wall, 60–125 ms CPU and 50–300 KB read
+    per pass, versus ~500 ms and +52 MB before.
+  - Hidden panels don't sync. Across several Copilot sessions, only one does
+    the work.
+  - A header chip ("Synced 2m ago") replaces the import buttons, progress bar
+    and banner:
+    - click it to sync now;
+    - it flashes "+N" when new calls arrive;
+    - it turns amber if a sync fails.
+  - Toasts appear only for syncs you start.
+  - The Search view's "Rescan all logs" and the `import_history` action's new
+    `full` option force a complete re-read.
+
 ## [0.8.3] - 2026-10-06
 
 The canvas explorer now previews the non-markdown files in a vault.

@@ -51,7 +51,10 @@ export const S = {
     hist: { back: [], fwd: [] },
     live: false,
     importing: null,
-    lastImport: null,
+    lastSyncAt: null,
+    lastSyncStats: null,
+    syncError: null,
+    syncNew: 0,
     /** Analytics sub-view: "overview" | "search" */
     analyticsView: pref("analyticsView", "overview") === "search" ? "search" : "overview",
     searchStats: null,

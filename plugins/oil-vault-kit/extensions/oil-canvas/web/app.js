@@ -1,6 +1,6 @@
 // OIL Vault Activity canvas — core: shell, navigation, data loading, modals, live updates.
 // Vanilla JS, no build step. All dynamic text goes through textContent (never innerHTML).
-import { h, api, n, params, TOKEN, noteName, noteFolder, isMd, icon, hostIsDark, debounce, fuzzy, markText, toast, WRITE_TOOLS } from "./dom.js";
+import { h, api, n, ago, params, TOKEN, noteName, noteFolder, isMd, icon, hostIsDark, debounce, fuzzy, markText, toast, WRITE_TOOLS } from "./dom.js";
 import { S, A, VIEWS, pref, savePref, touchKind } from "./state.js";
 import { activityView, vaultView, vaultBanners } from "./panels.js";
 import { explorerView, explorerFrame } from "./explorer.js";
@@ -25,7 +25,36 @@ const app = document.getElementById("app");
 const header = h("header", { class: "top" });
 const tabsEl = h("nav", { class: "tabs", role: "tablist", "aria-label": "Views" });
 const main = h("main", { class: "main" });
+// Kept across header re-renders so the minute ticker can refresh just the sync chip.
+const syncEl = h("span", { class: "sync-slot" });
 let lastTab = null;
+
+function renderSync() {
+    const busy = S.importing;
+    const err = S.syncError;
+    const pct = busy?.files ? Math.round((100 * busy.done) / busy.files) : null;
+    const label = busy ? (pct != null ? `Syncing ${pct}%` : "Syncing…") : err ? "Sync failed" : S.lastSyncAt ? `Synced ${ago(S.lastSyncAt)}` : "Not synced yet";
+    const last = S.lastSyncStats;
+    const title = busy
+        ? "Reading past Copilot session logs for OIL calls…"
+        : [
+              err ? `Last sync failed: ${err}` : S.lastSyncAt ? `Last synced ${new Date(S.lastSyncAt).toLocaleString()}` : "History from past sessions hasn't been synced yet.",
+              last && !err ? `${n(last.calls)} new calls · ${n(last.scanned)} changed logs · ${n(Math.round((last.bytes || 0) / 1024))} KB read` : null,
+              "OIL calls from all your Copilot sessions sync automatically every few minutes while this panel is visible.",
+              err ? "Click to retry." : "Click to sync now.",
+          ]
+              .filter(Boolean)
+              .join("\n");
+    syncEl.replaceChildren(
+        h(
+            "button",
+            { class: `sync${busy ? " busy" : ""}${err ? " warn" : ""}`, title, "aria-label": label, disabled: Boolean(busy), onclick: () => startImport() },
+            icon(err ? "alert" : "refresh", 12),
+            h("span", { class: "lbl" }, label),
+            ...(S.syncNew ? [h("span", { class: "sync-new" }, `+${n(S.syncNew)}`)] : []),
+        ),
+    );
+}
 
 function renderHeader() {
     const st = S.state;
@@ -42,6 +71,7 @@ function renderHeader() {
                 icon("chevron", 11, { class: "icon rot90" }),
             ),
             h("span", { class: `live ${S.live ? "on" : ""}`, title: S.live ? "Live — updates as Copilot calls OIL" : "Reconnecting…" }, h("i"), S.live ? "Live" : "Offline"),
+            (renderSync(), syncEl),
             h("span", { class: "grow" }),
             st?.vault ? h("button", { class: "search-btn", title: "Quick switcher (Ctrl+O)", onclick: () => quickSwitcher() }, icon("search", 14), h("span", { class: "lbl" }, "Search notes"), h("kbd", null, "Ctrl O")) : null,
             scoped
@@ -106,6 +136,8 @@ function renderView() {
 async function loadState() {
     S.state = await api("/api/state");
     if (S.state.importing) S.importing = S.state.importing;
+    S.lastSyncAt = S.state.lastSyncAt || S.lastSyncAt;
+    S.syncError = S.state.lastSyncError || null;
     applyAccent();
 }
 
@@ -490,19 +522,48 @@ function resetVault() {
     S.treeOpen.clear();
 }
 
-async function startImport() {
+/** Sync now, on request. `full` re-reads every session log from the start. */
+async function startImport({ full = false } = {}) {
     try {
-        const r = await api("/api/import-history", { method: "POST", body: {} });
+        const r = await api("/api/import-history", { method: "POST", body: { full: full === true } });
         if (r.otherSession) {
-            toast(r.error || "A history import is already running in another session", "info", 5000);
+            toast("Another Copilot session is syncing history right now — this view updates when it finishes", "info", 5000);
             return;
         }
         S.importing = r.progress || { done: 0, files: 0 };
-        S.lastImport = null;
         render();
     } catch (err) {
         toast(err.message, "error", 5000);
     }
+}
+
+// Background sync: ask the server every minute while visible; it only does work when the shared history
+// is a few minutes old, and only one Copilot session at a time does it. Hidden panels do nothing.
+const SYNC_TICK_MS = 60_000;
+function backgroundSync() {
+    if (document.hidden) return;
+    renderSync();
+    if (S.importing) return;
+    api("/api/sync", { method: "POST", body: {} })
+        .then((r) => {
+            if (r.lastSyncAt && r.lastSyncAt !== S.lastSyncAt) {
+                S.lastSyncAt = r.lastSyncAt;
+                renderSync();
+            }
+        })
+        .catch(() => {});
+}
+setInterval(backgroundSync, SYNC_TICK_MS);
+
+let syncNewTimer = null;
+function flashNewCalls(count) {
+    S.syncNew = count;
+    renderSync();
+    clearTimeout(syncNewTimer);
+    syncNewTimer = setTimeout(() => {
+        S.syncNew = 0;
+        renderSync();
+    }, 8000);
 }
 
 async function openInObsidian(path) {
@@ -1050,6 +1111,7 @@ document.addEventListener("visibilitychange", () => {
         reloadTreeSoon();
         scheduleRefresh();
     }
+    if (!document.hidden) backgroundSync();
 });
 
 let blipTimer = null;
@@ -1119,13 +1181,23 @@ function connect() {
     });
     es.addEventListener("import", (e) => {
         const d = JSON.parse(e.data);
-        if (d.running) S.importing = d;
-        else {
+        const wasShowing = Boolean(S.importing);
+        if (d.running) {
+            S.importing = d;
+        } else {
             S.importing = null;
-            S.lastImport = d.error ? { error: d.error } : { ...(d.stats || d) };
-            scheduleRefresh();
+            if (d.lastSyncAt) S.lastSyncAt = d.lastSyncAt;
+            S.syncError = d.error || null;
+            if (!d.error) S.lastSyncStats = d;
+            if (!d.auto) {
+                const sessions = d.sessionsWithOil === 1 ? "1 session" : `${n(d.sessionsWithOil)} sessions`;
+                if (d.error) toast(`Sync failed: ${d.error}`, "error", 6000);
+                else toast(d.calls ? `Synced ${n(d.calls)} new OIL ${d.calls === 1 ? "call" : "calls"} from ${sessions}` : "Up to date — no new OIL calls", "success", 4000);
+            } else if (d.calls) flashNewCalls(d.calls);
+            if (d.calls || d.full) scheduleRefresh();
         }
-        if (S.tab === "analytics" || S.tab === "activity") render();
+        // Routine background passes only touch the header chip; a visible progress run re-renders the page.
+        if (wasShowing !== Boolean(S.importing) && (S.tab === "analytics" || S.tab === "activity")) render();
         else renderHeader();
     });
     es.addEventListener("navigate", (e) => {

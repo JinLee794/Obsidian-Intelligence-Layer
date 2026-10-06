@@ -201,6 +201,26 @@ mark { background: color-mix(in srgb, var(--accent) 26%, transparent); color: in
 /* Ping only when OIL activity arrives — an always-on loop keeps the compositor busy in every open panel. */
 .live.on.blip i { animation: ping 1s 2; }
 @keyframes ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+.sync-slot { display: contents; }
+.sync {
+    display: flex; align-items: center; gap: 5px; font: inherit; font-size: 11px; color: var(--muted);
+    padding: 3px 8px; border: 0; border-radius: 999px; background: var(--bg-2); cursor: pointer; white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+}
+.sync:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.sync:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sync:disabled { cursor: progress; }
+.sync svg { flex: none; opacity: 0.8; }
+/* The spinner only runs during a sync, which normally lasts well under a second. */
+.sync.busy svg { animation: spin 0.9s linear infinite; color: var(--accent); opacity: 1; }
+.sync.warn { color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, var(--bg-2)); }
+.sync-new {
+    font-weight: 600; color: var(--green); padding: 0 5px; border-radius: 999px;
+    background: color-mix(in srgb, var(--green) 15%, transparent); animation: pop 0.35s ease-out;
+}
+@keyframes pop { from { transform: scale(0.6); opacity: 0; } to { transform: none; opacity: 1; } }
+.btn.syncing svg { animation: spin 0.9s linear infinite; }
+@media (max-width: 720px) { .sync .lbl { display: none; } }
 .search-btn {
     display: flex;
     align-items: center;

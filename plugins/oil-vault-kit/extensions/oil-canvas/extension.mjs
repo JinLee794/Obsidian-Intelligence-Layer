@@ -373,11 +373,11 @@ const canvas = createCanvas({
         },
         {
             name: "import_history",
-            description: "Backfill analytics from past Copilot session logs (incremental). Set wait to block until finished.",
-            inputSchema: { type: "object", additionalProperties: false, properties: { wait: { type: "boolean" } } },
+            description: "Sync analytics from past Copilot session logs now (incremental; runs automatically every few minutes while the canvas is visible). Set full to re-read every log from the start, wait to block until finished.",
+            inputSchema: { type: "object", additionalProperties: false, properties: { wait: { type: "boolean" }, full: { type: "boolean" } } },
             handler: async (ctx) => {
-                const { wait } = asObject(ctx.input);
-                const job = (await getServer(ctx.sessionId)).startImport();
+                const { wait, full } = asObject(ctx.input);
+                const job = (await getServer(ctx.sessionId)).startImport({ full: full === true });
                 if (job.otherSession) return { started: false, running: false, error: job.error };
                 if (!wait) return { started: job.started, running: true };
                 return { finished: true, ...(await job.promise) };
