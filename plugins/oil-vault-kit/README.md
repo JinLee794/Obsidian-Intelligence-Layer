@@ -1,4 +1,4 @@
-# `obsidian-intelligence-layer` — Copilot plugin
+# `oil-vault-kit` — Obsidian Intelligence Layer Copilot plugin
 
 One-command install of the [Obsidian Intelligence Layer](https://github.com/JinLee794/Obsidian-Intelligence-Layer)
 MCP server, plus a setup skill and a canvas that shows what the agent did in your vault.
@@ -23,13 +23,21 @@ shell rather than in the vault.
 
 ```bash
 copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
-copilot plugin install obsidian-intelligence-layer@oil-marketplace
+copilot plugin install oil-vault-kit@obsidian-intelligence-layer
 ```
 
 Or install the plugin directly, without registering the marketplace:
 
 ```bash
-copilot plugin install JinLee794/Obsidian-Intelligence-Layer:plugins/obsidian-intelligence-layer
+copilot plugin install JinLee794/Obsidian-Intelligence-Layer:plugins/oil-vault-kit
+```
+
+Upgrading from an install named `obsidian-intelligence-layer@oil-marketplace` (0.8.1 or earlier)?
+Uninstall it and remove that marketplace first, so the server and canvas aren't loaded twice:
+
+```bash
+copilot plugin uninstall obsidian-intelligence-layer@oil-marketplace
+copilot plugin marketplace remove oil-marketplace
 ```
 
 ## Required configuration
@@ -51,7 +59,7 @@ export OBSIDIAN_VAULT_PATH="/absolute/path/to/your/vault"
 Verify before opening a session:
 
 ```bash
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.1 -- \
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2 -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
@@ -282,7 +290,7 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 `.mcp.json` pins the server to a release tag so installs are reproducible:
 
 ```
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.1 -- obsidian-intelligence-layer mcp
+npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2 -- obsidian-intelligence-layer mcp
 ```
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
@@ -314,8 +322,8 @@ repository is not considered a durable dependency — change the one line in
 `.mcp.json`:
 
 ```diff
-- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.1",
-+ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.1",
+- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2",
++ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.8.2",
 ```
 
 and confirm that every consumer has git credentials for the org available to

@@ -1,1 +1,1 @@
-import "../../../plugins/obsidian-intelligence-layer/extensions/oil-canvas/extension.mjs";
+import "../../../plugins/oil-vault-kit/extensions/oil-canvas/extension.mjs";

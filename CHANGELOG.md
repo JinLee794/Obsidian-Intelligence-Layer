@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2] - 2026-10-06
+
+The Copilot plugin has clearer names, and the canvas keeps its history fresh
+on its own.
+
+### Changed
+
+- **The plugin is now `oil-vault-kit`, from the `obsidian-intelligence-layer`
+  marketplace.** The old names (`obsidian-intelligence-layer@oil-marketplace`)
+  didn't say what the plugin bundles. The plugin folder moved to
+  `plugins/oil-vault-kit`, and its description now names all three parts: the
+  `oil` MCP server, the `oil-setup` skill and the OIL Vault Activity canvas.
+  The MCP server name (`oil`), the npm package and its bin are unchanged.
+  Existing installs must switch once:
+
+  ```bash
+  copilot plugin uninstall obsidian-intelligence-layer@oil-marketplace
+  copilot plugin marketplace remove oil-marketplace
+  copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
+  copilot plugin install oil-vault-kit@obsidian-intelligence-layer
+  ```
+
+### Added
+
+- **The canvas imports session history automatically when it's stale.**
+  Opening the canvas now re-imports past Copilot session logs in the
+  background if the last import, by any session, is more than 24 hours old or
+  the importer has changed. Otherwise it skips the scan. Only one session
+  imports at a time, and the manual import buttons still work.
+
 ## [0.8.1] - 2026-10-02
 
 The OIL Vault Activity canvas now reports OIL's real tool latency.
