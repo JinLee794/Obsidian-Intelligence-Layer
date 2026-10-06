@@ -71,7 +71,7 @@ with diffs and analytics. No clone and no build:
 
 ```bash
 copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
-copilot plugin install obsidian-intelligence-layer@oil-marketplace
+copilot plugin install oil-vault-kit@obsidian-intelligence-layer
 ```
 
 Set `OBSIDIAN_VAULT_PATH` in your environment before starting a session — it is
@@ -87,7 +87,7 @@ export OBSIDIAN_VAULT_PATH="/absolute/path/to/vault"  # macOS / Linux, in your s
 
 Everything else — including the optional Ollama semantic tier — is configured
 through `oil.config.yaml` in the vault root. See
-[plugins/obsidian-intelligence-layer/README.md](plugins/obsidian-intelligence-layer/README.md).
+[plugins/oil-vault-kit/README.md](plugins/oil-vault-kit/README.md).
 
 #### See what the agent did: the OIL Vault Activity canvas
 
@@ -106,7 +106,7 @@ In a Copilot host that renders canvases, such as the GitHub Copilot app, ask
 | ![Search analytics](docs/images/oil-canvas-search.png) | ![Vault health](docs/images/oil-canvas-health.png) |
 
 More screenshots and details:
-[Vault activity canvas](plugins/obsidian-intelligence-layer/README.md#vault-activity-canvas).
+[Vault activity canvas](plugins/oil-vault-kit/README.md#vault-activity-canvas).
 
 ### Install and Build
 
@@ -192,7 +192,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.1",
+        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.8.2",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -531,7 +531,7 @@ src/
     ├── write.ts      # 5 tools — atomic_append, atomic_replace_section, atomic_replace, create_note, get_agent_log
     └── domain.ts     # 3 tools — get_customer_context, prepare_crm_prefetch, check_vault_health
 
-plugins/obsidian-intelligence-layer/
+plugins/oil-vault-kit/
 ├── plugin.json       # Copilot plugin manifest — version tracks the pinned release
 ├── .mcp.json         # Registers the `oil` MCP server, pinned to a released tag
 └── skills/
@@ -1063,7 +1063,7 @@ All defaults are used. Customers in `Customers/`, people in `People/`, meetings 
 
 Use `get_health` first if you only need a quick status check. Use `get_agent_log` when you need the detailed write audit for today (or any specified date in `YYYY-MM-DD` format). Every `atomic_append`, `atomic_replace`, and `create_note` call is logged with timestamp, path, and operation detail.
 
-In the Copilot CLI, the plugin's **OIL Vault Activity** canvas shows the same activity visually. It lists the notes changed, read, and surfaced in the session, with a before/after diff for each write, rendered in your vault's own theme. It also has an Obsidian-style explorer with link navigation and a markdown editor, analytics charts (including how many searches the agent needed per answer and how each search type performs), and a vault health scan you can hand to Copilot to fix. See [the plugin README](plugins/obsidian-intelligence-layer/README.md#vault-activity-canvas).
+In the Copilot CLI, the plugin's **OIL Vault Activity** canvas shows the same activity visually. It lists the notes changed, read, and surfaced in the session, with a before/after diff for each write, rendered in your vault's own theme. It also has an Obsidian-style explorer with link navigation and a markdown editor, analytics charts (including how many searches the agent needed per answer and how each search type performs), and a vault health scan you can hand to Copilot to fix. See [the plugin README](plugins/oil-vault-kit/README.md#vault-activity-canvas).
 
 ### Can I undo agent writes?
 

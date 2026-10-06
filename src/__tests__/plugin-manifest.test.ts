@@ -25,7 +25,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
-const PLUGIN_ROOT = resolve(REPO_ROOT, "plugins/obsidian-intelligence-layer");
+const PLUGIN_ROOT = resolve(REPO_ROOT, "plugins/oil-vault-kit");
 
 async function readJson(path: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(resolve(REPO_ROOT, path), "utf-8"));
@@ -37,8 +37,8 @@ function normalize(text: string): string {
 }
 
 const packageJson = await readJson("package.json");
-const pluginJson = await readJson("plugins/obsidian-intelligence-layer/plugin.json");
-const mcpJson = await readJson("plugins/obsidian-intelligence-layer/.mcp.json");
+const pluginJson = await readJson("plugins/oil-vault-kit/plugin.json");
+const mcpJson = await readJson("plugins/oil-vault-kit/.mcp.json");
 const marketplaceJson = await readJson(".github/plugin/marketplace.json");
 
 /** The tag the plugin actually installs — read from the pin, not assumed. */
@@ -129,9 +129,9 @@ describe("documented npx invocations", () => {
   // subcommand, so a healthy install looked like a broken one.
   it("pins every documented invocation to the pinned release tag", async () => {
     const docs = [
-      "plugins/obsidian-intelligence-layer/README.md",
-      "plugins/obsidian-intelligence-layer/skills/oil-setup/SKILL.md",
-      "plugins/obsidian-intelligence-layer/.mcp.json",
+      "plugins/oil-vault-kit/README.md",
+      "plugins/oil-vault-kit/skills/oil-setup/SKILL.md",
+      "plugins/oil-vault-kit/.mcp.json",
     ];
     const pattern = /--package=github:JinLee794\/Obsidian-Intelligence-Layer(#[\w.\-]*)?/g;
 
@@ -200,7 +200,7 @@ describe("bundled canvas extension", () => {
     // A copied extension drifts from the shipped one; the shim cannot.
     const shim = await readFile(resolve(REPO_ROOT, ".github/extensions/oil-canvas/extension.mjs"), "utf-8");
     expect(shim.trim()).toBe(
-      'import "../../../plugins/obsidian-intelligence-layer/extensions/oil-canvas/extension.mjs";',
+      'import "../../../plugins/oil-vault-kit/extensions/oil-canvas/extension.mjs";',
     );
   });
 });

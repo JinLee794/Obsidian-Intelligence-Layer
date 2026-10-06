@@ -24,7 +24,7 @@ function importBanner() {
             { class: "grow" },
             S.lastImport.error
                 ? `Import failed: ${S.lastImport.error}`
-                : `Imported ${n(S.lastImport.calls)} OIL calls from ${n(S.lastImport.scanned)} changed session logs (${n(S.lastImport.skipped)} unchanged skipped) in ${ms(S.lastImport.elapsedMs)}.`,
+                : `${S.lastImport.auto ? "History was over a day old, so it refreshed automatically: imported" : "Imported"} ${n(S.lastImport.calls)} OIL calls from ${n(S.lastImport.scanned)} changed session logs (${n(S.lastImport.skipped)} unchanged skipped) in ${ms(S.lastImport.elapsedMs)}.`,
         ),
         h("button", { class: "icon-btn", title: "Dismiss", onclick: () => ((S.lastImport = null), A.render()) }, icon("x", 14)),
     );

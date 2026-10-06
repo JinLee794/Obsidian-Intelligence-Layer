@@ -22,6 +22,8 @@ const MAX_ASK_CHARS = 8000;
 const MAX_DRAFTS = 8;
 // Drop the parsed vault graph after this long without a request that needs it; it is rebuilt on demand.
 const GRAPH_IDLE_MS = 5 * 60_000;
+// Opening the canvas re-imports past session logs only when the last import is older than this.
+const IMPORT_MAX_AGE_MS = 24 * 60 * 60_000;
 const ASSET_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -43,7 +45,7 @@ const isStatic = (pathname) => STATIC_RE.test(pathname);
  * Every request needs the per-process token; the Host header must be loopback.
  */
 export class CanvasServer {
-    constructor({ getStore, sessionId, cwd, log, onAsk, importLockFile, graphIdleMs = GRAPH_IDLE_MS }) {
+    constructor({ getStore, sessionId, cwd, log, onAsk, importLockFile, graphIdleMs = GRAPH_IDLE_MS, importMaxAgeMs = IMPORT_MAX_AGE_MS }) {
         this.getStore = getStore;
         this.sessionId = sessionId;
         this.cwd = cwd;
@@ -51,6 +53,7 @@ export class CanvasServer {
         this.onAsk = onAsk || null;
         this.importLockFile = importLockFile || join(artifactsDir(), "import.lock");
         this.graphIdleMs = graphIdleMs;
+        this.importMaxAgeMs = importMaxAgeMs;
         this.token = randomBytes(24).toString("base64url");
         this.clients = new Set();
         this.importJob = null;
@@ -579,7 +582,22 @@ ${body}
 
     // ── History import ──────────────────────────────────────────────────
 
-    startImport() {
+    /**
+     * Import past session logs in the background only when the shared history is stale: never imported,
+     * invalidated by an importer upgrade, or last imported more than `importMaxAgeMs` ago by any session.
+     */
+    async importIfStale() {
+        if (this.importJob) return { started: false, reason: "running" };
+        const store = await this.getStore();
+        const last = store.getMeta("last_import_at");
+        const age = last ? Date.now() - Date.parse(last) : Infinity;
+        if (age < this.importMaxAgeMs) return { started: false, reason: "fresh", lastImportAt: last };
+        const job = this.startImport({ auto: true });
+        if (job.started) this.log(`oil-canvas: session history ${last ? `last imported ${last}` : "never imported"}; refreshing in the background`, { ephemeral: true });
+        return { started: job.started, reason: job.otherSession ? "other-session" : "stale", lastImportAt: last };
+    }
+
+    startImport({ auto = false } = {}) {
         if (this.importJob) return { started: false, running: true, progress: this.importJob.progress, promise: this.importJob.promise };
         // Only one session at a time scans the session logs; they all share the same database.
         const lock = tryLock(this.importLockFile);
@@ -596,12 +614,13 @@ ${body}
                 onProgress: (p) => {
                     job.progress = p;
                     lock.touch();
-                    this.broadcast("import", { running: true, ...p });
+                    this.broadcast("import", { running: true, auto, ...p });
                 },
             });
+            store.setMeta("last_import_at", new Date().toISOString());
             const elapsedMs = Date.now() - job.startedAt;
             this.log(`oil-canvas: imported ${stats.calls} OIL calls from ${stats.scanned} session logs in ${elapsedMs} ms`);
-            this.broadcast("import", { running: false, ...stats, elapsedMs });
+            this.broadcast("import", { running: false, auto, ...stats, elapsedMs });
             this.broadcast("activity", {});
             return { ...stats, elapsedMs };
         })()

@@ -1,18 +1,18 @@
 {
-  "name": "oil-marketplace",
+  "name": "obsidian-intelligence-layer",
   "owner": {
     "name": "Jin Lee"
   },
   "metadata": {
-    "description": "Obsidian Intelligence Layer — knowledge-layer MCP tooling for AI agent workflows over an Obsidian vault.",
-    "version": "0.8.1"
+    "description": "Obsidian Intelligence Layer — Copilot plugins for agent workflows over an Obsidian vault.",
+    "version": "0.8.2"
   },
   "plugins": [
     {
-      "name": "obsidian-intelligence-layer",
-      "description": "Knowledge-layer MCP server for Obsidian vaults: tiered search, graph traversal, mtime-guarded writes, and an audit trail. Ships an optional local-embedding semantic tier that requires Ollama; without it search degrades to keyword tiers rather than failing.",
-      "version": "0.8.1",
-      "source": "plugins/obsidian-intelligence-layer",
+      "name": "oil-vault-kit",
+      "description": "Obsidian Intelligence Layer for Copilot: the oil MCP server (tiered vault search, graph traversal, mtime-guarded writes, audit trail), the oil-setup diagnosis skill, and the OIL Vault Activity canvas showing the notes the agent read and changed, with diffs and analytics. Optional local semantic search via Ollama.",
+      "version": "0.8.2",
+      "source": "plugins/oil-vault-kit",
       "author": {
         "name": "Jin Lee",
         "url": "https://github.com/JinLee794"
@@ -28,7 +28,8 @@
         "memory",
         "semantic-search",
         "ollama",
-        "ai-agent"
+        "ai-agent",
+        "canvas"
       ]
     }
   ]

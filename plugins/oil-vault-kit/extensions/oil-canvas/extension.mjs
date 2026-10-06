@@ -390,6 +390,7 @@ const canvas = createCanvas({
         const notePath = input.notePath != null ? requireNotePath(input.notePath) : null;
         const s = await getServer(ctx.sessionId, { listen: true });
         openPanels.add(ctx.instanceId);
+        s.importIfStale().catch((err) => log(`oil-canvas: stale-history check failed: ${err.message}`, { level: "warning" }));
         // Re-opening an existing instance focuses it without reloading, so also navigate live panels.
         if (notePath) s.broadcast("navigate", { notePath, mode: input.mode || "preview" });
         else if (input.view) s.broadcast("navigate", { view: input.view });

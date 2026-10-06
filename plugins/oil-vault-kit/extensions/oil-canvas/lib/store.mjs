@@ -95,6 +95,8 @@ function migrate(db) {
     const v = db.prepare(`SELECT value FROM meta WHERE key = 'import_version'`).get()?.value;
     if (v !== IMPORT_VERSION) {
         db.exec(`DELETE FROM imports`);
+        // Also mark history stale so the next canvas open re-imports and backfills automatically.
+        db.exec(`DELETE FROM meta WHERE key = 'last_import_at'`);
         db.prepare(`INSERT INTO meta (key, value) VALUES ('import_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(IMPORT_VERSION);
     }
 }
@@ -426,6 +428,14 @@ export class ActivityStore {
             )
             .all(sessionId, sinceIso);
         return computeSearchAnalytics({ calls, touches, interactions });
+    }
+
+    getMeta(key) {
+        return this.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key)?.value ?? null;
+    }
+
+    setMeta(key, value) {
+        this.db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, String(value));
     }
 
     /** Record a note edit made in the canvas so it appears in history and diffs like an OIL write. */
