@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-10-09
+
+### Fixed
+
+- **Customer context resolves declared hub aliases and titles.**
+  `get_customer_context` now recognizes unique customer-hub names, configured
+  frontmatter titles, H1 titles, and `aliases`/`alias` values, with
+  case-insensitive matching and normalized whitespace. Alias fields accept
+  scalar or list values and case-insensitive field names.
+  - Exact canonical names win, and nested hubs retain precedence over flat
+    hubs. Existing TPID resolution and literal path construction are unchanged.
+  - Ambiguous names return `CONFLICT` with canonical customer names and paths;
+    unknown names remain `NOT_FOUND` with lookup guidance. No fuzzy matching,
+    corporate-suffix stripping, or subsidiary-to-parent inference is applied.
+  - Only customer hubs participate; aliases on opportunities, milestones, or
+    other non-hub notes cannot resolve a customer.
+  - Alias and canonical requests assemble the same opportunities, milestones,
+    linked data, mtime/version anchors, and `brief`/`full`/`write` responses.
+    The `write` view remains read-only scaffolding.
+
 ## [0.9.0] - 2026-10-06
 
 `check_vault_health` now checks link integrity, and the link graph follows

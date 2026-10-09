@@ -192,7 +192,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.0",
+        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.1",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -300,9 +300,13 @@ High-level tools that encode business logic the LLM would otherwise need to reco
 
 | Tool | What It Does |
 |---|---|
-| `get_customer_context` | Assembles a full customer snapshot: frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, and open action items. Accepts a customer name or TPID, plus `view=brief\|full\|write` for compact reads or deterministic write scaffolding. Also supports `lookback_days` (default 90), `include_open_items` (default true), `include_similar` (default false), and `assignee` to filter open items. |
+| `get_customer_context` | Assembles a full customer snapshot: frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, and open action items. Accepts a canonical customer name, unique hub title or declared alias, or TPID, plus `view=brief\|full\|write` for compact reads or deterministic write scaffolding. Also supports `lookback_days` (default 90), `include_open_items` (default true), `include_similar` (default false), and `assignee` to filter open items. |
 | `prepare_crm_prefetch` | Extracts vault-stored CRM identifiers (opportunity GUIDs, TPIDs, account IDs, milestone IDs) for one or more customers. Returns structured data with OData filter hints ready for CRM query construction. |
 | `check_vault_health` | Scans the vault for stale Agent Insights (>30 days), opportunities or milestones missing IDs, notes without a `## Team` section, orphaned meeting notes, and broken wikilinks (vault-wide; `[[alias]]` links resolve through frontmatter `aliases`, and attachment embeds are not counted). Optional `customers` array narrows the customer checks. Returns a prioritized issue list. |
+
+Customer-name lookup is limited to hubs at `Customers/X/X.md` or `Customers/X.md` (or your configured customer root). Exact canonical names win; otherwise, names, the configured frontmatter title, H1 titles, and declared `aliases`/`alias` match case-insensitively with trimmed/collapsed whitespace. Alias fields accept strings or lists and case-insensitive field names. Opportunity, milestone, and other non-hub aliases never identify customers. There is no fuzzy matching, corporate-suffix removal, or subsidiary-to-parent inference.
+
+Multiple matching customers return `error_code: "CONFLICT"` with `candidates` containing canonical `customer` names and `customer_path` values; retry with an exact canonical name. Unknown names remain `NOT_FOUND` with lookup guidance. Successful alias requests return the same canonical identity, assembled entities, mtime/version anchors, and `write`-view targets as canonical requests. Nested hubs retain precedence over flat hubs for the same customer. This lookup applies only to `get_customer_context`; literal path construction, CRM prefetch, archive, and write-tool target resolution are unchanged. The `write` view only returns scaffolding; it does not write.
 
 ### Audit & Observability (1 tool)
 

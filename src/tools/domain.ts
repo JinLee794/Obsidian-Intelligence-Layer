@@ -13,19 +13,22 @@
  * a 10-tool surface: low schema overhead, high accuracy on critical paths.
  */
 
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { GraphIndex } from "../graph.js";
+import { readAliases, type GraphIndex } from "../graph.js";
 import type { SessionCache } from "../cache.js";
 import type { OilConfig, CustomerContext, NoteRef, ActionItem } from "../types.js";
-import { errorResponse, jsonResponse, noteRef } from "../tool-responses.js";
+import { errorCodeFromUnknown, errorResponse, jsonResponse, noteRef } from "../tool-responses.js";
 import { validateCustomerName, validationError } from "../validation.js";
+import { normalizeValue } from "../frontmatter.js";
 import {
   readNote,
   parseTeam,
   parseActionItems,
   resolveCustomerPath,
+  customerNameFromPath,
+  resolveEntityName,
   securePath,
   readOpportunityNotes,
   readMilestoneNotes,
@@ -58,7 +61,7 @@ export function registerDomainTools(
       description:
         "Full assembled context for a named customer — frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, open action items, and optionally similar customers.",
       inputSchema: {
-        customer: z.string().describe("Customer name or folder name under Customers/"),
+        customer: z.string().describe("Canonical customer name, unique hub title or declared alias, or TPID"),
         lookback_days: z
           .number()
           .optional()
@@ -106,18 +109,48 @@ export function registerDomainTools(
 
       const custErr = validateCustomerName(resolvedCustomer);
       if (custErr) return validationError(`get_customer_context: ${custErr}`);
+      if (!resolvedCustomer.trim()) {
+        return validationError("get_customer_context: Customer name must not be blank");
+      }
 
       const lookback = lookback_days ?? 90;
       let customerFile: string;
       let customerStats: Awaited<ReturnType<typeof stat>>;
 
       try {
+        const candidates = await findCustomerMatches(vaultPath, graph, config, resolvedCustomer);
+        if (candidates.length > 1) {
+          return errorResponse(
+            "CONFLICT",
+            `Ambiguous customer name "${customer}". Use an exact canonical customer name from the candidates.`,
+            { customer, candidates },
+            {
+              retryable: true,
+              suggested_tools: ["get_customer_context", "get_note_metadata"],
+              next_step:
+                "Choose a candidate's exact customer name and retry get_customer_context; use its customer_path to inspect the hub first.",
+            },
+          );
+        }
+        if (candidates[0]) resolvedCustomer = candidates[0].customer;
+
+        const canonicalErr = validateCustomerName(resolvedCustomer);
+        if (canonicalErr) return validationError(`get_customer_context: ${canonicalErr}`);
+
         customerFile = await resolveCustomerPath(vaultPath, config, resolvedCustomer);
         customerStats = await stat(securePath(vaultPath, customerFile));
-      } catch {
-        return errorResponse("NOT_FOUND", `Customer file not found for ${resolvedCustomer}`, {
-          customer: resolvedCustomer,
-        });
+      } catch (err) {
+        return errorResponse(
+          errorCodeFromUnknown(err),
+          `Customer file could not be read for ${resolvedCustomer}: ${err instanceof Error ? err.message : String(err)}`,
+          { customer: resolvedCustomer },
+          {
+            retryable: true,
+            suggested_tools: ["query_frontmatter", "search_vault"],
+            next_step:
+              "Inspect customer hubs with search_vault or query_frontmatter (key 'aliases' or 'alias'), then retry with an exact canonical customer name or a unique declared alias. No fuzzy or parent-account mapping is applied.",
+          },
+        );
       }
 
       // Read customer note (with cache, revalidated against the file's mtime
@@ -127,8 +160,8 @@ export function registerDomainTools(
         try {
           parsed = await readNote(vaultPath, customerFile);
           cache.putNote(customerFile, parsed, customerStats.mtimeMs);
-        } catch {
-          return errorResponse("NOT_FOUND", `Customer file not found: ${customerFile}`, {
+        } catch (err) {
+          return errorResponse(errorCodeFromUnknown(err), `Customer file could not be read: ${customerFile}`, {
             customer: resolvedCustomer,
             customer_path: customerFile,
           });
@@ -385,6 +418,77 @@ export function registerDomainTools(
 }
 
 // ─── Helpers (ported from orient.ts) ────────────────────────────────────────
+
+interface CustomerCandidate {
+  customer: string;
+  customer_path: string;
+}
+
+/**
+ * Identity lookup for context reads only. Path construction for new notes and
+ * other workflows deliberately remains literal in resolveCustomerPath.
+ */
+async function findCustomerMatches(
+  vaultPath: string,
+  graph: GraphIndex,
+  config: OilConfig,
+  input: string,
+): Promise<CustomerCandidate[]> {
+  const hubs = new Map<string, CustomerCandidate & { names: Set<string> }>();
+  const root = config.schema.customersRoot;
+  const normalize = (name: string) => normalizeValue(name).replace(/\s+/g, " ");
+  const normalizedInput = normalize(input);
+  const exactNested = `${root}${input}/${input}.md`;
+  const exactFlat = `${root}${input}.md`;
+  const exact = graph.getNode(exactNested) ?? graph.getNode(exactFlat);
+  if (exact) return [{ customer: input, customer_path: exact.path }];
+
+  // The graph may not yet contain a newly created hub. Check literal spelling
+  // on disk before aliases; stat alone is case-insensitive on Windows.
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await readdir(securePath(vaultPath, root), { withFileTypes: true });
+  } catch (err) {
+    if (errorCodeFromUnknown(err) === "NOT_FOUND") return [];
+    throw err;
+  }
+  if (entries.some((entry) => entry.isDirectory() && entry.name === input)) {
+    try {
+      await stat(securePath(vaultPath, exactNested));
+      return [{ customer: input, customer_path: exactNested }];
+    } catch (err) {
+      if (errorCodeFromUnknown(err) !== "NOT_FOUND") throw err;
+    }
+  }
+  if (entries.some((entry) => entry.isFile() && entry.name === `${input}.md`)) {
+    return [{ customer: input, customer_path: exactFlat }];
+  }
+
+  for (const ref of graph.getNotesByFolder(root)) {
+    const customer = customerNameFromPath(ref.path, config);
+    const nested = `${root}${customer}/${customer}.md`;
+    const flat = `${root}${customer}.md`;
+    if (ref.path !== nested && ref.path !== flat) continue;
+    const node = graph.getNode(ref.path);
+    if (!node) continue;
+
+    let hub = hubs.get(customer);
+    if (!hub) {
+      hub = { customer, customer_path: ref.path, names: new Set() };
+      hubs.set(customer, hub);
+    }
+    // A flat and nested hub for the same identity retain nested precedence.
+    if (ref.path === nested) hub.customer_path = nested;
+    for (const name of [customer, resolveEntityName(node, config), node.title, ...readAliases(node.frontmatter)]) {
+      hub.names.add(normalize(name));
+    }
+  }
+
+  return [...hubs.values()]
+    .filter((hub) => hub.names.has(normalizedInput))
+    .map(({ customer, customer_path }) => ({ customer, customer_path }))
+    .sort((a, b) => a.customer_path < b.customer_path ? -1 : a.customer_path > b.customer_path ? 1 : 0);
+}
 
 function findLinkedPeople(
   graph: GraphIndex,

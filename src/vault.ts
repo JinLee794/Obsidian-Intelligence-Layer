@@ -576,7 +576,10 @@ function resolveSection(
  *
  * `note.title` alone surfaces decorative H1s (e.g. "🎯") as the entity name.
  */
-export function resolveEntityName(note: ParsedNote, config: OilConfig): string {
+export function resolveEntityName(
+  note: Pick<ParsedNote, "frontmatter" | "title">,
+  config: OilConfig,
+): string {
   const titleField = config.frontmatterSchema.titleField ?? "title";
   const fmTitle = note.frontmatter[titleField as keyof NoteFrontmatter];
   if (typeof fmTitle === "string" && fmTitle.trim().length > 0) {
