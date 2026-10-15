@@ -16,12 +16,13 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { readFile, writeFile, rename, unlink } from "node:fs/promises";
+import { readFile, writeFile, rename, unlink, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { GraphIndex } from "./graph.js";
 import { flattenFrontmatter } from "./frontmatter.js";
 import { describeSemanticDisabledBy } from "./config.js";
 import { isArchivedNote, shouldEmbedArchived } from "./archive-policy.js";
+import { acquireIndexLock, describeHolder, type IndexLease } from "./index-lock.js";
 import type { ConfigSource, NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
@@ -38,6 +39,15 @@ const BODY_BUDGET = 1500;
 
 /** Query vectors are cached so a repeated search costs no round trip. */
 const QUERY_CACHE_SIZE = 64;
+
+/**
+ * While another process holds the embed lock, how often this one re-checks the
+ * sidecar for its progress and whether the lock has come free.
+ */
+const FOLLOWER_POLL_MS = 5_000;
+
+/** The leader persists partial progress this often so followers converge early. */
+const CHECKPOINT_INTERVAL_MS = 30_000;
 
 export type SemanticStatus =
   | "disabled"
@@ -281,6 +291,10 @@ export class SemanticIndex {
   private modelPulled = false;
   /** True once Ollama has actually answered this process. */
   private verified = false;
+  /** mtime of the sidecar as this process last read or wrote it. */
+  private sidecarMtimeMs = 0;
+  /** Pending re-check while another process is embedding. */
+  private followerTimer: NodeJS.Timeout | null = null;
 
   constructor(vaultPath: string, config: SemanticConfig, enabledSource?: ConfigSource) {
     this.vaultPath = vaultPath;
@@ -336,9 +350,12 @@ export class SemanticIndex {
   async load(): Promise<void> {
     if (this.state === "disabled") return;
     try {
-      const parsed = JSON.parse(
-        await readFile(this.indexPath, "utf-8"),
-      ) as PersistedIndex;
+      const [raw, info] = await Promise.all([
+        readFile(this.indexPath, "utf-8"),
+        stat(this.indexPath),
+      ]);
+      const parsed = JSON.parse(raw) as PersistedIndex;
+      this.sidecarMtimeMs = info.mtimeMs;
 
       if (
         parsed.version !== INDEX_VERSION ||
@@ -385,9 +402,92 @@ export class SemanticIndex {
         await new Promise((resolve) => setTimeout(resolve, 50));
         await rename(tempPath, this.indexPath);
       }
+      this.sidecarMtimeMs = (await stat(this.indexPath).catch(() => null))?.mtimeMs ?? 0;
     } catch (err) {
       await unlink(tempPath).catch(() => {});
       console.error("[OIL] Semantic: failed to persist vector index:", err);
+    }
+  }
+
+  /**
+   * Take vectors another OIL process has persisted since this one last looked.
+   *
+   * Only entries whose hash matches the text this process wants are adopted, so
+   * an older sidecar can never overwrite a fresher in-memory vector. Skipped
+   * entirely while the file's mtime is unchanged, which keeps the common
+   * refresh from re-parsing a large JSON file.
+   */
+  private async adoptFromSidecar(wanted: Map<string, string>): Promise<number> {
+    let parsed: PersistedIndex;
+    try {
+      const info = await stat(this.indexPath);
+      if (info.mtimeMs === this.sidecarMtimeMs) return 0;
+      parsed = JSON.parse(await readFile(this.indexPath, "utf-8")) as PersistedIndex;
+      this.sidecarMtimeMs = info.mtimeMs;
+    } catch {
+      return 0;
+    }
+    if (
+      parsed.version !== INDEX_VERSION ||
+      parsed.model !== this.config.model ||
+      !parsed.entries ||
+      (this.dimensions !== 0 && parsed.dimensions !== this.dimensions)
+    ) {
+      return 0;
+    }
+
+    let adopted = 0;
+    for (const [path, entry] of Object.entries(parsed.entries)) {
+      if (wanted.get(path) !== entry.hash) continue;
+      if (this.vectors.get(path)?.hash === entry.hash) continue;
+      this.vectors.set(path, { hash: entry.hash, vector: decodeVector(entry.vector) });
+      adopted++;
+    }
+    if (adopted > 0) {
+      this.dimensions = parsed.dimensions;
+      this.queryCache.clear();
+    }
+    return adopted;
+  }
+
+  /** Persist only when no other process is mid-embed, so its sidecar is not clobbered. */
+  private async saveIfUncontended(): Promise<void> {
+    const lease = await acquireIndexLock(this.vaultPath, "embed");
+    if (!lease) return;
+    try {
+      await this.save();
+    } finally {
+      await lease.release();
+    }
+  }
+
+  /**
+   * Another process is embedding: serve what we have and re-check shortly.
+   *
+   * The re-check both adopts whatever the leader has persisted and takes over
+   * the job if the leader has finished or died.
+   */
+  private async follow(graph: GraphIndex): Promise<void> {
+    const holder = await describeHolder(this.vaultPath, "embed");
+    const reason = `Another OIL process (${holder ?? "unknown"}) is embedding this vault; its vectors are picked up as it saves.`;
+    if (this.reason !== reason) {
+      console.error(`[OIL] Semantic: ${reason}`);
+    }
+    if (this.state !== "ready") this.state = "indexing";
+    this.reason = reason;
+    if (this.followerTimer) return;
+    this.followerTimer = setTimeout(() => {
+      this.followerTimer = null;
+      void this.refresh(graph).catch(() => {});
+    }, FOLLOWER_POLL_MS);
+    this.followerTimer.unref?.();
+  }
+
+  /** Cancel a pending follower re-check. */
+  stop(): void {
+    if (this.followerTimer) {
+      clearTimeout(this.followerTimer);
+      this.followerTimer = null;
     }
   }
 
@@ -528,6 +628,11 @@ export class SemanticIndex {
       texts.set(ref.path, text);
     }
 
+    // Another process may already have embedded what this one is missing.
+    if (await this.adoptFromSidecar(wanted)) {
+      this.queryCache.clear();
+    }
+
     // A note that only moved — archived, or restored — keeps its text, so its
     // vector is carried to the new path instead of being embedded again.
     const orphaned = new Map<string, Entry>();
@@ -552,9 +657,9 @@ export class SemanticIndex {
       }
     }
 
-    const pending = [...wanted.entries()].filter(
-      ([path, hash]) => this.vectors.get(path)?.hash !== hash,
-    );
+    const pendingNow = () =>
+      [...wanted.entries()].filter(([path, hash]) => this.vectors.get(path)?.hash !== hash);
+    let pending = pendingNow();
 
     if (pending.length === 0) {
       this.indexedVersion = version;
@@ -567,14 +672,51 @@ export class SemanticIndex {
         this.state = "ready";
         this.reason = null;
       }
-      if (changed) await this.save();
+      if (changed) await this.saveIfUncontended();
       return;
     }
 
-    const previous = this.state;
-    this.state = "indexing";
+    // Embedding is the one job that can saturate a machine, and every session
+    // would otherwise run it at once against the same notes. One process per
+    // vault does it; the rest serve what they have and adopt its output.
+    const lease = await acquireIndexLock(this.vaultPath, "embed");
+    if (!lease) {
+      await this.follow(graph);
+      return;
+    }
 
     try {
+      // The previous holder may have finished just before we took over.
+      if (await this.adoptFromSidecar(wanted)) {
+        pending = pendingNow();
+        if (pending.length === 0) {
+          this.indexedVersion = version;
+          if (await this.verifyReachable()) {
+            this.state = "ready";
+            this.reason = null;
+          }
+          return;
+        }
+      }
+      await this.embedPending(pending, texts, version, changed, lease);
+    } finally {
+      await lease.release();
+    }
+  }
+
+  private async embedPending(
+    pending: [string, string][],
+    texts: Map<string, string>,
+    version: number,
+    changed: boolean,
+    lease: IndexLease,
+  ): Promise<void> {
+    const previous = this.state;
+    this.state = "indexing";
+    this.reason = null;
+
+    try {
+      let lastCheckpoint = Date.now();
       for (let i = 0; i < pending.length; i += this.config.batchSize) {
         const batch = pending.slice(i, i + this.config.batchSize);
         const vectors = await this.embed(batch.map(([path]) => texts.get(path) ?? ""));
@@ -583,6 +725,19 @@ export class SemanticIndex {
         });
         this.dimensions = vectors[0]?.length ?? this.dimensions;
         changed = true;
+
+        const isLast = i + this.config.batchSize >= pending.length;
+        if (!isLast && Date.now() - lastCheckpoint >= CHECKPOINT_INTERVAL_MS) {
+          if (!(await lease.held())) {
+            console.error("[OIL] Semantic: embed lock was taken over — stopping this run.");
+            return;
+          }
+          await this.save();
+          lastCheckpoint = Date.now();
+          console.error(
+            `[OIL] Semantic: embedded ${i + batch.length}/${pending.length} — progress saved.`,
+          );
+        }
       }
 
       this.state = "ready";

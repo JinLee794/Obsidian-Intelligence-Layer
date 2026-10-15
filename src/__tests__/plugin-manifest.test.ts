@@ -1,5 +1,6 @@
 /**
- * The Copilot plugin pins the MCP server to a git tag, and that pin — not
+ * The Copilot plugin pins the MCP server to a release (a tarball attached to a
+ * git tag's GitHub release), and that pin — not
  * `package.json` — decides what a user actually installs.
  *
  * These two versions are deliberately decoupled. The working tree runs ahead of
@@ -42,14 +43,22 @@ const mcpJson = await readJson("plugins/oil-vault-kit/.mcp.json");
 const marketplaceJson = await readJson(".github/plugin/marketplace.json");
 
 /** The tag the plugin actually installs — read from the pin, not assumed. */
+const RELEASE_ASSET =
+  /^--package=https:\/\/github\.com\/JinLee794\/Obsidian-Intelligence-Layer\/releases\/download\/v([^/]+)\/mcaps-microsoft-obsidian-intelligence-layer-([^/]+)\.tgz$/;
+
 const PINNED_VERSION = (() => {
   const servers = mcpJson.mcpServers as Record<string, { args?: string[] }>;
   const args = servers.oil?.args ?? [];
   const pkgArg = args.find((arg) => arg.startsWith("--package="));
-  const match = /#v(.+)$/.exec(pkgArg ?? "");
-  if (!match) throw new Error("plugin .mcp.json does not pin the server to a version tag");
+  const match = RELEASE_ASSET.exec(pkgArg ?? "");
+  if (!match) throw new Error("plugin .mcp.json does not pin the server to a release tarball");
+  if (match[1] !== match[2]) throw new Error(`pin names tag v${match[1]} but tarball ${match[2]}`);
   return match[1];
 })();
+
+/** The exact `--package` argument every pinned invocation must use. */
+const PINNED_PACKAGE_ARG =
+  `--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v${PINNED_VERSION}/mcaps-microsoft-obsidian-intelligence-layer-${PINNED_VERSION}.tgz`;
 
 describe("plugin manifest", () => {
   it("declares a kebab-case name", () => {
@@ -84,18 +93,29 @@ describe("plugin MCP configuration", () => {
     expect(Object.keys(servers)).toEqual(["oil"]);
   });
 
-  it("pins the server to an explicit release tag", () => {
+  it("pins the server to a prebuilt release tarball", () => {
+    // A `github:` spec makes npx re-resolve the repository with git on every
+    // launch — ~6.5s and several git processes per session even when cached,
+    // which a burst of parallel sessions multiplies. The release tarball ships
+    // the built bundle, so launch is a cache revalidation and nothing else.
     const args = servers.oil.args as string[];
     const pkgArg = args.find((arg) => arg.startsWith("--package="));
-    expect(pkgArg).toBe(
-      `--package=github:JinLee794/Obsidian-Intelligence-Layer#v${PINNED_VERSION}`,
-    );
+    expect(pkgArg).toBe(PINNED_PACKAGE_ARG);
+  });
+
+  it("names the tarball npm pack produces for this package", () => {
+    // The tag and the file name carry the version twice; they must agree, and
+    // the file name must be what `npm pack` emits or the release asset 404s.
+    const scoped = (packageJson.name as string).replace(/^@/, "").replace("/", "-");
+    expect(scoped).toBe("mcaps-microsoft-obsidian-intelligence-layer");
+    expect(PINNED_PACKAGE_ARG).toContain(`/${scoped}-${PINNED_VERSION}.tgz`);
   });
 
   it("pins a version that was actually released", async () => {
-    // The tag has to exist on the remote for `npx --package=github:...#vX` to
-    // resolve, and only a released version has a changelog entry. This is the
-    // offline half of that guarantee; the release process owns pushing the tag.
+    // The release and its tarball asset have to exist on the remote for the
+    // pinned URL to resolve, and only a released version has a changelog entry.
+    // This is the offline half of that guarantee; the release process owns
+    // publishing the release, and release-asset.yml attaches the tarball.
     const changelog = await readFile(resolve(REPO_ROOT, "CHANGELOG.md"), "utf-8");
     expect(changelog).toContain(`## [${PINNED_VERSION}]`);
   });
@@ -127,20 +147,24 @@ describe("documented npx invocations", () => {
   // which can lag the release the plugin actually runs. That shipped once: the
   // `doctor` command in this skill fetched a `main` that had no `doctor`
   // subcommand, so a healthy install looked like a broken one.
-  it("pins every documented invocation to the pinned release tag", async () => {
+  it("pins every documented invocation to the pinned release tarball", async () => {
     const docs = [
+      "README.md",
       "plugins/oil-vault-kit/README.md",
       "plugins/oil-vault-kit/skills/oil-setup/SKILL.md",
       "plugins/oil-vault-kit/.mcp.json",
     ];
-    const pattern = /--package=github:JinLee794\/Obsidian-Intelligence-Layer(#[\w.\-]*)?/g;
+    // Any JinLee794 install spec: a release URL, or a `github:` ref. The org
+    // mirror's `github:` alternative in the plugin README is a different owner.
+    const pattern =
+      /--package=(?:github:JinLee794\/Obsidian-Intelligence-Layer(?:#[\w.\-]*)?|https:\/\/github\.com\/JinLee794\/Obsidian-Intelligence-Layer\/[^\s"`]*)/g;
 
     for (const doc of docs) {
       const body = await readFile(resolve(REPO_ROOT, doc), "utf-8");
       const found = [...body.matchAll(pattern)];
       expect(found.length, `${doc} documents no npx invocation`).toBeGreaterThan(0);
       for (const match of found) {
-        expect(match[1], `unpinned npx invocation in ${doc}`).toBe(`#v${PINNED_VERSION}`);
+        expect(match[0], `stale npx invocation in ${doc}`).toBe(PINNED_PACKAGE_ARG);
       }
     }
   });

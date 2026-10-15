@@ -168,6 +168,18 @@ An MCP client configures a server through `command`, `args` and `env` — not th
 | `--semantic-endpoint=<url>` | `OIL_SEMANTIC_ENDPOINT` | Ollama base URL (default `http://127.0.0.1:11434`) |
 | `--semantic-min-score=<n>` | `OIL_SEMANTIC_MIN_SCORE` | Cosine floor for a hit (default `0.5`) |
 | — | `OIL_EXCLUDE_FOLDERS` | Comma-separated folders kept out of results |
+| — | `OIL_INDEX_LOCK=off` | Let every process index independently (default: one indexer per vault) |
+| — | `OIL_LOCK_DIR` | Where index leases live (default `<os tmpdir>/oil-locks`) |
+
+#### Many parallel sessions
+
+Each MCP session starts its own OIL process. To keep a burst of sessions from indexing the same vault at once, OIL takes a per-vault lease before heavy work:
+
+- **Graph build / rebuild** — one process walks the vault; the others wait, then load the index it saved.
+- **Embeddings** — one process talks to Ollama; the others keep serving lexical search and pick up its vectors from `_oil-vectors.json` as it checkpoints (every 30s). If the leader exits, the next process takes over.
+- **Scheduled archiving** — one process runs it; the others skip that run.
+
+Leases sit in the OS temp directory, not the synced vault. A crashed holder is detected by pid probe and a 60s heartbeat, so it never wedges indexing.
 
 So a user who wants lexical-only search adds one line to their client config, with no edit to the vault:
 
@@ -192,7 +204,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.1",
+        "--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -203,7 +215,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
 }
 ```
 
-The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The release tag keeps installs reproducible; update it when upgrading OIL.
+The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The URL names a prebuilt release tarball, so `npx` runs no `git` clone and no build on launch. Update both version numbers in it when upgrading OIL.
 
 **Option B: Run a local checkout** — build the project first, then use:
 
