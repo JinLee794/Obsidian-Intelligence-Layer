@@ -56,15 +56,27 @@ setx OBSIDIAN_VAULT_PATH "C:\path\to\your\vault"
 export OBSIDIAN_VAULT_PATH="/absolute/path/to/your/vault"
 ```
 
+The server is installed from GitHub Packages, so npm needs a token that can read
+`@mcaps-microsoft` packages. Set this up once:
+
+```powershell
+gh auth refresh -h github.com -s read:packages
+npm config set "@mcaps-microsoft:registry" "https://npm.pkg.github.com"
+npm config set "//npm.pkg.github.com/:_authToken" "$(gh auth token)"
+```
+
+Without it, the server never starts. The check below then prints
+`E401 Unauthorized`.
+
 Verify before opening a session:
 
 ```bash
-npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz -- \
+npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2 -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
-Keep the `#v...` pin: without it `npx` resolves the default branch, which may not
-carry the `doctor` subcommand yet.
+Keep the `@0.9.2` version: without it `npx` takes `latest`, which may not match
+the plugin's server.
 
 > MCP servers are spawned once, at session start. Setting
 > `OBSIDIAN_VAULT_PATH` inside a running session does nothing — restart the
@@ -298,18 +310,12 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 
 ## Pinning
 
-`.mcp.json` pins the server to a prebuilt tarball attached to a release, so installs are reproducible:
+`.mcp.json` pins the server to an exact version published to GitHub Packages by
+the `mcaps-microsoft` mirror:
 
 ```
-npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz -- obsidian-intelligence-layer mcp
+npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2 -- obsidian-intelligence-layer mcp
 ```
-
-The tarball is the `npm pack` output that `.github/workflows/release-asset.yml`
-uploads when a release is published. It already contains the self-contained
-`bundle/cli.js`, so `npx` neither clones nor builds anything. A `github:` spec
-re-resolves the repository with `git` on every launch, even from a warm cache.
-Measured on Windows, that took ~6.5 s per session, and 6 sessions starting
-together spawned up to 32 `git` processes. The tarball takes ~1.5–2 s warm.
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
 against each other by `src/__tests__/plugin-manifest.test.ts`, which also refuses
@@ -318,32 +324,28 @@ deleted from the remote, which breaks `npx` for every user. The pin deliberately
 tracks the **released** server, not the version in `package.json`, which runs
 ahead of it.
 
-### Why the pin names the public repository
+### Why GitHub Packages
 
-This plugin is mirrored to a private org repository, `mcaps-microsoft/Obsidian-Intelligence-Layer`,
-whose release tags point at the *same commits* as the public ones. The pin still names
-the public `JinLee794` repo, on purpose.
+The package carries the self-contained `bundle/cli.js`, so `npx` neither clones
+nor builds. Earlier releases pinned `github:JinLee794/…#vX`, and npm re-resolves
+that with `git` on every launch, even from a warm cache. Measured on Windows,
+that took ~6.5 s per session, and 6 sessions starting together spawned up to
+32 `git` processes. From GitHub Packages, a warm launch takes ~2–3 s, and 6
+parallel cold installs all succeed with no `git`.
 
-An MCP server is spawned non-interactively, at session start. Fetching it from a
-private repository makes that spawn depend on the user's git credentials being
-present and valid at that moment — and when they are not, `npx` fails, the server
-never starts, and the client reports only "tool unavailable" with no reason. That
-is the single worst failure mode this plugin has, and it is the one the
-`oil-setup` skill exists to untangle. A public pin cannot hit it.
+The `mcaps-microsoft` repository is internal, so anonymous downloads of its
+releases return 404. The registry token in the one-time setup above is what
+makes the org-side install work non-interactively. Without it, the spawn fails
+with `E401`, and the `oil-setup` skill names that.
 
-Everyone who can reach the private marketplace can also reach the public
-repository, so the public pin costs that audience nothing and removes an entire
-class of startup failure.
+**Releasing.** Fast-forward the mirror's `main` to the release commit. Its
+`publish.yml` runs the release checks and publishes the new `package.json`
+version. Bump the pin only once `npm view
+@mcaps-microsoft/obsidian-intelligence-layer@X.Y.Z` resolves.
 
-To keep the fetch inside the org anyway — a reasonable call if the public
-repository is not considered a durable dependency — change the one line in
-`.mcp.json`:
+The public repository also gets a release tarball from `release-asset.yml`, for
+installs outside the org:
 
-```diff
-- "--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz",
-+ "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.9.2",
 ```
-
-and confirm that every consumer has git credentials for the org available to
-non-interactive processes. A `github:` spec also brings back the per-launch
-`git` cost described above.
+npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz -- obsidian-intelligence-layer mcp
+```

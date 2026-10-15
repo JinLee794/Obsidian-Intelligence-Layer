@@ -23,10 +23,13 @@ All notable changes to this project will be documented in this file.
   `npx --package=github:…#vX`, which re-resolves the repository with `git` on
   every launch, even from a warm cache. Measured on Windows: ~6.5 s per
   session, and 6 sessions starting together spawned up to 32 `git` processes.
-  The pin is now the `npm pack` tarball attached to the GitHub release (new
-  `release-asset.yml` workflow), which already contains the built bundle: ~1.5–2 s
-  warm, no `git`, and 6 cold parallel installs all succeeded. Update client
-  configs that copied the old `github:` spec.
+  The plugin now installs `@mcaps-microsoft/obsidian-intelligence-layer@0.9.2`
+  from GitHub Packages, published by the `mcaps-microsoft` mirror. It already
+  contains the built bundle: ~2–3 s warm, no `git`, and 6 cold parallel
+  installs all succeeded. **Action required:** npm needs a one-time
+  `@mcaps-microsoft` registry token (`read:packages`); see the plugin README.
+  Installs outside the org can use the tarball that the new
+  `release-asset.yml` attaches to each public release.
 
 ## [0.9.1] - 2026-10-09
 

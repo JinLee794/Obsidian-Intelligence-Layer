@@ -194,7 +194,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
 
 ### Connect to VS Code (Copilot / Claude)
 
-**Option A: Run from GitHub** — add to `.vscode/mcp.json` in any workspace:
+**Option A: Run from GitHub Packages** — add to `.vscode/mcp.json` in any workspace:
 
 ```json
 {
@@ -204,7 +204,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz",
+        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -215,7 +215,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
 }
 ```
 
-The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The URL names a prebuilt release tarball, so `npx` runs no `git` clone and no build on launch. Update both version numbers in it when upgrading OIL.
+The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The package comes from GitHub Packages, so npm needs `@mcaps-microsoft:registry=https://npm.pkg.github.com` and a `read:packages` token in `~/.npmrc` (see the [plugin README](plugins/oil-vault-kit/README.md#required-configuration)). Without the org, use the public release tarball listed there. Update the version when upgrading OIL. Inside a checkout of OIL itself, use Option B: there `npx` resolves the local project of the same name.
 
 **Option B: Run a local checkout** — build the project first, then use:
 

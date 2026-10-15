@@ -23,8 +23,9 @@ Symptoms: no `oil` tools in the tool list, or a call returns
 
 **Do not report that as an answer.** It means the server process exited before
 the client reached it, and the client surfaces no reason. There is no tool to ask
-— diagnose it yourself with the shell. It is almost always the vault path, and it
-is *never* caused by Ollama, which cannot prevent startup.
+— diagnose it yourself with the shell. It is almost always the vault path or
+missing registry auth, and it is *never* caused by Ollama, which cannot prevent
+startup.
 
 **Step 1 — is the variable set in the environment that launched the session?**
 
@@ -42,18 +43,33 @@ vault and exits immediately. It must be an **absolute path to the folder holding
 the notes** — not a note, not a relative path. Obsidian itself need not be
 running.
 
+**Step 1b — can npm reach the package?** The plugin installs OIL from GitHub
+Packages (`@mcaps-microsoft`), which needs a token. Without one, `npx` fails
+with `E401 Unauthorized` before the server exists. Run Step 2. If it prints
+`E401` or `E404`, set up the registry once:
+
+```powershell
+gh auth refresh -h github.com -s read:packages
+npm config set "@mcaps-microsoft:registry" "https://npm.pkg.github.com"
+npm config set "//npm.pkg.github.com/:_authToken" "$(gh auth token)"
+```
+
+The token must be one that can read `mcaps-microsoft` packages, with SSO
+authorized if the org enforces it. Running inside a checkout of OIL itself also
+fails, with "'obsidian-intelligence-layer' is not recognized". There `npx`
+resolves the local project of the same name, so use the local build instead.
+
 **Step 2 — run the bundled diagnostic.** It resolves flags, environment and
 `oil.config.yaml`, prints the *effective* settings, and exits non-zero when
 something needs attention:
 
 ```bash
-npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz -- \
+npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2 -- \
   obsidian-intelligence-layer doctor --vault=/absolute/path/to/vault
 ```
 
-Keep the `#v` pin. Unpinned, `npx` resolves the default branch, which may predate
-the `doctor` subcommand — you get "unknown command" and mistake a stale fetch for
-a broken install.
+Keep the `@0.9.2` version. Without it, `npx` takes whatever `latest` resolves to,
+which may not match the plugin's server and can lack the `doctor` subcommand.
 
 **Step 3 — set it persistently, then restart.** MCP servers are spawned once, at
 session start. Setting the variable inside the running session changes nothing;

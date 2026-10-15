@@ -5,7 +5,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz",
+        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
