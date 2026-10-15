@@ -59,7 +59,7 @@ export OBSIDIAN_VAULT_PATH="/absolute/path/to/your/vault"
 Verify before opening a session:
 
 ```bash
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.2 -- \
+npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
@@ -298,11 +298,18 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 
 ## Pinning
 
-`.mcp.json` pins the server to a release tag so installs are reproducible:
+`.mcp.json` pins the server to a prebuilt tarball attached to a release, so installs are reproducible:
 
 ```
-npx -y --package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.2 -- obsidian-intelligence-layer mcp
+npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz -- obsidian-intelligence-layer mcp
 ```
+
+The tarball is the `npm pack` output that `.github/workflows/release-asset.yml`
+uploads when a release is published. It already contains the self-contained
+`bundle/cli.js`, so `npx` neither clones nor builds anything. A `github:` spec
+re-resolves the repository with `git` on every launch, even from a warm cache.
+Measured on Windows, that took ~6.5 s per session, and 6 sessions starting
+together spawned up to 32 `git` processes. The tarball takes ~1.5–2 s warm.
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
 against each other by `src/__tests__/plugin-manifest.test.ts`, which also refuses
@@ -333,9 +340,10 @@ repository is not considered a durable dependency — change the one line in
 `.mcp.json`:
 
 ```diff
-- "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.2",
+- "--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz",
 + "--package=github:mcaps-microsoft/Obsidian-Intelligence-Layer#v0.9.2",
 ```
 
 and confirm that every consumer has git credentials for the org available to
-non-interactive processes.
+non-interactive processes. A `github:` spec also brings back the per-launch
+`git` cost described above.

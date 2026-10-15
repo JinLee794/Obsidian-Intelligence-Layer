@@ -1,0 +1,63 @@
+# Attach the prebuilt npm-pack tarball to each GitHub release.
+#
+# The Copilot plugin's .mcp.json launches OIL with
+#   npx --package=https://github.com/<repo>/releases/download/vX.Y.Z/<pkg>-X.Y.Z.tgz
+# A `github:` spec made npx re-resolve the repo with git on every session start
+# (~6.5s and several git processes each), which a burst of parallel sessions
+# multiplied. The tarball carries the self-contained bundle/cli.js, so launch
+# needs no clone and no build. Until this asset exists, the pin 404s — publish
+# the release before merging a pin bump to the marketplace branch.
+name: Release asset
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)attach the tarball to, e.g. v0.9.2'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    name: Build, pack & upload
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:package
+
+      - name: Pack
+        id: pack
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "::error::package.json version v$VERSION does not match release tag $TAG"
+            exit 1
+          fi
+          FILE=$(npm pack --ignore-scripts --silent | tail -n1)
+          EXPECTED="mcaps-microsoft-obsidian-intelligence-layer-$VERSION.tgz"
+          if [ "$FILE" != "$EXPECTED" ]; then
+            echo "::error::npm pack produced $FILE, but .mcp.json expects $EXPECTED"
+            exit 1
+          fi
+          tar -tzf "$FILE" | grep -qx 'package/bundle/cli.js' || { echo "::error::bundle/cli.js missing from $FILE"; exit 1; }
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        run: gh release upload "$TAG" "${{ steps.pack.outputs.file }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

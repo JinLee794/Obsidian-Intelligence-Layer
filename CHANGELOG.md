@@ -19,6 +19,14 @@ All notable changes to this project will be documented in this file.
   `on_start` or `daily`, every session used to apply the rules at the same
   time, moving the same notes and racing on `.oil-archive.json`. The run now
   takes the same lease; `daily` re-checks the manifest after acquiring it.
+- **Plugin launch no longer runs `git` per session.** `.mcp.json` pinned
+  `npx --package=github:…#vX`, which re-resolves the repository with `git` on
+  every launch, even from a warm cache. Measured on Windows: ~6.5 s per
+  session, and 6 sessions starting together spawned up to 32 `git` processes.
+  The pin is now the `npm pack` tarball attached to the GitHub release (new
+  `release-asset.yml` workflow), which already contains the built bundle: ~1.5–2 s
+  warm, no `git`, and 6 cold parallel installs all succeeded. Update client
+  configs that copied the old `github:` spec.
 
 ## [0.9.1] - 2026-10-09
 

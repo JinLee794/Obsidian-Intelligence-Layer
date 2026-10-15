@@ -204,7 +204,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=github:JinLee794/Obsidian-Intelligence-Layer#v0.9.2",
+        "--package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.2/mcaps-microsoft-obsidian-intelligence-layer-0.9.2.tgz",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -215,7 +215,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
 }
 ```
 
-The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The release tag keeps installs reproducible; update it when upgrading OIL.
+The `.env` file must define `OBSIDIAN_VAULT_PATH` with an absolute path. The URL names a prebuilt release tarball, so `npx` runs no `git` clone and no build on launch. Update both version numbers in it when upgrading OIL.
 
 **Option B: Run a local checkout** — build the project first, then use:
 
