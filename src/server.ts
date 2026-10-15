@@ -20,6 +20,7 @@ import { SemanticIndex, attachSemanticIndex } from "./semantic.js";
 import { setExcludedFolders } from "./search.js";
 import { applyArchivePolicy, startArchiveScheduler } from "./archive.js";
 import { Hydration, type HydrationOptions } from "./hydration.js";
+import { acquireIndexLock } from "./index-lock.js";
 import { registerCoreTools } from "./tools/core.js";
 import { registerRetrieveTools } from "./tools/retrieve.js";
 import { registerWriteTools } from "./tools/write.js";
@@ -136,6 +137,7 @@ export async function createOilServer(
     semantic,
     shutdown: async () => {
       hydration.stop();
+      semantic.stop();
       stopArchive();
       await watcher.stop();
       // Indexing that is not persisted is indexing the next session repeats.
@@ -172,7 +174,7 @@ async function hydrate(
   await preflightVault(vaultPath);
 
   const graphFile = config.search.graphIndexFile;
-  const loaded = await graph.loadFromDisk(graphFile);
+  let loaded = await graph.loadFromDisk(graphFile);
 
   if (loaded) {
     const stats = graph.getStats();
@@ -180,16 +182,35 @@ async function hydrate(
       `[OIL] Graph loaded from disk — ${stats.noteCount} notes. Incremental update in background.`,
     );
   } else {
-    console.error("[OIL] No persisted graph index — full build...");
-    const startTime = Date.now();
-    await graph.build();
-    const stats = graph.getStats();
-    console.error(
-      `[OIL] Graph index built in ${Date.now() - startTime}ms — ${stats.noteCount} notes, ${stats.linkCount} links, ${stats.tagCount} tags.`,
-    );
-    // Persistence is a startup optimisation for the *next* run, never a reason
-    // to fail this one — and never a reason to make callers wait for it either.
-    deferred(() => graph.saveToDisk(graphFile), "Graph index save");
+    // Parallel sessions on a fresh vault would each walk and parse every note.
+    // One builds; the others wait and load what it saves.
+    const lease = await acquireIndexLock(vaultPath, "graph", { wait: true });
+    let saving = false;
+    try {
+      if (lease?.waited) loaded = await graph.loadFromDisk(graphFile);
+      if (!loaded) {
+        console.error("[OIL] No persisted graph index — full build...");
+        const startTime = Date.now();
+        await graph.build();
+        const stats = graph.getStats();
+        console.error(
+          `[OIL] Graph index built in ${Date.now() - startTime}ms — ${stats.noteCount} notes, ${stats.linkCount} links, ${stats.tagCount} tags.`,
+        );
+        // Persistence is a startup optimisation for the *next* run, never a reason
+        // to fail this one — and never a reason to make callers wait for it either.
+        // The lease is held until the file lands so waiters load it, not rebuild.
+        saving = true;
+        deferred(async () => {
+          try {
+            await graph.saveToDisk(graphFile);
+          } finally {
+            await lease?.release();
+          }
+        }, "Graph index save");
+      }
+    } finally {
+      if (!saving) await lease?.release();
+    }
   }
 
   // Vectors come from the sidecar; embedding anything new is deferred so a cold
@@ -225,7 +246,16 @@ async function hydrate(
     // reconnected. Live changes during the rebuild are the smaller loss: the
     // rebuild is itself re-reading the vault, and the watcher follows directly.
     deferred(async () => {
-      await graph.buildIncremental(graphFile);
+      // Revalidation re-reads every changed note; after a sync touches the whole
+      // vault, N sessions doing it at once is N full re-reads. Take turns, and
+      // a session that waited reloads the result rather than repeating it.
+      const lease = await acquireIndexLock(vaultPath, "graph", { wait: true });
+      try {
+        if (lease?.waited) await graph.loadFromDisk(graphFile);
+        await graph.buildIncremental(graphFile);
+      } finally {
+        await lease?.release();
+      }
       // Archive rules judge notes by the graph, so they wait for it to be current.
       onGraphCurrent();
       startWatcher();

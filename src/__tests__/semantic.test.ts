@@ -21,6 +21,7 @@ import {
 } from "../semantic.js";
 import { cascadeSearch, invalidateSearchIndex } from "../search.js";
 import { setArchivePolicy } from "../archive-policy.js";
+import { acquireIndexLock, lockPath } from "../index-lock.js";
 import type { SemanticConfig } from "../types.js";
 
 // ─── Fake Ollama ──────────────────────────────────────────────────────────────
@@ -98,6 +99,7 @@ function makeConfig(overrides: Partial<SemanticConfig> = {}): SemanticConfig {
 beforeAll(async () => {
   stub = await startStub();
   tempDir = await mkdtemp(join(tmpdir(), "oil-semantic-"));
+  process.env.OIL_LOCK_DIR = join(tempDir, "locks");
   vaultRoot = join(tempDir, "vault");
   await mkdir(join(vaultRoot, "Customers"), { recursive: true });
 
@@ -118,14 +120,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.OIL_LOCK_DIR;
   detachSemanticIndex(graph);
   await new Promise<void>((resolve) => stub.server.close(() => resolve()));
   await rm(tempDir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   stub.embedCalls.length = 0;
   stub.failNext = false;
+  // Each test models a fresh process with no sidecar. Without this, a new index
+  // adopts vectors an earlier test persisted — correct in production, where it
+  // is how parallel sessions share one embedding pass, but not what these
+  // tests are measuring.
+  await rm(join(vaultRoot, DEFAULT_CONFIG.semantic.indexFile), { force: true });
 });
 
 // ─── Indexing ─────────────────────────────────────────────────────────────────
@@ -240,6 +248,9 @@ describe("SemanticIndex — degradation", () => {
       expect(tiersUsed).not.toContain("semantic");
       expect(results.length).toBeGreaterThan(0);
     } finally {
+      // The search fired a background refresh; let it release the embed lock
+      // so it cannot leak into the next test.
+      await index.refresh(graph).catch(() => {});
       detachSemanticIndex(graph);
     }
   });
@@ -397,6 +408,65 @@ describe("SemanticIndex — degradation", () => {
 });
 
 // ─── Query ────────────────────────────────────────────────────────────────────
+
+// ─── Cross-process coordination ───────────────────────────────────────────────
+
+describe("SemanticIndex — one embedding pass per vault", () => {
+  it("adopts vectors another process persisted instead of embedding again", async () => {
+    const leader = new SemanticIndex(vaultRoot, makeConfig());
+    await leader.refresh(graph);
+    expect(stub.embedCalls.length).toBeGreaterThan(0);
+
+    stub.embedCalls.length = 0;
+    const follower = new SemanticIndex(vaultRoot, makeConfig());
+    await follower.refresh(graph);
+
+    expect(stub.embedCalls).toEqual([]);
+    expect(follower.status).toBe("ready");
+    expect(follower.stats.note_count).toBe(2);
+  });
+
+  it("does not embed while another process holds the embed lock, then catches up", async () => {
+    const held = await acquireIndexLock(vaultRoot, "embed");
+    expect(held).not.toBeNull();
+
+    const follower = new SemanticIndex(vaultRoot, makeConfig());
+    try {
+      await follower.refresh(graph);
+      expect(stub.embedCalls).toEqual([]);
+      expect(follower.status).toBe("indexing");
+      expect(follower.stats.reason).toContain("Another OIL process");
+    } finally {
+      follower.stop();
+      await held!.release();
+    }
+
+    // The holder went away without saving; the next pass takes over the job.
+    await follower.refresh(graph);
+    expect(stub.embedCalls.length).toBeGreaterThan(0);
+    expect(follower.status).toBe("ready");
+    expect(follower.stats.note_count).toBe(2);
+  });
+
+  it("takes over a lock whose holder is dead", async () => {
+    const { writeFile: write, mkdir: mk } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    const { hostname } = await import("node:os");
+    const path = lockPath(vaultRoot, "embed");
+    await mk(dirname(path), { recursive: true });
+    // A pid that cannot be running: the max 32-bit value.
+    await write(
+      path,
+      JSON.stringify({ pid: 2 ** 31 - 2, host: hostname(), token: "dead", job: "embed" }),
+      "utf-8",
+    );
+
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.refresh(graph);
+    expect(stub.embedCalls.length).toBeGreaterThan(0);
+    expect(index.status).toBe("ready");
+  });
+});
 
 describe("SemanticIndex — query", () => {
   it("caches the query vector across repeated searches", async () => {

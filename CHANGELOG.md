@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2026-10-15
+
+### Fixed
+
+- **One indexer per vault across parallel sessions.** A per-vault lease
+  (`<tmpdir>/oil-locks`) makes the graph build and the embedding pass
+  singletons. Graph waiters load the leader's saved index; embedding followers
+  keep serving lexical search and adopt vectors from the sidecar as the leader
+  checkpoints, then take over if it exits. Observed with 6 simultaneous
+  processes on a 300-note vault: 1 graph build and 300 embeds with at most 1
+  concurrent request, versus 6 builds and 1,800 embeds at 6 concurrent
+  requests without it. `OIL_INDEX_LOCK=off` restores the old behaviour;
+  `OIL_LOCK_DIR` moves the leases.
+- **Scheduled archiving runs once per vault.** With `archive.run` set to
+  `on_start` or `daily`, every session used to apply the rules at the same
+  time, moving the same notes and racing on `.oil-archive.json`. The run now
+  takes the same lease; `daily` re-checks the manifest after acquiring it.
+
 ## [0.9.1] - 2026-10-09
 
 ### Fixed
@@ -21,6 +39,7 @@ All notable changes to this project will be documented in this file.
   - Alias and canonical requests assemble the same opportunities, milestones,
     linked data, mtime/version anchors, and `brief`/`full`/`write` responses.
     The `write` view remains read-only scaffolding.
+
 
 ## [0.9.0] - 2026-10-06
 

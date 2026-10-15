@@ -19,7 +19,9 @@ import {
   planArchive,
   restoreArchived,
   setFrontmatterFields,
+  startArchiveScheduler,
 } from "../archive.js";
+import { acquireIndexLock } from "../index-lock.js";
 import { setupHarness } from "./harness.js";
 import type { OilConfig } from "../types.js";
 
@@ -438,5 +440,31 @@ describe("manage_archive tool", () => {
     const res = await server.callToolJson("manage_archive", { action: "apply" });
     expect(JSON.stringify(res)).toMatch(/CAPABILITY_MISSING/);
     expect(await exists("Projects/Apollo.md")).toBe(true);
+  });
+});
+
+// ── Scheduler across parallel sessions ───────────────────────────────────────
+
+describe("archive scheduler — one run per vault across processes", () => {
+  it("skips the run while another process holds the archive lease", async () => {
+    await buildVault("move");
+    const { graph, config } = await open();
+    config.archive.run = "on_start";
+
+    const held = await acquireIndexLock(vault, "archive", { log: () => {} });
+    expect(held).not.toBeNull();
+    try {
+      startArchiveScheduler(vault, graph, config);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await exists("Projects/Apollo.md")).toBe(true);
+    } finally {
+      await held!.release();
+    }
+
+    const ran = new Promise<void>((resolve) => {
+      startArchiveScheduler(vault, graph, config, undefined, () => resolve());
+    });
+    await ran;
+    expect(await exists("Projects/Apollo.md")).toBe(false);
   });
 });

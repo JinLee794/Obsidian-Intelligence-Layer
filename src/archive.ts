@@ -30,6 +30,7 @@ import type { ArchiveRule, OilConfig } from "./types.js";
 import { appendToSection, logWrite } from "./gate.js";
 import { detectLineEnding, noteExists, normalizeLineEndings, resolveCustomerPath, securePath } from "./vault.js";
 import { invalidateSearchIndex } from "./search.js";
+import { acquireIndexLock } from "./index-lock.js";
 import {
   ARCHIVED_FLAG,
   isArchivedNote,
@@ -606,10 +607,19 @@ export function startArchiveScheduler(
   }
 
   let running = false;
-  const runOnce = async (reason: string): Promise<void> => {
+  const runOnce = async (reason: string, due?: () => Promise<boolean>): Promise<void> => {
     if (running) return;
     running = true;
+    // Every session runs this scheduler. Without a per-vault lease, parallel
+    // sessions would move the same notes and race on the manifest at once.
+    const lease = await acquireIndexLock(vaultPath, "archive");
+    if (!lease) {
+      running = false;
+      return;
+    }
     try {
+      // Another process may have finished a run while this one waited to check.
+      if (due && !(await due())) return;
       const result = await applyArchive(vaultPath, graph, config, { cache });
       if (result.archived.length > 0 || result.skipped.length > 0) {
         console.error(
@@ -622,6 +632,7 @@ export function startArchiveScheduler(
     } catch (err) {
       console.error(`[OIL] Archive (${reason}) failed:`, err);
     } finally {
+      await lease.release();
       running = false;
     }
   };
@@ -631,10 +642,13 @@ export function startArchiveScheduler(
     return () => {};
   }
 
-  const runIfDue = async (): Promise<void> => {
+  const isDue = async (): Promise<boolean> => {
     const manifest = await readManifest(vaultPath, config);
     const last = manifest.lastRunAt ? Date.parse(manifest.lastRunAt) : NaN;
-    if (!Number.isFinite(last) || Date.now() - last >= DAY_MS) await runOnce("daily");
+    return !Number.isFinite(last) || Date.now() - last >= DAY_MS;
+  };
+  const runIfDue = async (): Promise<void> => {
+    if (await isDue()) await runOnce("daily", isDue);
   };
   void runIfDue();
   const timer = setInterval(() => void runIfDue(), SCHEDULE_CHECK_MS);
