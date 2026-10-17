@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Security
+
+- **Patched dependencies shipped in `bundle/cli.js`:**
+  `@modelcontextprotocol/sdk` 1.32.1, `fast-uri` 3.1.8 (via `ajv`),
+  `js-yaml` 3.15.2 (via `gray-matter`) and `yaml` 2.9.1.
+- **Patched dev and test tooling** (not shipped): `vitest` 4.1.11 (now on
+  `vite` 8), `esbuild` 0.28.2, `hono` 4.13.13, `@hono/node-server` 2.1.4, and
+  the `express` dependency chain (`qs`, `path-to-regexp`, `proxy-addr`,
+  `body-parser`, `ip-address`).
+
 ## [0.9.2] - 2026-10-15
 
 ### Fixed
