@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [0.9.2] - 2026-10-15
 
+**Upgrade now if you run more than one Copilot session.** Before 0.9.2, every
+session indexed the vault on its own and re-ran `git` at launch. Six sessions
+meant six graph builds, 1,800 embedding requests at 6 concurrent, and up to 32
+`git` processes. That load can pin the CPU and GPU, overheat the machine and
+make it unresponsive. 0.9.2 does that work once per vault.
+
 ### Fixed
 
 - **One indexer per vault across parallel sessions.** A per-vault lease
