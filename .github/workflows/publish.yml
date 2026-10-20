@@ -53,12 +53,18 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Only the mcaps-microsoft mirror can write @mcaps-microsoft packages; a
+      # fork's GITHUB_TOKEN gets 403 "The requested installation does not exist".
       - name: Publish
-        if: steps.version.outputs.changed == 'true' && github.event.inputs.dry_run != 'true'
+        if: github.repository_owner == 'mcaps-microsoft' && steps.version.outputs.changed == 'true' && github.event.inputs.dry_run != 'true'
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Skip (not the publishing repository)
+        if: github.repository_owner != 'mcaps-microsoft'
+        run: echo "Packages publish from mcaps-microsoft/${{ github.event.repository.name }} — skipping in ${{ github.repository }}."
+
       - name: Skip (version unchanged)
-        if: steps.version.outputs.changed != 'true'
+        if: github.repository_owner == 'mcaps-microsoft' && steps.version.outputs.changed != 'true'
         run: echo "Version ${{ steps.version.outputs.current }} already published — skipping."
