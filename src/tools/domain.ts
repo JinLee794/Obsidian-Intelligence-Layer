@@ -42,6 +42,8 @@ import {
 } from "../vault.js";
 import { extractPrefetchIds } from "../correlate.js";
 import { checkVaultHealth } from "../hygiene.js";
+import { cascadeSearch } from "../search.js";
+import { hubEvidence, type NameEvidence } from "../customer-match.js";
 
 /**
  * Register the 3 high-value domain tools on the MCP server.
@@ -61,7 +63,7 @@ export function registerDomainTools(
       description:
         "Full assembled context for a named customer — frontmatter, opportunities with GUIDs, milestones, team composition, recent meetings, linked people, open action items, and optionally similar customers.",
       inputSchema: {
-        customer: z.string().describe("Canonical customer name, unique hub title or declared alias, or TPID"),
+        customer: z.string().describe("Customer name, hub title, alias, or TPID. Short names, typos and acronyms resolve when exactly one customer's name matches"),
         lookback_days: z
           .number()
           .optional()
@@ -116,14 +118,24 @@ export function registerDomainTools(
       const lookback = lookback_days ?? 90;
       let customerFile: string;
       let customerStats: Awaited<ReturnType<typeof stat>>;
+      let resolution: { input: string; via: "name_match"; evidence: NameEvidence } | undefined;
+      let suggestions: CustomerSuggestion[] = [];
 
       try {
-        const candidates = await findCustomerMatches(vaultPath, graph, config, resolvedCustomer);
+        let candidates = await findCustomerMatches(vaultPath, graph, config, resolvedCustomer);
+        if (candidates.length === 0) {
+          const byName = await resolveCustomerByName(graph, config, resolvedCustomer);
+          suggestions = byName.suggestions;
+          if (byName.matches.length > 0) candidates = byName.matches;
+          if (byName.matches.length === 1) {
+            resolution = { input: customer, via: "name_match", evidence: byName.matches[0].evidence };
+          }
+        }
         if (candidates.length > 1) {
           return errorResponse(
             "CONFLICT",
             `Ambiguous customer name "${customer}". Use an exact canonical customer name from the candidates.`,
-            { customer, candidates },
+            { customer, candidates: candidates.map(({ customer, customer_path }) => ({ customer, customer_path })) },
             {
               retryable: true,
               suggested_tools: ["get_customer_context", "get_note_metadata"],
@@ -143,12 +155,13 @@ export function registerDomainTools(
         return errorResponse(
           errorCodeFromUnknown(err),
           `Customer file could not be read for ${resolvedCustomer}: ${err instanceof Error ? err.message : String(err)}`,
-          { customer: resolvedCustomer },
+          { customer: resolvedCustomer, ...(suggestions.length > 0 ? { suggestions } : {}) },
           {
             retryable: true,
             suggested_tools: ["query_frontmatter", "search_vault"],
-            next_step:
-              "Inspect customer hubs with search_vault or query_frontmatter (key 'aliases' or 'alias'), then retry with an exact canonical customer name or a unique declared alias. No fuzzy or parent-account mapping is applied.",
+            next_step: suggestions.length > 0
+              ? "No customer's name matches. The suggestions are customers whose notes mention it (e.g. a subsidiary or product); confirm the right one, then retry with its exact customer name."
+              : "Inspect customer hubs with search_vault or query_frontmatter (key 'aliases' or 'alias'), then retry with an exact canonical customer name or a unique declared alias.",
           },
         );
       }
@@ -238,6 +251,7 @@ export function registerDomainTools(
         customer_mtime_ms: customerStats.mtimeMs,
         customer_version: customerStats.mtimeMs,
         view: requestedView,
+        ...(resolution ? { resolution } : {}),
       };
 
       if (requestedView === "brief") {
@@ -424,6 +438,84 @@ interface CustomerCandidate {
   customer_path: string;
 }
 
+interface CustomerHub extends CustomerCandidate {
+  /** Folder name, entity title, H1 and aliases, as written. */
+  names: string[];
+}
+
+interface CustomerSuggestion extends CustomerCandidate {
+  /** Notes under this customer that the search matched. */
+  matched_notes: number;
+}
+
+const normalizeCustomerName = (name: string) => normalizeValue(name).replace(/\s+/g, " ");
+
+/** Customer hub notes in the graph, keyed by customer name. */
+function customerHubs(graph: GraphIndex, config: OilConfig): Map<string, CustomerHub> {
+  const hubs = new Map<string, CustomerHub>();
+  const root = config.schema.customersRoot;
+  for (const ref of graph.getNotesByFolder(root)) {
+    const customer = customerNameFromPath(ref.path, config);
+    const nested = `${root}${customer}/${customer}.md`;
+    const flat = `${root}${customer}.md`;
+    if (ref.path !== nested && ref.path !== flat) continue;
+    const node = graph.getNode(ref.path);
+    if (!node) continue;
+
+    let hub = hubs.get(customer);
+    if (!hub) {
+      hub = { customer, customer_path: ref.path, names: [] };
+      hubs.set(customer, hub);
+    }
+    // A flat and nested hub for the same identity retain nested precedence.
+    if (ref.path === nested) hub.customer_path = nested;
+    hub.names.push(customer, resolveEntityName(node, config), node.title, ...readAliases(node.frontmatter));
+  }
+  return hubs;
+}
+
+/**
+ * Fallback when no exact name or alias matches. A customer is accepted only
+ * when one of its own names accounts for the input (see customer-match.ts);
+ * every hub is checked so a second matching customer always surfaces as
+ * ambiguity. When none match, vault search ranks the customers whose notes
+ * mention the input — returned as suggestions, never as matches.
+ */
+async function resolveCustomerByName(
+  graph: GraphIndex,
+  config: OilConfig,
+  input: string,
+): Promise<{ matches: Array<CustomerCandidate & { evidence: NameEvidence }>; suggestions: CustomerSuggestion[] }> {
+  const root = config.schema.customersRoot;
+  const hubs = customerHubs(graph, config);
+
+  const matches: Array<CustomerCandidate & { evidence: NameEvidence }> = [];
+  for (const { customer, customer_path, names } of hubs.values()) {
+    const evidence = hubEvidence(input, names);
+    if (evidence) matches.push({ customer, customer_path, evidence });
+  }
+  // A full-name match outranks an acronym coincidence ("ASH" as initials vs a hub named "Ash Ventures").
+  const named = matches.filter((m) => m.evidence === "name");
+  const accepted = named.length > 0 ? named : matches;
+  if (accepted.length > 0) {
+    accepted.sort((a, b) => a.customer_path < b.customer_path ? -1 : a.customer_path > b.customer_path ? 1 : 0);
+    return { matches: accepted, suggestions: [] };
+  }
+
+  const { results } = await cascadeSearch(graph, input, 50, { folder: root, scope: "active" });
+  const ranked = new Map<string, CustomerSuggestion>();
+  for (const hit of results) {
+    if (!hit.path.startsWith(root)) continue;
+    const hub = hubs.get(customerNameFromPath(hit.path, config));
+    if (!hub) continue;
+    const entry = ranked.get(hub.customer)
+      ?? { customer: hub.customer, customer_path: hub.customer_path, matched_notes: 0 };
+    entry.matched_notes += 1;
+    ranked.set(hub.customer, entry);
+  }
+  return { matches: [], suggestions: [...ranked.values()].slice(0, 3) };
+}
+
 /**
  * Identity lookup for context reads only. Path construction for new notes and
  * other workflows deliberately remains literal in resolveCustomerPath.
@@ -434,10 +526,8 @@ async function findCustomerMatches(
   config: OilConfig,
   input: string,
 ): Promise<CustomerCandidate[]> {
-  const hubs = new Map<string, CustomerCandidate & { names: Set<string> }>();
   const root = config.schema.customersRoot;
-  const normalize = (name: string) => normalizeValue(name).replace(/\s+/g, " ");
-  const normalizedInput = normalize(input);
+  const normalizedInput = normalizeCustomerName(input);
   const exactNested = `${root}${input}/${input}.md`;
   const exactFlat = `${root}${input}.md`;
   const exact = graph.getNode(exactNested) ?? graph.getNode(exactFlat);
@@ -464,28 +554,8 @@ async function findCustomerMatches(
     return [{ customer: input, customer_path: exactFlat }];
   }
 
-  for (const ref of graph.getNotesByFolder(root)) {
-    const customer = customerNameFromPath(ref.path, config);
-    const nested = `${root}${customer}/${customer}.md`;
-    const flat = `${root}${customer}.md`;
-    if (ref.path !== nested && ref.path !== flat) continue;
-    const node = graph.getNode(ref.path);
-    if (!node) continue;
-
-    let hub = hubs.get(customer);
-    if (!hub) {
-      hub = { customer, customer_path: ref.path, names: new Set() };
-      hubs.set(customer, hub);
-    }
-    // A flat and nested hub for the same identity retain nested precedence.
-    if (ref.path === nested) hub.customer_path = nested;
-    for (const name of [customer, resolveEntityName(node, config), node.title, ...readAliases(node.frontmatter)]) {
-      hub.names.add(normalize(name));
-    }
-  }
-
-  return [...hubs.values()]
-    .filter((hub) => hub.names.has(normalizedInput))
+  return [...customerHubs(graph, config).values()]
+    .filter((hub) => hub.names.some((name) => normalizeCustomerName(name) === normalizedInput))
     .map(({ customer, customer_path }) => ({ customer, customer_path }))
     .sort((a, b) => a.customer_path < b.customer_path ? -1 : a.customer_path > b.customer_path ? 1 : 0);
 }

@@ -5,7 +5,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2",
+        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.3",
         "--",
         "obsidian-intelligence-layer",
         "mcp"

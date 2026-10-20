@@ -64,11 +64,11 @@ resolves the local project of the same name, so use the local build instead.
 something needs attention:
 
 ```bash
-npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.2 -- \
+npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.3 -- \
   obsidian-intelligence-layer doctor --vault=/absolute/path/to/vault
 ```
 
-Keep the `@0.9.2` version. Without it, `npx` takes whatever `latest` resolves to,
+Keep the `@0.9.3` version. Without it, `npx` takes whatever `latest` resolves to,
 which may not match the plugin's server and can lack the `doctor` subcommand.
 
 **Step 3 — set it persistently, then restart.** MCP servers are spawned once, at
