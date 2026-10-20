@@ -188,7 +188,7 @@ describe("Customer hub identity lookup", () => {
   });
 
   it.each([
-    "Unknown Customer", "Contos", "CORPORATION", "Contoso Subsidiary",
+    "Unknown Customer", "CORPORATION", "Contoso Subsidiary",
     "Opportunity Only", "Milestone Only", "Nonhub Only", "Nonhub Title",
     "Deep Only", "Person Only", "Meeting Only", "Unconfigured Title", "42",
   ])("does not invent a hub for %s", async (input) => {
@@ -311,7 +311,10 @@ describe("Canonical-equivalent customer context", () => {
     expect(await context("Fresh", "write")).toEqual(refreshed);
 
     await harness.graph.updateNote("Customers/Fresh/Fresh.md");
-    expect((await context("Fresh Alias")).error_code).toBe("NOT_FOUND");
+    // The old alias no longer matches exactly; only name matching still finds it inside "New Fresh Alias".
+    const stale = await context("Fresh Alias");
+    expect(stale.resolution).toEqual({ input: "Fresh Alias", via: "name_match", evidence: "name" });
+    expect(stale.customer_path).toBe("Customers/Fresh/Fresh.md");
     expect(await context("New Fresh Alias", "write")).toEqual(refreshed);
     harness.graph.removeNote("Customers/Fresh/Fresh.md");
     await rm(file);

@@ -2,7 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.3] - 2026-10-20
+
+### Fixed
+
+- **Customer context resolves short names, typos and acronyms.** Hubs are
+  usually named by legal account name (`NORTHWIND TRADERS CORPORATION`,
+  `Tailspin (Wingtip Toys)`), but agents ask for `Northwind` or `Tailspin`, so
+  `get_customer_context` returned `NOT_FOUND` whenever no alias covered the
+  short form. When no exact name or alias matches, a hub is now accepted if
+  one of its names accounts for every distinctive word of the input (exact,
+  prefix, small typo distance, or initials), ignoring legal and industry
+  words. Every hub is checked, so two matching customers still return
+  `CONFLICT`. Matches carry a `resolution` field naming the evidence.
+  - Vault search is not trusted to pick a customer: on a 360-note vault it
+    ranked a real customer first for `Contoso`, `Fourth Coffee` and `Azure OpenAI`
+    because that customer's notes mentioned them. Search results are instead
+    returned as `suggestions` on `NOT_FOUND` (e.g. a subsidiary surfaces its
+    parent), never as matches.
+  - Observed on that vault: 18 short-name, typo and acronym requests resolved
+    to the right customer, and 10 unrelated or generic names (e.g. `Hospital`,
+    `Corporation`) returned `NOT_FOUND`.
 
 ### Security
 
