@@ -5,9 +5,9 @@
  * Persisted to _oil-graph.json for fast restart.
  */
 
-import { readFile, writeFile, rename, unlink, readdir, stat } from "node:fs/promises";
+import { readFile, writeFile, rename, unlink, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join, dirname, basename, extname } from "node:path";
+import { join, basename, extname } from "node:path";
 import matter from "gray-matter";
 import type {
   BrokenLink,
@@ -18,6 +18,7 @@ import type {
   TagCount,
 } from "./types.js";
 import { listAllNotes, extractWikilinks, normalizeWikilinkTarget, isAllowedFile, normalizeLineEndings } from "./vault.js";
+import { findConflictCopies, removeFiles, sameMtime, sweepStaleTemps } from "./sidecar-sync.js";
 
 /** Extensions a wikilink may carry and still target an indexed note. */
 const MARKDOWN_LINK_EXTENSIONS = new Set([".md", ".markdown", ".txt"]);
@@ -795,33 +796,36 @@ export class GraphIndex {
       await unlink(tmpPath).catch(() => {});
       throw err;
     }
-    await this.sweepStaleTemps(fullPath);
+    await sweepStaleTemps(fullPath);
+    await this.removeConflictCopies(graphIndexFile);
     this._dirty = false;
     console.error(`[OIL] Graph index saved: ${persistedNodes.length} nodes.`);
   }
 
   /**
-   * Remove temp files orphaned when a process was killed between write and
-   * rename. Only sweeps files old enough to not belong to a live save.
+   * Delete sync-conflict copies of the persisted graph.
+   *
+   * The graph is derived entirely from the notes and revalidated against them
+   * on every start, so a forked copy holds nothing the canonical file cannot
+   * recover — it is only bloat. A candidate is removed only once it parses as a
+   * graph index, so a user file that merely shares the name is left alone.
    */
-  private async sweepStaleTemps(indexFullPath: string): Promise<void> {
-    try {
-      const dir = dirname(indexFullPath);
-      const prefix = `${basename(indexFullPath)}.`;
-      const cutoff = Date.now() - 60_000;
-      const entries = await readdir(dir);
-      await Promise.all(
-        entries
-          .filter((name) => name.startsWith(prefix) && name.endsWith(".tmp"))
-          .map(async (name) => {
-            const candidate = join(dir, name);
-            const info = await stat(candidate).catch(() => null);
-            if (info && info.mtimeMs < cutoff) await unlink(candidate).catch(() => {});
-          }),
-      );
-    } catch {
-      // Best-effort cleanup only.
+  async removeConflictCopies(graphIndexFile: string): Promise<number> {
+    const copies = await findConflictCopies(join(this.vaultPath, graphIndexFile));
+    const ours: string[] = [];
+    for (const copy of copies) {
+      try {
+        const data = JSON.parse(await readFile(copy, "utf-8")) as Partial<PersistedGraph>;
+        if (typeof data.version === "number" && Array.isArray(data.nodes)) ours.push(copy);
+      } catch {
+        // Not ours, or unreadable — leave it.
+      }
     }
+    const removed = await removeFiles(ours);
+    if (removed > 0) {
+      console.error(`[OIL] Removed ${removed} sync-conflict cop${removed === 1 ? "y" : "ies"} of the graph index.`);
+    }
+    return removed;
   }
 
   /**
@@ -904,7 +908,7 @@ export class GraphIndex {
       console.error(`[OIL] Graph index loaded from disk: ${this.nodes.size} nodes.`);
       // Startup is the reliable moment to clear temp files from a killed save;
       // a read-only session may never write.
-      await this.sweepStaleTemps(fullPath);
+      await sweepStaleTemps(fullPath);
       return true;
     } catch (err) {
       // A missing index is the normal first-run case; anything else is a
@@ -977,7 +981,7 @@ export class GraphIndex {
         const currentMtime = mtimes[i];
         if (currentMtime === null) return false;
         const cachedMtime = this.fileMtimes.get(notePath);
-        return cachedMtime === undefined || Math.abs(currentMtime - cachedMtime) > 1;
+        return cachedMtime === undefined || !sameMtime(currentMtime, cachedMtime);
       });
 
       // Re-read changed notes in batches, persisting as we go. A mass
@@ -1030,6 +1034,7 @@ export class GraphIndex {
         console.error(`[OIL] Incremental rebuild: ${reindexed} note(s) updated.`);
       } else {
         console.error("[OIL] Graph index up to date — no changes detected.");
+        await this.removeConflictCopies(graphIndexFile);
       }
 
       return reindexed;

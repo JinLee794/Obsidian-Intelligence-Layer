@@ -204,7 +204,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.3",
+        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4",
         "--",
         "obsidian-intelligence-layer",
         "mcp"
@@ -695,6 +695,24 @@ that matters. Revalidation is what lets a stale index converge, so it goes
 first; gating it behind the watcher meant any session shorter than the watcher's
 scan did no index work at all, and such a client never converged however often
 it reconnected.
+
+### One index per vault, across machines
+
+`_oil-graph.json` and `_oil-vectors.json` live in the vault, so every machine
+that syncs it shares one index — with one embedding model, vectors from any
+machine are interchangeable. Two things keep it single:
+
+- **Mtimes are compared at the precision the sync client reports.** OneDrive on
+  macOS truncates mtimes to whole seconds where Windows keeps sub-millisecond
+  values; compared exactly, every note looked modified whenever the index
+  changed hands, so each machine re-read the vault and rewrote the shared file.
+- **Sync-conflict copies are folded back in.** When two machines save before the
+  sync client reconciles, it forks the file (`_oil-vectors-<machine>.json`,
+  `… (1).json`, `… conflicted copy …`, `.sync-conflict-…`). On startup OIL
+  reuses any vectors in a fork whose note text is unchanged, saves the canonical
+  file, and deletes the fork. Graph forks are deleted outright — the graph is
+  rebuilt from the notes anyway. Only files that parse as OIL's own format are
+  touched.
 
 ### Keeping up with edits
 

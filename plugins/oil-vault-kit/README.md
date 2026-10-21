@@ -71,11 +71,11 @@ Without it, the server never starts. The check below then prints
 Verify before opening a session:
 
 ```bash
-npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.3 -- \
+npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4 -- \
   obsidian-intelligence-layer doctor --vault="$OBSIDIAN_VAULT_PATH"
 ```
 
-Keep the `@0.9.3` version: without it `npx` takes `latest`, which may not match
+Keep the `@0.9.4` version: without it `npx` takes `latest`, which may not match
 the plugin's server.
 
 > MCP servers are spawned once, at session start. Setting
@@ -314,7 +314,7 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 the `mcaps-microsoft` mirror:
 
 ```
-npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.3 -- obsidian-intelligence-layer mcp
+npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4 -- obsidian-intelligence-layer mcp
 ```
 
 The pin, `plugin.json`'s `version`, and the marketplace entry are all asserted
@@ -347,5 +347,5 @@ The public repository also gets a release tarball from `release-asset.yml`, for
 installs outside the org:
 
 ```
-npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.3/mcaps-microsoft-obsidian-intelligence-layer-0.9.3.tgz -- obsidian-intelligence-layer mcp
+npx -y --package=https://github.com/JinLee794/Obsidian-Intelligence-Layer/releases/download/v0.9.4/mcaps-microsoft-obsidian-intelligence-layer-0.9.4.tgz -- obsidian-intelligence-layer mcp
 ```

@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.4] - 2026-10-21
+
+### Fixed
+
+- **One shared index per synced vault, not one per machine.** Opening a
+  OneDrive vault from Windows and macOS left per-machine copies such as
+  `_oil-graph-DESKTOP-….json` and `_oil-vectors-Jin's MacBook Pro (2).json`.
+  macOS reports whole-second mtimes, so each machine treated most notes as
+  changed and rewrote the shared index. OneDrive then forked it on conflict.
+  Mtimes are now compared at the coarser precision. Sync-conflict copies from
+  OneDrive, Dropbox, Google Drive and Syncthing are merged on startup: unchanged
+  vectors are reused, then the copy is deleted. Observed on a 750-note vault: a
+  Mac-written index re-read 173 notes on Windows instead of about 730. All 4
+  copies were cleared, and 91 forked vectors were reused, so only 1 note was
+  re-embedded. Orphaned `_oil-vectors.json.*.tmp` files are now swept on load.
+
 ## [0.9.3] - 2026-10-20
 
 ### Fixed
