@@ -23,6 +23,7 @@ import { flattenFrontmatter } from "./frontmatter.js";
 import { describeSemanticDisabledBy } from "./config.js";
 import { isArchivedNote, shouldEmbedArchived } from "./archive-policy.js";
 import { acquireIndexLock, describeHolder, type IndexLease } from "./index-lock.js";
+import { findConflictCopies, removeFiles, sweepStaleTemps } from "./sidecar-sync.js";
 import type { ConfigSource, NoteFrontmatter, SemanticConfig } from "./types.js";
 
 /** Sidecar format version. Bump to force a full re-embed. */
@@ -174,8 +175,9 @@ function encodeVector(vector: Float32Array): string {
 /**
  * Decode through a fresh ArrayBuffer: `Buffer.from(base64)` may land on a
  * pooled, unaligned offset, and `Float32Array` requires 4-byte alignment.
- * The encoding is host-endian, which is safe because the sidecar never leaves
- * the machine that wrote it — and a mismatch only costs one re-embed.
+ * The encoding is host-endian. The sidecar is shared by every machine that
+ * syncs the vault, which is safe because every host Node supports in practice
+ * (x64, arm64) is little-endian — and a mismatch would only cost one re-embed.
  */
 function decodeVector(encoded: string): Float32Array {
   const bytes = Buffer.from(encoded, "base64");
@@ -295,6 +297,15 @@ export class SemanticIndex {
   private sidecarMtimeMs = 0;
   /** Pending re-check while another process is embedding. */
   private followerTimer: NodeJS.Timeout | null = null;
+  /**
+   * Vectors recovered from sync-conflict copies of the sidecar, keyed by the
+   * hash of the text they embed. Content-addressed rather than path-addressed
+   * because a forked copy may describe an older version of a note: it is only
+   * reused where the text still matches exactly.
+   */
+  private spare = new Map<string, Float32Array>();
+  /** Conflict copies read into `spare`, deleted once the canonical file is saved. */
+  private conflictCopies: string[] = [];
 
   constructor(vaultPath: string, config: SemanticConfig, enabledSource?: ConfigSource) {
     this.vaultPath = vaultPath;
@@ -358,20 +369,82 @@ export class SemanticIndex {
       this.sidecarMtimeMs = info.mtimeMs;
 
       if (
-        parsed.version !== INDEX_VERSION ||
-        parsed.model !== this.config.model ||
-        !parsed.entries
+        parsed.version === INDEX_VERSION &&
+        parsed.model === this.config.model &&
+        parsed.entries
       ) {
-        return;
+        for (const [path, entry] of Object.entries(parsed.entries)) {
+          this.vectors.set(path, { hash: entry.hash, vector: decodeVector(entry.vector) });
+        }
+        this.dimensions = parsed.dimensions;
       }
-
-      for (const [path, entry] of Object.entries(parsed.entries)) {
-        this.vectors.set(path, { hash: entry.hash, vector: decodeVector(entry.vector) });
-      }
-      this.dimensions = parsed.dimensions;
     } catch {
       // No sidecar, or an unreadable one — the next refresh rebuilds it.
     }
+    // Startup is the reliable moment to clear temp files from a killed save;
+    // a session with nothing new to embed may never write.
+    await sweepStaleTemps(this.indexPath);
+    await this.absorbConflictCopies();
+  }
+
+  /**
+   * Read sync-conflict copies of the sidecar into the spare pool.
+   *
+   * Every machine shares one sidecar through the vault's sync client, and with
+   * one embedding model the vectors are interchangeable between them. When two
+   * machines save before the client reconciles, it forks the file per machine;
+   * this folds the fork's vectors back in so no machine re-embeds what another
+   * already has. Copies written by a different model or format are still ours to
+   * delete, but contribute nothing.
+   */
+  private async absorbConflictCopies(): Promise<void> {
+    const known = new Set<string>();
+    for (const entry of this.vectors.values()) known.add(entry.hash);
+
+    for (const copy of await findConflictCopies(this.indexPath)) {
+      let parsed: Partial<PersistedIndex>;
+      try {
+        parsed = JSON.parse(await readFile(copy, "utf-8")) as Partial<PersistedIndex>;
+      } catch {
+        continue;
+      }
+      if (typeof parsed.model !== "string" || !parsed.entries || typeof parsed.entries !== "object") {
+        continue;
+      }
+      this.conflictCopies.push(copy);
+      if (
+        parsed.version !== INDEX_VERSION ||
+        parsed.model !== this.config.model ||
+        (this.dimensions !== 0 && parsed.dimensions !== this.dimensions)
+      ) {
+        continue;
+      }
+      if (this.dimensions === 0 && typeof parsed.dimensions === "number") {
+        this.dimensions = parsed.dimensions;
+      }
+      for (const entry of Object.values(parsed.entries)) {
+        if (known.has(entry.hash) || this.spare.has(entry.hash)) continue;
+        this.spare.set(entry.hash, decodeVector(entry.vector));
+      }
+    }
+    if (this.conflictCopies.length > 0) {
+      console.error(
+        `[OIL] Semantic: found ${this.conflictCopies.length} sync-conflict cop${this.conflictCopies.length === 1 ? "y" : "ies"} of ${this.config.indexFile} — merging ${this.spare.size} vector(s) back into it.`,
+      );
+    }
+  }
+
+  /** Delete conflict copies once their useful vectors are in the canonical file. */
+  private async retireConflictCopies(): Promise<void> {
+    if (this.conflictCopies.length === 0) return;
+    const removed = await removeFiles(this.conflictCopies);
+    if (removed > 0) {
+      console.error(
+        `[OIL] Semantic: removed ${removed} sync-conflict cop${removed === 1 ? "y" : "ies"} of ${this.config.indexFile}.`,
+      );
+    }
+    this.conflictCopies = [];
+    this.spare.clear();
   }
 
   private async save(): Promise<void> {
@@ -406,7 +479,10 @@ export class SemanticIndex {
     } catch (err) {
       await unlink(tempPath).catch(() => {});
       console.error("[OIL] Semantic: failed to persist vector index:", err);
+      return;
     }
+    await sweepStaleTemps(this.indexPath);
+    await this.retireConflictCopies();
   }
 
   /**
@@ -657,6 +733,19 @@ export class SemanticIndex {
       }
     }
 
+    // Another machine may have embedded a note before the sync client forked
+    // the sidecar; reuse its vector wherever the text is still identical.
+    if (this.spare.size > 0) {
+      for (const [path, hash] of wanted) {
+        if (this.vectors.get(path)?.hash === hash) continue;
+        const vector = this.spare.get(hash);
+        if (!vector) continue;
+        this.vectors.set(path, { hash, vector });
+        changed = true;
+      }
+      if (changed) this.queryCache.clear();
+    }
+
     const pendingNow = () =>
       [...wanted.entries()].filter(([path, hash]) => this.vectors.get(path)?.hash !== hash);
     let pending = pendingNow();
@@ -673,6 +762,7 @@ export class SemanticIndex {
         this.reason = null;
       }
       if (changed) await this.saveIfUncontended();
+      else await this.retireConflictCopies();
       return;
     }
 
@@ -695,6 +785,8 @@ export class SemanticIndex {
             this.state = "ready";
             this.reason = null;
           }
+          if (changed) await this.save();
+          else await this.retireConflictCopies();
           return;
         }
       }

@@ -8,7 +8,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, readFile, utimes } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { GraphIndex } from "../graph.js";
@@ -217,6 +217,76 @@ describe("SemanticIndex — indexing", () => {
     );
     // No source supplied: stay truthful rather than naming one.
     expect(new SemanticIndex(vaultRoot, config).stats.reason).not.toMatch(/oil\.config\.yaml/);
+  });
+});
+
+// ─── Shared sidecar across synced machines ────────────────────────────────────
+
+describe("SemanticIndex — one sidecar shared through a synced vault", () => {
+  const canonical = () => join(vaultRoot, DEFAULT_CONFIG.semantic.indexFile);
+  // OneDrive names a forked file after the machine that lost the race.
+  const forked = () => join(vaultRoot, "_oil-vectors-Jin’s MacBook Pro (2).json");
+
+  afterEach(async () => {
+    await rm(forked(), { force: true });
+  });
+
+  it("folds a sync-conflict copy back in and deletes it without re-embedding", async () => {
+    const other = new SemanticIndex(vaultRoot, makeConfig());
+    await other.refresh(graph);
+    // The other machine's save became the conflict copy; this machine has none.
+    await writeFile(forked(), await readFile(canonical(), "utf-8"), "utf-8");
+    await rm(canonical());
+    stub.embedCalls.length = 0;
+
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.load();
+    await index.refresh(graph);
+
+    expect(stub.embedCalls).toHaveLength(0);
+    expect(index.stats.note_count).toBe(2);
+    expect(index.status).toBe("ready");
+    const saved = JSON.parse(await readFile(canonical(), "utf-8")) as {
+      entries: Record<string, unknown>;
+    };
+    expect(Object.keys(saved.entries)).toHaveLength(2);
+    await expect(readFile(forked(), "utf-8")).rejects.toThrow();
+  });
+
+  it("deletes a redundant conflict copy even when nothing needs saving", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.refresh(graph);
+    await writeFile(forked(), await readFile(canonical(), "utf-8"), "utf-8");
+
+    const next = new SemanticIndex(vaultRoot, makeConfig());
+    await next.load();
+    await next.refresh(graph);
+
+    await expect(readFile(forked(), "utf-8")).rejects.toThrow();
+  });
+
+  it("leaves a file that only shares the name untouched", async () => {
+    await writeFile(forked(), "not an index", "utf-8");
+
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.load();
+    await index.refresh(graph);
+
+    expect(await readFile(forked(), "utf-8")).toBe("not an index");
+  });
+
+  it("clears a temp file orphaned by a killed save, even when nothing needs saving", async () => {
+    const index = new SemanticIndex(vaultRoot, makeConfig());
+    await index.refresh(graph);
+    const orphan = `${canonical()}.93214aa800ad.tmp`;
+    await writeFile(orphan, "partial", "utf-8");
+    const old = new Date(Date.now() - 5 * 60_000);
+    await utimes(orphan, old, old);
+
+    const next = new SemanticIndex(vaultRoot, makeConfig());
+    await next.load();
+
+    await expect(readFile(orphan, "utf-8")).rejects.toThrow();
   });
 });
 

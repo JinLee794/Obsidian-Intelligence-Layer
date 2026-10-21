@@ -128,6 +128,43 @@ describe("warm start — a mass mtime change converges in one session", () => {
   });
 });
 
+describe("warm start — one index shared by machines on a synced vault", () => {
+  it("re-reads nothing when another machine recorded the same mtimes at whole-second precision", async () => {
+    // OneDrive on macOS reports mtimes truncated to the second; Windows keeps
+    // sub-millisecond values. Read naively, every note looks modified as soon
+    // as the index changes hands — so each machine re-reads the vault and
+    // rewrites the shared file, and the sync client forks it per machine.
+    const first = new GraphIndex(vault);
+    await first.build();
+    await first.saveToDisk(INDEX_FILE);
+
+    const file = join(vault, INDEX_FILE);
+    const data = JSON.parse(await readFile(file, "utf-8"));
+    for (const node of data.nodes) node.lastModified = Math.floor(node.lastModified / 1000) * 1000;
+    await writeFile(file, JSON.stringify(data), "utf-8");
+
+    const other = await reopen();
+    expect(await other.buildIncremental(INDEX_FILE)).toBe(0);
+  });
+
+  it("removes sync-conflict copies of the graph index, and only those", async () => {
+    const first = new GraphIndex(vault);
+    await first.build();
+    await first.saveToDisk(INDEX_FILE);
+
+    const forked = join(vault, "_oil-graph-DESKTOP-6RN95DV-2.json");
+    const lookalike = join(vault, "_oil-graph-notes.json");
+    await writeFile(forked, await readFile(join(vault, INDEX_FILE), "utf-8"), "utf-8");
+    await writeFile(lookalike, JSON.stringify({ unrelated: true }), "utf-8");
+
+    const next = await reopen();
+    expect(await next.buildIncremental(INDEX_FILE)).toBe(0);
+
+    await expect(stat(forked)).rejects.toThrow();
+    expect(JSON.parse(await readFile(lookalike, "utf-8"))).toEqual({ unrelated: true });
+  });
+});
+
 describe("warm start — indexing survives the session that did it", () => {
   it("reports itself dirty until persisted, and clean afterwards", async () => {
     const graph = new GraphIndex(vault);
