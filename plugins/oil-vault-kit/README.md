@@ -1,6 +1,6 @@
 # `oil-vault-kit` — Obsidian Intelligence Layer Copilot plugin
 
-One-command install of the [Obsidian Intelligence Layer](https://github.com/JinLee794/Obsidian-Intelligence-Layer)
+One-command install of the [Obsidian Intelligence Layer](https://github.com/mcaps-microsoft/Obsidian-Intelligence-Layer)
 MCP server, plus a setup skill and a canvas that shows what the agent did in your vault.
 
 ## What the plugin contains
@@ -22,14 +22,14 @@ shell rather than in the vault.
 ## Install
 
 ```bash
-copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
+copilot plugin marketplace add mcaps-microsoft/Obsidian-Intelligence-Layer
 copilot plugin install oil-vault-kit@obsidian-intelligence-layer
 ```
 
 Or install the plugin directly, without registering the marketplace:
 
 ```bash
-copilot plugin install JinLee794/Obsidian-Intelligence-Layer:plugins/oil-vault-kit
+copilot plugin install mcaps-microsoft/Obsidian-Intelligence-Layer:plugins/oil-vault-kit
 ```
 
 Upgrading from an install named `obsidian-intelligence-layer@oil-marketplace` (0.8.1 or earlier)?

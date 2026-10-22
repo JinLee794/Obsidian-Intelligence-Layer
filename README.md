@@ -70,7 +70,7 @@ canvas, which shows the notes OIL changed, read, or surfaced in your session,
 with diffs and analytics. No clone and no build:
 
 ```bash
-copilot plugin marketplace add JinLee794/Obsidian-Intelligence-Layer
+copilot plugin marketplace add mcaps-microsoft/Obsidian-Intelligence-Layer
 copilot plugin install oil-vault-kit@obsidian-intelligence-layer
 ```
 
@@ -111,8 +111,8 @@ More screenshots and details:
 ### Install and Build
 
 ```bash
-git clone <repo-url>
-cd obsidian-intelligence-layer
+git clone https://github.com/mcaps-microsoft/Obsidian-Intelligence-Layer.git
+cd Obsidian-Intelligence-Layer
 npm install
 npm run build
 ```
