@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Plugin launches OIL in one process instead of through `npx`.** On Windows,
+  each Copilot session's server ran as `cmd → npx-cli → cmd → node`: three
+  extra processes and ~55 MB per session, plus a registry revalidation on
+  every launch. `plugins/oil-vault-kit/bin/oil-mcp.mjs` installs each pinned
+  version once into a per-user cache (`OIL_MCP_CACHE` overrides it) and runs
+  the bundle in its own process. Warm start fell from ~3.2 s to ~0.25 s, and
+  6 parallel cold installs all succeeded with one cache entry. The npm package
+  is unchanged.
+
 ## [0.9.4] - 2026-10-21
 
 ### Fixed

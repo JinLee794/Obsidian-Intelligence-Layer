@@ -2,12 +2,10 @@
   "mcpServers": {
     "oil": {
       "type": "stdio",
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
+        "${PLUGIN_ROOT}/bin/oil-mcp.mjs",
         "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4",
-        "--",
-        "obsidian-intelligence-layer",
         "mcp"
       ],
       "env": {

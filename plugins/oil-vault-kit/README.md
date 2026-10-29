@@ -311,7 +311,20 @@ Plugins `$schema` would move discovery to `com.github.copilot/extensions/`.
 ## Pinning
 
 `.mcp.json` pins the server to an exact version published to GitHub Packages by
-the `mcaps-microsoft` mirror:
+the `mcaps-microsoft` mirror, and starts it through `bin/oil-mcp.mjs`:
+
+```
+node ${PLUGIN_ROOT}/bin/oil-mcp.mjs --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4 mcp
+```
+
+The launcher installs each pinned version once into a per-user cache
+(`%LOCALAPPDATA%\oil-mcp\<version>` on Windows, `~/.cache/oil-mcp/<version>`
+elsewhere, or `OIL_MCP_CACHE`), then runs the bundle in its own process. Under
+`npx`, every session paid for `cmd → npx-cli → cmd → node` on Windows: three
+extra processes, ~55 MB, and a registry revalidation per launch. Measured on
+Windows, a warm start fell from ~3.2 s to ~0.25 s, and 6 parallel cold installs
+of the same version all succeed with one cache entry. The equivalent manual
+invocation is:
 
 ```
 npx -y --package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4 -- obsidian-intelligence-layer mcp
@@ -326,11 +339,11 @@ ahead of it.
 
 ### Why GitHub Packages
 
-The package carries the self-contained `bundle/cli.js`, so `npx` neither clones
-nor builds. Earlier releases pinned `github:JinLee794/…#vX`, and npm re-resolves
+The package carries the self-contained `bundle/cli.js`, so installing it neither
+clones nor builds. Earlier releases pinned `github:JinLee794/…#vX`, and npm re-resolves
 that with `git` on every launch, even from a warm cache. Measured on Windows,
 that took ~6.5 s per session, and 6 sessions starting together spawned up to
-32 `git` processes. From GitHub Packages, a warm launch takes ~2–3 s, and 6
+32 `git` processes. From GitHub Packages, a warm `npx` launch takes ~2–3 s, and 6
 parallel cold installs all succeed with no `git`.
 
 The `mcaps-microsoft` repository is internal, so anonymous downloads of its

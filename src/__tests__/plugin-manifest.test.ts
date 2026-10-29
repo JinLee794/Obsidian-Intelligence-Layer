@@ -130,8 +130,27 @@ describe("plugin MCP configuration", () => {
 
   it("starts the MCP subcommand over stdio", () => {
     expect(servers.oil.type).toBe("stdio");
-    expect(servers.oil.command).toBe("npx");
     expect(servers.oil.args).toContain("mcp");
+  });
+
+  it("launches through the bundled launcher, not npx", async () => {
+    // `npx` wraps every session's server in cmd → npx-cli → cmd on Windows,
+    // ~55 MB and three processes, plus a registry revalidation on each launch.
+    // The launcher installs each pinned version once and runs the bundle in
+    // its own process.
+    const args = servers.oil.args as string[];
+    expect(servers.oil.command).toBe("node");
+    expect(args[0]).toBe("${PLUGIN_ROOT}/bin/oil-mcp.mjs");
+    await expect(stat(resolve(PLUGIN_ROOT, "bin/oil-mcp.mjs"))).resolves.toBeDefined();
+  });
+
+  it("keeps the launcher to Node built-ins", async () => {
+    // Plugins are copied, not `npm install`ed, so the launcher cannot depend on
+    // anything it would itself have to install.
+    const body = await readFile(resolve(PLUGIN_ROOT, "bin/oil-mcp.mjs"), "utf-8");
+    for (const [, spec] of body.matchAll(/\bfrom\s+"([^"]+)"/g)) {
+      expect(spec).toMatch(/^node:/);
+    }
   });
 
   it("takes the vault path from the environment and nothing else", () => {
