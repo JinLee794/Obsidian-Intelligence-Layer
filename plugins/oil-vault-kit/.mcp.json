@@ -5,7 +5,7 @@
       "command": "node",
       "args": [
         "${PLUGIN_ROOT}/bin/oil-mcp.mjs",
-        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4",
+        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.5",
         "mcp"
       ],
       "env": {

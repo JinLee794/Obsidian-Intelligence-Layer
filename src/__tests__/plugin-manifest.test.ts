@@ -190,6 +190,28 @@ describe("documented npx invocations", () => {
       }
     }
   });
+
+  it("pins every documented package version, including `npm install -g`", async () => {
+    for (const doc of ["README.md", "plugins/oil-vault-kit/README.md", "plugins/oil-vault-kit/skills/oil-setup/SKILL.md"]) {
+      const body = await readFile(resolve(REPO_ROOT, doc), "utf-8");
+      for (const [, version] of body.matchAll(/@mcaps-microsoft\/obsidian-intelligence-layer@(\d[\w.\-]*)/g)) {
+        expect(version, `stale package version in ${doc}`).toBe(PINNED_VERSION);
+      }
+    }
+  });
+
+  it("documents a copy-paste MCP config with the plugin's shape", async () => {
+    const readme = await readFile(resolve(REPO_ROOT, "README.md"), "utf-8");
+    const block = readme
+      .split("### MCP config (copy-paste)")[1]
+      ?.match(/```json\r?\n([\s\S]*?)```/)?.[1];
+    expect(block, "README has no MCP config block").toBeDefined();
+    const oil = JSON.parse(block!).mcpServers.oil;
+    expect(oil.type).toBe("stdio");
+    expect(oil.command).toBe("node");
+    expect(oil.args).toEqual(["<npm root -g>/@mcaps-microsoft/obsidian-intelligence-layer/bundle/cli.js", "mcp"]);
+    expect(Object.keys(oil.env)).toEqual(["OBSIDIAN_VAULT_PATH"]);
+  });
 });
 
 describe("marketplace manifest", () => {

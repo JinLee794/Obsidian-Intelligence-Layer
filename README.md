@@ -62,32 +62,87 @@ model itself on first run, in the background.
 obsidian-intelligence-layer doctor --vault=/path/to/vault   # tells you where you stand
 ```
 
-### Install as a Copilot CLI plugin (fastest)
+### Add OIL to the GitHub Copilot app (fastest)
 
-This repository is also a Copilot plugin marketplace. Installing the plugin
-registers the MCP server, the `oil-setup` skill, and the **OIL Vault Activity**
-canvas, which shows the notes OIL changed, read, or surfaced in your session,
-with diffs and analytics. No clone and no build:
+This repository is a Copilot plugin marketplace. The plugin registers the MCP
+server, the `oil-setup` skill and the **OIL Vault Activity** canvas. The
+GitHub Copilot app and Copilot CLI share `~/.copilot`, so one install covers
+both. No clone and no build.
 
-```bash
-copilot plugin marketplace add mcaps-microsoft/Obsidian-Intelligence-Layer
-copilot plugin install oil-vault-kit@obsidian-intelligence-layer
-```
+1. **Point OIL at your vault.** This is the one value the plugin reads from you:
 
-Set `OBSIDIAN_VAULT_PATH` in your environment before starting a session — it is
-the one value the plugin reads from you:
+   ```powershell
+   setx OBSIDIAN_VAULT_PATH "C:\path\to\your\vault"     # Windows, persistent
+   ```
 
-```powershell
-setx OBSIDIAN_VAULT_PATH "C:\path\to\your\vault"     # Windows, persistent
-```
+   ```bash
+   export OBSIDIAN_VAULT_PATH="/absolute/path/to/vault"  # macOS / Linux, in your shell profile
+   ```
 
-```bash
-export OBSIDIAN_VAULT_PATH="/absolute/path/to/vault"  # macOS / Linux, in your shell profile
-```
+   Then quit and reopen the GitHub Copilot app so it picks up the variable.
 
-Everything else — including the optional Ollama semantic tier — is configured
-through `oil.config.yaml` in the vault root. See
+2. **Install the plugin** from any terminal:
+
+   ```bash
+   copilot plugin marketplace add mcaps-microsoft/Obsidian-Intelligence-Layer
+   copilot plugin install oil-vault-kit@obsidian-intelligence-layer
+   ```
+
+3. **Start a new session.** MCP servers start with a session, so sessions that
+   are already open don't see OIL.
+
+4. **Check it works.** Ask *"Call oil get_health and report note_count."* The
+   count should match the notes in your vault. If the tool is missing, run
+   `copilot mcp list` and confirm `oil` is listed.
+
+5. *Optional:* ask *"Open the OIL Vault Activity canvas"* to watch OIL's reads
+   and writes live.
+
+Each session runs OIL as a single `node` process. The plugin installs the
+pinned version once into a per-user cache and starts it from there. Everything
+else, including the optional Ollama semantic tier, is configured through
+`oil.config.yaml` in the vault root. See
 [plugins/oil-vault-kit/README.md](plugins/oil-vault-kit/README.md).
+
+### MCP config (copy-paste)
+
+To add OIL without the plugin, for example in another MCP client, install it
+once and point `node` straight at the bundle:
+
+```bash
+npm install -g @mcaps-microsoft/obsidian-intelligence-layer@0.9.5
+npm root -g    # prints the folder that replaces <npm root -g> below
+```
+
+Then add this to `~/.copilot/mcp-config.json` (Copilot CLI and app), or to your
+client's MCP config. It has the same shape as the plugin's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "oil": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "<npm root -g>/@mcaps-microsoft/obsidian-intelligence-layer/bundle/cli.js",
+        "mcp"
+      ],
+      "env": {
+        "OBSIDIAN_VAULT_PATH": "/absolute/path/to/your/vault"
+      },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+On Windows, write paths with forward slashes
+(`C:/Users/you/AppData/Roaming/npm/node_modules/...`) or doubled backslashes.
+Running `node` on `bundle/cli.js` keeps OIL in one process; the
+`obsidian-intelligence-layer` shim and `npx` both add wrapper processes on
+Windows. The package comes from GitHub Packages, so npm needs a `read:packages`
+token (see the [plugin README](plugins/oil-vault-kit/README.md#required-configuration)).
+Use either this config or the plugin, not both.
 
 #### See what the agent did: the OIL Vault Activity canvas
 
@@ -204,7 +259,7 @@ At runtime, `get_health` reports the tier's live state (`disabled`, `cold`, `ind
       "command": "npx",
       "args": [
         "-y",
-        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.4",
+        "--package=@mcaps-microsoft/obsidian-intelligence-layer@0.9.5",
         "--",
         "obsidian-intelligence-layer",
         "mcp"

@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.5] - 2026-10-29
 
 ### Changed
 
@@ -14,6 +14,9 @@ All notable changes to this project will be documented in this file.
   the bundle in its own process. Warm start fell from ~3.2 s to ~0.25 s, and
   6 parallel cold installs all succeeded with one cache entry. The npm package
   is unchanged.
+- **README leads with setup for the GitHub Copilot app** and a copy-paste MCP
+  config that runs OIL as one `node` process, with the same shape as the
+  plugin's `.mcp.json`.
 
 ## [0.9.4] - 2026-10-21
 
