@@ -130,8 +130,27 @@ describe("plugin MCP configuration", () => {
 
   it("starts the MCP subcommand over stdio", () => {
     expect(servers.oil.type).toBe("stdio");
-    expect(servers.oil.command).toBe("npx");
     expect(servers.oil.args).toContain("mcp");
+  });
+
+  it("launches through the bundled launcher, not npx", async () => {
+    // `npx` wraps every session's server in cmd → npx-cli → cmd on Windows,
+    // ~55 MB and three processes, plus a registry revalidation on each launch.
+    // The launcher installs each pinned version once and runs the bundle in
+    // its own process.
+    const args = servers.oil.args as string[];
+    expect(servers.oil.command).toBe("node");
+    expect(args[0]).toBe("${PLUGIN_ROOT}/bin/oil-mcp.mjs");
+    await expect(stat(resolve(PLUGIN_ROOT, "bin/oil-mcp.mjs"))).resolves.toBeDefined();
+  });
+
+  it("keeps the launcher to Node built-ins", async () => {
+    // Plugins are copied, not `npm install`ed, so the launcher cannot depend on
+    // anything it would itself have to install.
+    const body = await readFile(resolve(PLUGIN_ROOT, "bin/oil-mcp.mjs"), "utf-8");
+    for (const [, spec] of body.matchAll(/\bfrom\s+"([^"]+)"/g)) {
+      expect(spec).toMatch(/^node:/);
+    }
   });
 
   it("takes the vault path from the environment and nothing else", () => {
@@ -170,6 +189,28 @@ describe("documented npx invocations", () => {
         );
       }
     }
+  });
+
+  it("pins every documented package version, including `npm install -g`", async () => {
+    for (const doc of ["README.md", "plugins/oil-vault-kit/README.md", "plugins/oil-vault-kit/skills/oil-setup/SKILL.md"]) {
+      const body = await readFile(resolve(REPO_ROOT, doc), "utf-8");
+      for (const [, version] of body.matchAll(/@mcaps-microsoft\/obsidian-intelligence-layer@(\d[\w.\-]*)/g)) {
+        expect(version, `stale package version in ${doc}`).toBe(PINNED_VERSION);
+      }
+    }
+  });
+
+  it("documents a copy-paste MCP config with the plugin's shape", async () => {
+    const readme = await readFile(resolve(REPO_ROOT, "README.md"), "utf-8");
+    const block = readme
+      .split("### MCP config (copy-paste)")[1]
+      ?.match(/```json\r?\n([\s\S]*?)```/)?.[1];
+    expect(block, "README has no MCP config block").toBeDefined();
+    const oil = JSON.parse(block!).mcpServers.oil;
+    expect(oil.type).toBe("stdio");
+    expect(oil.command).toBe("node");
+    expect(oil.args).toEqual(["<npm root -g>/@mcaps-microsoft/obsidian-intelligence-layer/bundle/cli.js", "mcp"]);
+    expect(Object.keys(oil.env)).toEqual(["OBSIDIAN_VAULT_PATH"]);
   });
 });
 
