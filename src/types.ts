@@ -264,8 +264,18 @@ export interface FrontmatterSchemaConfig {
   titleField: string;
 }
 
+/** Where the graph index persists; see SearchConfig.graphLayout. */
+export type GraphLayout = "auto" | "single" | "segmented";
+
 export interface SearchConfig {
   graphIndexFile: string;
+  /**
+   * How the graph index persists: "auto" keeps whatever the vault has (the
+   * default), "single" the one `_oil-graph.json`, "segmented" a skeleton plus
+   * per-folder segments under `.oil-graph/`. Saving segmented never deletes
+   * `_oil-graph.json`; `oil migrate-graph --apply` moves it to a backup.
+   */
+  graphLayout: GraphLayout;
   backgroundIndexThresholdMs: number;
   /** Folder prefixes kept out of search results, e.g. templates or agent logs. */
   excludeFolders: string[];

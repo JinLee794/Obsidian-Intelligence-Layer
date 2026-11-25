@@ -14,6 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { stat } from "node:fs/promises";
 import { loadConfig, DEFAULT_CONFIG, applyEnvOverrides } from "./config.js";
 import { GraphIndex } from "./graph.js";
+import { graphOptionsFor } from "./graph-segments.js";
 import { SessionCache } from "./cache.js";
 import { VaultWatcher } from "./watcher.js";
 import { SemanticIndex, attachSemanticIndex } from "./semantic.js";
@@ -88,7 +89,7 @@ export async function createOilServer(
   }
 
   // ── In-memory components (construction only — no vault I/O) ─────────────
-  const graph = new GraphIndex(vaultPath);
+  const graph = new GraphIndex(vaultPath, graphOptionsFor(config));
   const cache = new SessionCache();
   const semantic = new SemanticIndex(
     vaultPath,

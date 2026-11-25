@@ -8,6 +8,7 @@
  *   npx obsidian-intelligence-layer doctor
  *   npx obsidian-intelligence-layer archive [--apply]
  *   npx obsidian-intelligence-layer restore <path> | --run=<id>
+ *   npx obsidian-intelligence-layer migrate-graph [--apply | --verify | --rollback]
  *
  * Environment:
  *   OBSIDIAN_VAULT_PATH — absolute path to the Obsidian vault (required).
@@ -47,6 +48,15 @@ Commands:
   restore <path>            Restore an archived note (archived or original path).
   restore --run=<id>        Restore every note archived by one run.
                             archive/restore accept --json for machine output.
+  migrate-graph             Preview moving the graph index to the segmented
+                            layout (.oil-graph/), which rewrites only the parts
+                            of the index that changed. Close MCP clients first.
+    --apply                 Migrate, check the result, and keep the old file
+                            as _oil-graph.v2-backup.json (--keep-legacy leaves
+                            it in place; --rebuild re-indexes the notes).
+    --verify                Compare the persisted index with a fresh build.
+    --rollback              Return to the single-file layout.
+                            Also accepts --json for machine output.
 
 Flags (equivalent env vars in parentheses):
   --vault=<path>            Vault to serve (OBSIDIAN_VAULT_PATH)
@@ -110,11 +120,30 @@ const archiveArgs: { apply: boolean; json: boolean; path?: string; runId?: strin
   apply: false,
   json: false,
 };
+const migrateModes = new Map<string, "apply" | "verify" | "rollback">([
+  ["--apply", "apply"],
+  ["--verify", "verify"],
+  ["--rollback", "rollback"],
+]);
+const migrateArgs: { action: "plan" | "apply" | "verify" | "rollback"; json: boolean; keepLegacy: boolean; rebuild: boolean } = {
+  action: "plan",
+  json: false,
+  keepLegacy: false,
+  rebuild: false,
+};
+const migrateModeFlags: string[] = [];
 const flags: string[] = [];
 for (const arg of rest) {
   const isArchiveCommand = command === "archive" || command === "restore";
   const run = /^--run=(.+)$/.exec(arg);
-  if (isArchiveCommand && arg === "--json") archiveArgs.json = true;
+  const migrateMode = command === "migrate-graph" ? migrateModes.get(arg) : undefined;
+  if (migrateMode) {
+    migrateArgs.action = migrateMode;
+    migrateModeFlags.push(arg);
+  } else if (command === "migrate-graph" && arg === "--json") migrateArgs.json = true;
+  else if (command === "migrate-graph" && arg === "--keep-legacy") migrateArgs.keepLegacy = true;
+  else if (command === "migrate-graph" && arg === "--rebuild") migrateArgs.rebuild = true;
+  else if (isArchiveCommand && arg === "--json") archiveArgs.json = true;
   else if (command === "archive" && arg === "--apply") archiveArgs.apply = true;
   else if (command === "restore" && run) archiveArgs.runId = run[1];
   else if (command === "restore" && !arg.startsWith("--") && !archiveArgs.path) archiveArgs.path = arg;
@@ -125,6 +154,12 @@ const unknown = applyFlags(flags);
 if (unknown) {
   console.error(`Unknown option: ${unknown}\n\n${USAGE}`);
   process.exit(1);
+} else if (migrateModeFlags.length > 1) {
+  console.error(`migrate-graph takes one of --apply, --verify or --rollback, not ${migrateModeFlags.join(" and ")}.`);
+  process.exit(1);
+} else if ((migrateArgs.keepLegacy || migrateArgs.rebuild) && migrateArgs.action !== "apply") {
+  console.error("--keep-legacy and --rebuild only apply to migrate-graph --apply.");
+  process.exit(1);
 } else if (command === "mcp") {
   await import("./index.js");
 } else if (command === "doctor") {
@@ -133,6 +168,9 @@ if (unknown) {
 } else if (command === "archive" || command === "restore") {
   const { runArchiveCli } = await import("./archive-cli.js");
   process.exit(await runArchiveCli({ command, ...archiveArgs }));
+} else if (command === "migrate-graph") {
+  const { runMigrateGraphCli } = await import("./graph-migrate-cli.js");
+  process.exit(await runMigrateGraphCli(migrateArgs));
 } else {
   console.error(USAGE);
   process.exit(1);

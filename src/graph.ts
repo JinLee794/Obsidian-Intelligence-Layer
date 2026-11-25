@@ -2,15 +2,16 @@
  * OIL — Graph index engine
  * Wikilink parser, backlink computation, tag index, N-hop traversal.
  * Built at startup, updated incrementally via file watcher.
- * Persisted to _oil-graph.json for fast restart.
+ * Persisted for fast restart, either as one `_oil-graph.json` (v2) or as a
+ * segmented skeleton plus per-folder segments (v3, see graph-segments.ts).
  */
 
-import { readFile, writeFile, rename, unlink, stat } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { readFile, stat, mkdir, unlink } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
 import matter from "gray-matter";
 import type {
   BrokenLink,
+  GraphLayout,
   GraphNode,
   GraphStats,
   NoteRef,
@@ -19,13 +20,40 @@ import type {
 } from "./types.js";
 import { listAllNotes, extractWikilinks, normalizeWikilinkTarget, isAllowedFile, normalizeLineEndings } from "./vault.js";
 import { findConflictCopies, removeFiles, sameMtime, sweepStaleTemps } from "./sidecar-sync.js";
+import {
+  GRAPH_LAYOUTS,
+  SEGMENTED_FORMAT,
+  SEGMENTED_VERSION,
+  SKELETON_FILE,
+  newGeneration,
+  normalizeSegmentPolicy,
+  readSegment,
+  readSkeleton,
+  removeSegmentFiles,
+  segmentDirFor,
+  segmentFileName,
+  segmentKeyFor,
+  segmentPayload,
+  sha1,
+  skeletonFrontmatter,
+  skeletonStamp,
+  sweepSegmentDir,
+  writeFileAtomic,
+} from "./graph-segments.js";
+import type {
+  PersistedSkeleton,
+  SegmentMeta,
+  SegmentNote,
+  SegmentPolicy,
+  SkeletonNode,
+} from "./graph-segments.js";
 
 /** Extensions a wikilink may carry and still target an indexed note. */
 const MARKDOWN_LINK_EXTENSIONS = new Set([".md", ".markdown", ".txt"]);
 
 // ─── Persisted Graph Format ───────────────────────────────────────────────────
 
-interface PersistedGraphNode {
+export interface PersistedGraphNode {
   path: string;
   title: string;
   tags: string[];
@@ -41,6 +69,64 @@ interface PersistedGraph {
   builtAt: string;
   nodes: PersistedGraphNode[];
 }
+
+/** The on-disk layouts a graph can be saved in or loaded from. */
+export type PersistedLayout = "single" | "segmented";
+
+export interface GraphIndexOptions {
+  /**
+   * Where the index persists. "auto" (the default) keeps whichever layout the
+   * vault already has — segmented once `migrate-graph --apply` has run, the
+   * single v2 file otherwise.
+   */
+  layout?: GraphLayout;
+  /** How notes are grouped into segments; defaults follow the default schema. */
+  segmentPolicy?: Partial<SegmentPolicy>;
+}
+
+/** What the last successful save wrote. */
+export interface GraphSaveReport {
+  layout: PersistedLayout;
+  /** Files written, the skeleton included. */
+  filesWritten: number;
+  bytesWritten: number;
+  /** Segmented only: segments rewritten, and segments in total. */
+  segmentsWritten: number;
+  segmentsTotal: number;
+}
+
+/** Damage found by the last segmented load; damaged notes are re-read from the vault. */
+export interface SegmentHealth {
+  segments: number;
+  damagedSegments: string[];
+  recoveredNotes: number;
+}
+
+/** What a segmented save would write, for a dry run. */
+export interface SegmentedLayoutPlan {
+  skeletonBytes: number;
+  segments: Array<{ key: string; notes: number; bytes: number }>;
+}
+
+/** The persisted state of a segmented index, as this process last saw it. */
+interface SegmentState {
+  /** Absolute segment directory. */
+  dir: string;
+  /**
+   * Stamp of the skeleton this state describes. If the skeleton on disk no
+   * longer carries it, another process has saved since, and nothing here may
+   * be trusted to describe the files on disk.
+   */
+  stamp: string | null;
+  policyJson: string;
+  /** Note path → segment key, as persisted. */
+  keyOf: Map<string, string>;
+  segments: Map<string, SegmentMeta>;
+  /** Keys to rewrite next save whatever their hash says: damaged on load, or a write failed. */
+  forceDirty: Set<string>;
+}
+
+type LoadStatus = "ok" | "missing" | "invalid";
 
 /** A note read from disk, not yet folded into the index. */
 interface ParsedNote {
@@ -91,6 +177,9 @@ const CHECKPOINT_INTERVAL_MS = 2000;
  * often enough for a time-based checkpoint to be responsive.
  */
 const BATCH_SIZE = 128;
+
+/** Segment files to read or write at once. */
+const SEGMENT_IO_CONCURRENCY = 8;
 
 /** Run `fn` over `items` with at most `limit` in flight, preserving order. */
 async function mapWithConcurrency<T, R>(
@@ -199,8 +288,20 @@ export class GraphIndex {
   private _lastIndexed: Date = new Date();
   private _building = false;
   private _version = 0;
-  /** Mutations not yet persisted. Drives save-on-shutdown. */
-  private _dirty = false;
+  /**
+   * Notes mutated since the last save. Drives save-on-shutdown, and tells a
+   * segmented save which segments it has to rewrite.
+   */
+  private unsavedPaths = new Set<string>();
+  /** Set when what is on disk is damaged or superseded and wants rewriting. */
+  private _needsRewrite = false;
+
+  private readonly layout: GraphLayout;
+  private readonly segmentPolicy: SegmentPolicy;
+  private segState: SegmentState | null = null;
+  private _loadedLayout: PersistedLayout | null = null;
+  private _lastSave: GraphSaveReport | null = null;
+  private _segmentHealth: SegmentHealth | null = null;
 
   /**
    * Recent per-note mutations, so a derived index can refresh only what moved.
@@ -212,8 +313,10 @@ export class GraphIndex {
   /** Deltas below this version have been discarded or invalidated wholesale. */
   private logFloor = 0;
 
-  constructor(vaultPath: string) {
+  constructor(vaultPath: string, options: GraphIndexOptions = {}) {
     this.vaultPath = vaultPath;
+    this.layout = options.layout && GRAPH_LAYOUTS.includes(options.layout) ? options.layout : "auto";
+    this.segmentPolicy = normalizeSegmentPolicy(options.segmentPolicy);
   }
 
   get lastIndexed(): Date {
@@ -244,18 +347,33 @@ export class GraphIndex {
    * so callers save on the way out rather than discarding it.
    */
   get dirty(): boolean {
-    return this._dirty;
+    return this.unsavedPaths.size > 0 || this._needsRewrite;
+  }
+
+  /** The layout the index was last loaded from; null when built from the notes. */
+  get loadedLayout(): PersistedLayout | null {
+    return this._loadedLayout;
+  }
+
+  /** What the last successful save wrote, or null before the first one. */
+  get lastSave(): GraphSaveReport | null {
+    return this._lastSave;
+  }
+
+  /** Damage found by the last segmented load, or null if it was not segmented. */
+  get segmentHealth(): SegmentHealth | null {
+    return this._segmentHealth;
   }
 
   /** Persist only if there is something to persist. */
   async flush(graphIndexFile: string): Promise<boolean> {
-    if (!this._dirty) return false;
+    if (!this.dirty) return false;
     await this.saveToDisk(graphIndexFile);
     return true;
   }
 
   private recordMutation(path: string): void {
-    this._dirty = true;
+    this.unsavedPaths.add(path);
     this.mutationLog.push({ version: this._version, path });
     if (this.mutationLog.length > GraphIndex.MUTATION_LOG_LIMIT) {
       const dropped = this.mutationLog.splice(
@@ -324,6 +442,7 @@ export class GraphIndex {
     this._namesDirty = false;
 
     this._lastIndexed = new Date();
+    this._loadedLayout = null;
     this._building = false;
   }
 
@@ -749,10 +868,8 @@ export class GraphIndex {
 
   // ─── Persistence ─────────────────────────────────────────────────────
 
-  /**
-   * Save the graph index to disk for fast restart.
-   */
-  async saveToDisk(graphIndexFile: string): Promise<void> {
+  /** Every node in its persisted form, in index order. */
+  toPersistedNodes(): PersistedGraphNode[] {
     const persistedNodes: PersistedGraphNode[] = [];
     for (const [path, node] of this.nodes) {
       persistedNodes.push({
@@ -766,40 +883,261 @@ export class GraphIndex {
         lastModified: this.fileMtimes.get(path) ?? 0,
       });
     }
+    return persistedNodes;
+  }
 
+  /**
+   * Take the notes mutated since the last save. Swapped out rather than
+   * cleared afterwards, so an edit landing while a save is in flight stays
+   * pending for the next one instead of being forgotten.
+   */
+  private takePending(): Set<string> {
+    const pending = this.unsavedPaths;
+    this.unsavedPaths = new Set();
+    return pending;
+  }
+
+  private restorePending(pending: Set<string>): void {
+    for (const path of pending) this.unsavedPaths.add(path);
+  }
+
+  /**
+   * Save the graph index to disk for fast restart.
+   *
+   * The layout comes from `options.layout`, else the configured layout; under
+   * "auto" it follows whatever is on disk — segmented once a skeleton exists,
+   * the single file otherwise. That is re-checked on every save, so a running
+   * server follows a migration or a rollback made by another process.
+   */
+  async saveToDisk(graphIndexFile: string, options: { layout?: PersistedLayout } = {}): Promise<void> {
+    const explicit = options.layout ?? (this.layout === "auto" ? undefined : this.layout);
+    const layout = explicit ?? (await this.layoutOnDisk(graphIndexFile));
+    if (layout === "segmented") {
+      await this.saveSegmented(graphIndexFile);
+    } else {
+      // Only a deliberate choice of the single file clears a segmented layout
+      // away; under "auto" the files may belong to a migration in progress.
+      await this.saveSingle(graphIndexFile, explicit === "single");
+    }
+  }
+
+  /** Which layout the vault currently has, judged by whether a skeleton exists. */
+  private async layoutOnDisk(graphIndexFile: string): Promise<PersistedLayout> {
+    const dir = join(this.vaultPath, segmentDirFor(graphIndexFile));
+    return (await skeletonStamp(dir)) !== null ? "segmented" : "single";
+  }
+
+  private async saveSingle(graphIndexFile: string, clearSegmented: boolean): Promise<void> {
+    const pending = this.takePending();
+    const fullPath = join(this.vaultPath, graphIndexFile);
     const data: PersistedGraph = {
       version: 2,
       builtAt: this._lastIndexed.toISOString(),
-      nodes: persistedNodes,
+      nodes: this.toPersistedNodes(),
     };
+    const text = JSON.stringify(data);
 
     // Write-then-rename: a plain writeFile truncates the file first, so a
     // second OIL instance reading concurrently sees partial JSON and discards
     // the index, forcing a full rebuild. Rename is atomic for readers.
-    const fullPath = join(this.vaultPath, graphIndexFile);
-    const tmpPath = `${fullPath}.${randomUUID()}.tmp`;
     try {
-      await writeFile(tmpPath, JSON.stringify(data), "utf-8");
-      // Windows fails the rename with EPERM while another instance has the
-      // index open for reading; that clears in milliseconds.
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await rename(tmpPath, fullPath);
-          break;
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if ((code !== "EPERM" && code !== "EACCES") || attempt >= 4) throw err;
-          await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
-        }
-      }
+      await writeFileAtomic(fullPath, text);
     } catch (err) {
-      await unlink(tmpPath).catch(() => {});
+      this.restorePending(pending);
       throw err;
     }
+    this.segState = null;
+    this._needsRewrite = false;
+    this._lastSave = {
+      layout: "single",
+      filesWritten: 1,
+      bytesWritten: Buffer.byteLength(text),
+      segmentsWritten: 0,
+      segmentsTotal: 0,
+    };
     await sweepStaleTemps(fullPath);
     await this.removeConflictCopies(graphIndexFile);
-    this._dirty = false;
-    console.error(`[OIL] Graph index saved: ${persistedNodes.length} nodes.`);
+    if (clearSegmented) await this.removeSegmentedLayout(graphIndexFile);
+    console.error(`[OIL] Graph index saved: ${data.nodes.length} nodes.`);
+  }
+
+  /**
+   * Split the index into skeleton nodes and per-segment bulk.
+   * Synchronous, so the result is one consistent snapshot.
+   */
+  private groupForSegments(): {
+    skeletonNodes: SkeletonNode[];
+    groups: Map<string, SegmentNote[]>;
+    keyOf: Map<string, string>;
+  } {
+    const skeletonNodes: SkeletonNode[] = [];
+    const groups = new Map<string, SegmentNote[]>();
+    const keyOf = new Map<string, string>();
+    for (const [path, node] of this.nodes) {
+      const key = segmentKeyFor(path, node.frontmatter, this.segmentPolicy);
+      keyOf.set(path, key);
+      skeletonNodes.push({
+        path,
+        title: node.title,
+        tags: node.tags,
+        rawOutLinks: this.rawOutLinks.get(path) ?? [],
+        lastModified: this.fileMtimes.get(path) ?? 0,
+        segment: key,
+        frontmatter: skeletonFrontmatter(node.frontmatter, this.segmentPolicy),
+      });
+      let group = groups.get(key);
+      if (!group) {
+        group = [];
+        groups.set(key, group);
+      }
+      group.push({
+        path,
+        headings: node.headings,
+        bodySnippet: node.bodySnippet ?? "",
+        frontmatter: node.frontmatter,
+      });
+    }
+    return { skeletonNodes, groups, keyOf };
+  }
+
+  /**
+   * Save as a skeleton plus segments, rewriting only segments whose notes
+   * changed since the last save this process made (or loaded).
+   */
+  private async saveSegmented(graphIndexFile: string): Promise<void> {
+    const dir = join(this.vaultPath, segmentDirFor(graphIndexFile));
+    const policyJson = JSON.stringify(this.segmentPolicy);
+    // Awaited before the snapshot below. From taking the pending set to
+    // serializing, nothing may yield: an edit landing in between could reach
+    // the skeleton (with its new mtime) but not its segment, if that segment
+    // was otherwise clean — and the mtime would then hide the stale body.
+    const stampOnDisk = await skeletonStamp(dir);
+    const base = this.segState?.dir === dir ? this.segState : null;
+    // Reuse is safe only against the very skeleton this process last wrote or
+    // read; after another process has saved, every segment is rewritten.
+    const prev =
+      base && stampOnDisk !== null && base.stamp === stampOnDisk && base.policyJson === policyJson ? base : null;
+
+    const pending = this.takePending();
+    const { skeletonNodes, groups, keyOf } = this.groupForSegments();
+
+    const dirty = new Set<string>();
+    if (prev) {
+      for (const path of pending) {
+        const before = prev.keyOf.get(path);
+        if (before !== undefined) dirty.add(before);
+        const after = keyOf.get(path);
+        if (after !== undefined) dirty.add(after);
+      }
+      for (const key of prev.forceDirty) dirty.add(key);
+      for (const [key, notes] of groups) {
+        if (prev.segments.get(key)?.notes !== notes.length) dirty.add(key);
+      }
+    }
+
+    const generation = newGeneration();
+    const segments = new Map<string, SegmentMeta>();
+    const writes: Array<{ file: string; text: string }> = [];
+    for (const [key, notes] of groups) {
+      const old = prev?.segments.get(key);
+      if (old && !dirty.has(key)) {
+        segments.set(key, old);
+        continue;
+      }
+      const notesJson = JSON.stringify(notes);
+      const hash = sha1(notesJson);
+      if (old && old.hash === hash && !prev!.forceDirty.has(key)) {
+        segments.set(key, old);
+        continue;
+      }
+      const file = segmentFileName(key, generation);
+      const text = segmentPayload(key, generation, notesJson);
+      segments.set(key, { file, generation, hash, notes: notes.length, bytes: Buffer.byteLength(text) });
+      writes.push({ file, text });
+    }
+    const skeleton: PersistedSkeleton = {
+      format: SEGMENTED_FORMAT,
+      version: SEGMENTED_VERSION,
+      builtAt: this._lastIndexed.toISOString(),
+      policy: this.segmentPolicy,
+      segments: Object.fromEntries(segments),
+      nodes: skeletonNodes,
+    };
+    const skeletonText = JSON.stringify(skeleton);
+
+    let stamp: string;
+    try {
+      // Not recursive: a vault directory that has gone away should fail the
+      // save, not be recreated around the index.
+      await mkdir(dir).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "EEXIST") throw err;
+      });
+      await mapWithConcurrency(writes, SEGMENT_IO_CONCURRENCY, (w) => writeFileAtomic(join(dir, w.file), w.text));
+      // The commit point: until this rename lands, readers see the old skeleton.
+      stamp = await writeFileAtomic(join(dir, SKELETON_FILE), skeletonText);
+    } catch (err) {
+      this.restorePending(pending);
+      // Nothing references this generation; the old skeleton is still whole.
+      await Promise.all(writes.map((w) => unlink(join(dir, w.file)).catch(() => {})));
+      throw err;
+    }
+
+    const referenced = new Set([...segments.values()].map((meta) => meta.file));
+    if (base) {
+      const superseded = [...base.segments.values()].filter((meta) => !referenced.has(meta.file));
+      await Promise.all(superseded.map((meta) => unlink(join(dir, meta.file)).catch(() => {})));
+    }
+    this.segState = { dir, stamp, policyJson, keyOf, segments, forceDirty: new Set() };
+    this._needsRewrite = false;
+    const segmentBytes = writes.reduce((sum, w) => sum + Buffer.byteLength(w.text), 0);
+    this._lastSave = {
+      layout: "segmented",
+      filesWritten: writes.length + 1,
+      bytesWritten: segmentBytes + Buffer.byteLength(skeletonText),
+      segmentsWritten: writes.length,
+      segmentsTotal: segments.size,
+    };
+    await this.removeConflictCopies(graphIndexFile);
+    console.error(
+      `[OIL] Graph index saved: ${skeletonNodes.length} nodes ` +
+        `(segmented: ${writes.length}/${segments.size} segments rewritten).`,
+    );
+  }
+
+  /** What a segmented save would write, without writing anything. */
+  planSegmentedLayout(): SegmentedLayoutPlan {
+    const { skeletonNodes, groups } = this.groupForSegments();
+    const generation = "0";
+    const segments: SegmentedLayoutPlan["segments"] = [];
+    const metas: Record<string, SegmentMeta> = {};
+    for (const [key, notes] of groups) {
+      const notesJson = JSON.stringify(notes);
+      const text = segmentPayload(key, generation, notesJson);
+      const bytes = Buffer.byteLength(text);
+      const file = segmentFileName(key, generation);
+      segments.push({ key, notes: notes.length, bytes });
+      metas[key] = { file, generation, hash: sha1(notesJson), notes: notes.length, bytes };
+    }
+    const skeleton: PersistedSkeleton = {
+      format: SEGMENTED_FORMAT,
+      version: SEGMENTED_VERSION,
+      builtAt: this._lastIndexed.toISOString(),
+      policy: this.segmentPolicy,
+      segments: metas,
+      nodes: skeletonNodes,
+    };
+    segments.sort((a, b) => a.key.localeCompare(b.key));
+    return { skeletonBytes: Buffer.byteLength(JSON.stringify(skeleton)), segments };
+  }
+
+  /**
+   * Delete the segmented layout for `graphIndexFile`, skeleton first.
+   * Returns the number of files removed.
+   */
+  async removeSegmentedLayout(graphIndexFile: string): Promise<number> {
+    const dir = join(this.vaultPath, segmentDirFor(graphIndexFile));
+    if (this.segState?.dir === dir) this.segState = null;
+    return removeSegmentFiles(dir);
   }
 
   /**
@@ -809,6 +1147,9 @@ export class GraphIndex {
    * on every start, so a forked copy holds nothing the canonical file cannot
    * recover — it is only bloat. A candidate is removed only once it parses as a
    * graph index, so a user file that merely shares the name is left alone.
+   *
+   * With a segmented layout in use, stray files in its directory — superseded
+   * segments, temp files, conflict copies of the skeleton — are cleared too.
    */
   async removeConflictCopies(graphIndexFile: string): Promise<number> {
     const copies = await findConflictCopies(join(this.vaultPath, graphIndexFile));
@@ -825,13 +1166,85 @@ export class GraphIndex {
     if (removed > 0) {
       console.error(`[OIL] Removed ${removed} sync-conflict cop${removed === 1 ? "y" : "ies"} of the graph index.`);
     }
+    const seg = this.segState;
+    if (seg && seg.dir === join(this.vaultPath, segmentDirFor(graphIndexFile))) {
+      // Only while the skeleton on disk is the one `seg` describes: after
+      // another process has saved, files it references would look like strays.
+      if (seg.stamp !== null && (await skeletonStamp(seg.dir)) === seg.stamp) {
+        const referenced = new Set([...seg.segments.values()].map((meta) => meta.file));
+        await sweepSegmentDir(seg.dir, referenced);
+      }
+    }
     return removed;
   }
 
   /**
-   * Load the graph index from disk. Returns true if loaded successfully.
+   * Replace the in-memory index with persisted nodes.
+   *
+   * Titles are indexed last-wins in the given order, exactly as the single
+   * file has always loaded, so both layouts resolve an ambiguous name alike.
    */
-  async loadFromDisk(graphIndexFile: string): Promise<boolean> {
+  private hydrateFrom(nodes: readonly PersistedGraphNode[], builtAt: string, layout: PersistedLayout): void {
+    this._version++;
+    this.nodes.clear();
+    this.tagIndex.clear();
+    this.titleIndex.clear();
+    this.aliasIndex.clear();
+    this.rawOutLinks.clear();
+    this.fileMtimes.clear();
+    this.resetMutationLog();
+
+    for (const pn of nodes) {
+      // Re-normalize: an index saved by an older release may hold targets
+      // the current parser no longer produces (e.g. a table link's `\`).
+      const rawLinks = Array.isArray(pn.rawOutLinks)
+        ? [...new Set(pn.rawOutLinks.map(normalizeWikilinkTarget).filter(Boolean))]
+        : pn.rawOutLinks;
+      const node: GraphNode = {
+        path: pn.path,
+        title: pn.title,
+        tags: pn.tags,
+        headings: pn.headings ?? [],
+        bodySnippet: pn.bodySnippet ?? "",
+        frontmatter: pn.frontmatter,
+        outLinks: new Set(rawLinks), // Will be resolved below
+        inLinks: new Set(),
+      };
+
+      this.nodes.set(pn.path, node);
+      this.rawOutLinks.set(pn.path, rawLinks);
+      this.fileMtimes.set(pn.path, pn.lastModified);
+      this.titleIndex.set(pn.title.toLowerCase(), pn.path);
+      const fileName = basename(pn.path, extname(pn.path));
+      this.titleIndex.set(fileName.toLowerCase(), pn.path);
+      this.indexAliases(pn.path, pn.frontmatter as Record<string, unknown>);
+
+      for (const tag of pn.tags) {
+        let paths = this.tagIndex.get(tag);
+        if (!paths) {
+          paths = new Set();
+          this.tagIndex.set(tag, paths);
+        }
+        paths.add(pn.path);
+      }
+    }
+
+    // Resolve wikilinks → paths and compute backlinks
+    this.resolveLinks();
+    this.orphanedNames.clear();
+    this.orphanedAliases.clear();
+    this._namesDirty = false;
+
+    this.unsavedPaths.clear();
+    this._needsRewrite = false;
+    this.segState = null;
+    this._segmentHealth = null;
+    this._loadedLayout = layout;
+    this._lastIndexed = new Date(builtAt);
+  }
+
+  /** Load the single `_oil-graph.json` (v1/v2). */
+  private async loadSingle(graphIndexFile: string): Promise<LoadStatus> {
     try {
       const fullPath = join(this.vaultPath, graphIndexFile);
       const raw = await readFile(fullPath, "utf-8");
@@ -839,77 +1252,27 @@ export class GraphIndex {
 
       if (data.version !== 1 && data.version !== 2) {
         console.error("[OIL] Graph index version mismatch, will rebuild.");
-        return false;
+        return "invalid";
       }
 
       // Validate persisted shape before trusting it
       if (!Array.isArray(data.nodes)) {
         console.error("[OIL] Graph index corrupt: nodes is not an array, will rebuild.");
-        return false;
+        return "invalid";
       }
       for (const pn of data.nodes) {
         if (typeof pn.path !== "string" || typeof pn.title !== "string" || !Array.isArray(pn.tags)) {
           console.error("[OIL] Graph index corrupt: invalid node shape, will rebuild.");
-          return false;
+          return "invalid";
         }
       }
 
-      this._version++;
-      this.nodes.clear();
-      this.tagIndex.clear();
-      this.titleIndex.clear();
-      this.aliasIndex.clear();
-      this.rawOutLinks.clear();
-      this.fileMtimes.clear();
-      this.resetMutationLog();
-
-      for (const pn of data.nodes) {
-        // Re-normalize: an index saved by an older release may hold targets
-        // the current parser no longer produces (e.g. a table link's `\`).
-        const rawLinks = Array.isArray(pn.rawOutLinks)
-          ? [...new Set(pn.rawOutLinks.map(normalizeWikilinkTarget).filter(Boolean))]
-          : pn.rawOutLinks;
-        const node: GraphNode = {
-          path: pn.path,
-          title: pn.title,
-          tags: pn.tags,
-          headings: pn.headings ?? [],
-          bodySnippet: pn.bodySnippet ?? "",
-          frontmatter: pn.frontmatter,
-          outLinks: new Set(rawLinks), // Will be resolved below
-          inLinks: new Set(),
-        };
-
-        this.nodes.set(pn.path, node);
-        this.rawOutLinks.set(pn.path, rawLinks);
-        this.fileMtimes.set(pn.path, pn.lastModified);
-        this.titleIndex.set(pn.title.toLowerCase(), pn.path);
-        const fileName = basename(pn.path, extname(pn.path));
-        this.titleIndex.set(fileName.toLowerCase(), pn.path);
-        this.indexAliases(pn.path, pn.frontmatter as Record<string, unknown>);
-
-        for (const tag of pn.tags) {
-          let paths = this.tagIndex.get(tag);
-          if (!paths) {
-            paths = new Set();
-            this.tagIndex.set(tag, paths);
-          }
-          paths.add(pn.path);
-        }
-      }
-
-      // Resolve wikilinks → paths and compute backlinks
-      this.resolveLinks();
-      this.orphanedNames.clear();
-      this.orphanedAliases.clear();
-      this._namesDirty = false;
-
-      this._lastIndexed = new Date(data.builtAt);
+      this.hydrateFrom(data.nodes, data.builtAt, "single");
       console.error(`[OIL] Graph index loaded from disk: ${this.nodes.size} nodes.`);
       // Startup is the reliable moment to clear temp files from a killed save;
       // a read-only session may never write.
       await sweepStaleTemps(fullPath);
-      return true;
+      return "ok";
     } catch (err) {
       // A missing index is the normal first-run case; anything else is a
       // silent downgrade to a full rebuild and worth naming.
@@ -922,13 +1285,136 @@ export class GraphIndex {
       // vocabulary with them — enough to convince a reader the case logged
       // nothing at all.
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        console.error(
-          `[OIL] Graph index corrupt or unreadable (${code ?? (err as Error).message}) — will rebuild.`,
-        );
-      }
-      return false;
+      if (code === "ENOENT") return "missing";
+      console.error(
+        `[OIL] Graph index corrupt or unreadable (${code ?? (err as Error).message}) — will rebuild.`,
+      );
+      return "invalid";
     }
+  }
+
+  /**
+   * Load a segmented index: the skeleton, then every segment it names.
+   *
+   * A segment that cannot be read does not fail the load. Its notes come back
+   * from the skeleton alone — title, tags, links and aliases intact, body and
+   * headings empty — with mtime 0, so the next revalidation re-reads them from
+   * the vault and the next save rewrites the segment.
+   */
+  private async loadSegmented(graphIndexFile: string): Promise<LoadStatus> {
+    const dir = join(this.vaultPath, segmentDirFor(graphIndexFile));
+    // Stamped before reading: if the skeleton is replaced in between, the
+    // stamp is the older one, so the next save rewrites in full rather than
+    // trusting a state that describes neither.
+    const stamp = await skeletonStamp(dir);
+    const result = await readSkeleton(dir);
+    if (result.status === "missing") return "missing";
+    if (result.status === "invalid") {
+      console.error(`[OIL] Graph index corrupt (segmented skeleton: ${result.reason}) — will rebuild.`);
+      return "invalid";
+    }
+    const skeleton = result.skeleton;
+
+    const keys = Object.keys(skeleton.segments);
+    const loaded = await mapWithConcurrency(keys, SEGMENT_IO_CONCURRENCY, (key) =>
+      readSegment(dir, key, skeleton.segments[key]),
+    );
+    const contents = new Map<string, Map<string, SegmentNote>>();
+    const damaged = new Set<string>();
+    keys.forEach((key, i) => {
+      const notes = loaded[i];
+      if (notes) contents.set(key, new Map(notes.map((note) => [note.path, note])));
+      else damaged.add(key);
+    });
+
+    let recovered = 0;
+    const nodes: PersistedGraphNode[] = skeleton.nodes.map((sk) => {
+      const full = contents.get(sk.segment)?.get(sk.path);
+      if (!full) {
+        recovered++;
+        damaged.add(sk.segment);
+        return {
+          path: sk.path,
+          title: sk.title,
+          tags: sk.tags,
+          headings: [],
+          bodySnippet: "",
+          frontmatter: sk.frontmatter,
+          rawOutLinks: sk.rawOutLinks,
+          lastModified: 0,
+        };
+      }
+      return {
+        path: sk.path,
+        title: sk.title,
+        tags: sk.tags,
+        headings: full.headings,
+        bodySnippet: full.bodySnippet,
+        frontmatter: full.frontmatter,
+        rawOutLinks: sk.rawOutLinks,
+        lastModified: sk.lastModified,
+      };
+    });
+
+    this.hydrateFrom(nodes, skeleton.builtAt, "segmented");
+    const policyJson = JSON.stringify(skeleton.policy);
+    this.segState = {
+      dir,
+      stamp,
+      policyJson,
+      keyOf: new Map(skeleton.nodes.map((sk) => [sk.path, sk.segment])),
+      segments: new Map(Object.entries(skeleton.segments)),
+      forceDirty: new Set(damaged),
+    };
+    this._segmentHealth = {
+      segments: keys.length,
+      damagedSegments: [...damaged].sort(),
+      recoveredNotes: recovered,
+    };
+    // Damage is repaired, and a changed grouping policy applied, by the next save.
+    if (damaged.size > 0 || policyJson !== JSON.stringify(this.segmentPolicy)) this._needsRewrite = true;
+
+    console.error(
+      `[OIL] Graph index loaded from disk: ${this.nodes.size} nodes (segmented, ${keys.length} segments).`,
+    );
+    if (damaged.size > 0) {
+      console.error(
+        `[OIL] Graph index: ${damaged.size} segment(s) damaged — ${recovered} note(s) will be re-read from the vault.`,
+      );
+    }
+    await sweepSegmentDir(dir, new Set(), { tempsOnly: true });
+    return "ok";
+  }
+
+  /**
+   * Load the graph index from disk. Returns true if loaded successfully.
+   *
+   * Prefers the segmented layout and falls back to the single file (the other
+   * way round when configured for "single"). Loading anything other than the
+   * configured layout, or falling back past a damaged one, marks the index
+   * dirty so the next save converts or repairs it.
+   */
+  async loadFromDisk(graphIndexFile: string): Promise<boolean> {
+    const order: PersistedLayout[] = this.layout === "single" ? ["single", "segmented"] : ["segmented", "single"];
+    let fellBack = false;
+    for (const which of order) {
+      const status = await this.loadOne(graphIndexFile, which);
+      if (status === "ok") {
+        if (fellBack || (this.layout !== "auto" && this.layout !== which)) this._needsRewrite = true;
+        return true;
+      }
+      if (status === "invalid") fellBack = true;
+    }
+    return false;
+  }
+
+  /** Load one specific layout, ignoring the other. Returns true if loaded. */
+  async loadLayout(graphIndexFile: string, which: PersistedLayout): Promise<boolean> {
+    return (await this.loadOne(graphIndexFile, which)) === "ok";
+  }
+
+  private loadOne(graphIndexFile: string, which: PersistedLayout): Promise<LoadStatus> {
+    return which === "segmented" ? this.loadSegmented(graphIndexFile) : this.loadSingle(graphIndexFile);
   }
 
   /**
@@ -1034,7 +1520,13 @@ export class GraphIndex {
         console.error(`[OIL] Incremental rebuild: ${reindexed} note(s) updated.`);
       } else {
         console.error("[OIL] Graph index up to date — no changes detected.");
-        await this.removeConflictCopies(graphIndexFile);
+        if (this._needsRewrite) {
+          // Loaded past a damaged layout, or from a layout other than the
+          // configured one: nothing changed in the vault, but disk wants fixing.
+          await this.saveToDisk(graphIndexFile);
+        } else {
+          await this.removeConflictCopies(graphIndexFile);
+        }
       }
 
       return reindexed;

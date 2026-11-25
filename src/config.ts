@@ -6,11 +6,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { GRAPH_LAYOUTS } from "./graph-segments.js";
 import type {
   ArchiveConfig,
   ArchiveRule,
   ConfigProvenance,
   ConfigSource,
+  GraphLayout,
   OilConfig,
   SemanticProvenance,
 } from "./types.js";
@@ -53,6 +55,7 @@ const DEFAULTS: OilConfig = {
   },
   search: {
     graphIndexFile: "_oil-graph.json",
+    graphLayout: "auto",
     backgroundIndexThresholdMs: 3000,
     excludeFolders: [],
   },
@@ -397,6 +400,7 @@ function remapYaml(raw: Record<string, unknown>): Record<string, unknown> {
     accountid_field: "accountidField",
     title_field: "titleField",
     graph_index_file: "graphIndexFile",
+    graph_layout: "graphLayout",
     background_index_threshold_ms: "backgroundIndexThresholdMs",
     exclude_folders: "excludeFolders",
     index_file: "indexFile",
@@ -466,8 +470,29 @@ export function applyEnvOverrides(
       .map((folder) => folder.trim())
       .filter(Boolean);
   }
+  search.graphLayout = resolveGraphLayout(search.graphLayout, env.OIL_GRAPH_LAYOUT);
 
   return { ...config, search, semantic, provenance: { semantic: semanticSources } };
+}
+
+/**
+ * The graph layout from the environment, else the YAML, else "auto". An
+ * unrecognised value is named and ignored: falling back to "auto" keeps
+ * whatever the vault already has, which is never the wrong thing to load.
+ */
+function resolveGraphLayout(fromYaml: unknown, fromEnv: string | undefined): GraphLayout {
+  if (fromEnv !== undefined && fromEnv.trim() !== "") {
+    const value = fromEnv.trim().toLowerCase();
+    if ((GRAPH_LAYOUTS as readonly string[]).includes(value)) return value as GraphLayout;
+    console.error(`[OIL] Config: ignoring OIL_GRAPH_LAYOUT='${fromEnv}' — expected ${GRAPH_LAYOUTS.join(", ")}.`);
+  }
+  if (fromYaml === undefined || fromYaml === null || fromYaml === "auto") return "auto";
+  const value = typeof fromYaml === "string" ? fromYaml.trim().toLowerCase() : "";
+  if ((GRAPH_LAYOUTS as readonly string[]).includes(value)) return value as GraphLayout;
+  console.error(
+    `[OIL] Config: ignoring search.graph_layout '${String(fromYaml)}' — expected ${GRAPH_LAYOUTS.join(", ")}.`,
+  );
+  return "auto";
 }
 
 /** Accepts the spellings people actually type, and warns rather than guessing. */

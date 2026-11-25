@@ -7,6 +7,7 @@
 
 import { loadConfig } from "./config.js";
 import { GraphIndex } from "./graph.js";
+import { graphOptionsFor } from "./graph-segments.js";
 import { applyArchive, applyArchivePolicy, planArchive, restoreArchived } from "./archive.js";
 
 export interface ArchiveCliArgs {
@@ -26,7 +27,7 @@ export async function runArchiveCli(args: ArchiveCliArgs): Promise<number> {
 
   const config = await loadConfig(vaultPath);
   applyArchivePolicy(config);
-  const graph = new GraphIndex(vaultPath);
+  const graph = new GraphIndex(vaultPath, graphOptionsFor(config));
   const graphFile = config.search.graphIndexFile;
   // Reuse the server's persisted index when there is one; rules judge by it.
   if (await graph.loadFromDisk(graphFile)) await graph.buildIncremental(graphFile);

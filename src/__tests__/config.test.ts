@@ -2,7 +2,7 @@
  * Tests for config.ts — defaults, snake_case remapping, legacy key aliases,
  * and the environment overrides an MCP client uses to configure a connection.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import {
   loadConfig,
   applyEnvOverrides,
@@ -170,6 +170,39 @@ describe("loadConfig — environment precedence", () => {
     } finally {
       delete process.env.OIL_SEMANTIC;
     }
+  });
+});
+
+describe("graph layout", () => {
+  const withLayout = (graphLayout: unknown) =>
+    ({ ...DEFAULT_CONFIG, search: { ...DEFAULT_CONFIG.search, graphLayout } }) as typeof DEFAULT_CONFIG;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.OIL_GRAPH_LAYOUT;
+  });
+
+  it("reads search.graph_layout and keeps the other search defaults", async () => {
+    const root = await vaultWithConfig("layout-yaml", "search:\n  graph_layout: segmented\n");
+    const config = await loadConfig(root);
+    expect(config.search.graphLayout).toBe("segmented");
+    expect(config.search.graphIndexFile).toBe(DEFAULT_CONFIG.search.graphIndexFile);
+  });
+
+  it("lets OIL_GRAPH_LAYOUT win over the yaml, in any case", async () => {
+    const root = await vaultWithConfig("layout-env", "search:\n  graph_layout: segmented\n");
+    process.env.OIL_GRAPH_LAYOUT = " Single ";
+    expect((await loadConfig(root)).search.graphLayout).toBe("single");
+  });
+
+  it("names and ignores a value it does not know", () => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A bad variable falls through to the yaml; a bad yaml value to "auto".
+    expect(applyEnvOverrides(withLayout("segmented"), { OIL_GRAPH_LAYOUT: "sharded" }).search.graphLayout).toBe(
+      "segmented",
+    );
+    expect(applyEnvOverrides(withLayout("sharded"), {}).search.graphLayout).toBe("auto");
+    expect(warn.mock.calls.map((args) => String(args[0])).join("\n")).toMatch(/OIL_GRAPH_LAYOUT='sharded'[\s\S]*'sharded'/);
   });
 });
 
