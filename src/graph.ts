@@ -295,6 +295,13 @@ export class GraphIndex {
   private unsavedPaths = new Set<string>();
   /** Set when what is on disk is damaged or superseded and wants rewriting. */
   private _needsRewrite = false;
+  /**
+   * Saves run one at a time. A save takes the pending set before it writes, so
+   * two overlapping saves would each see only part of it — and a segmented save
+   * could unlink a segment file the other one's skeleton still references.
+   */
+  private saveTail: Promise<void> = Promise.resolve();
+  private savesInFlight = 0;
 
   private readonly layout: GraphLayout;
   private readonly segmentPolicy: SegmentPolicy;
@@ -347,7 +354,8 @@ export class GraphIndex {
    * so callers save on the way out rather than discarding it.
    */
   get dirty(): boolean {
-    return this.unsavedPaths.size > 0 || this._needsRewrite;
+    // A save in flight has taken the pending set but not landed yet.
+    return this.unsavedPaths.size > 0 || this._needsRewrite || this.savesInFlight > 0;
   }
 
   /** The layout the index was last loaded from; null when built from the notes. */
@@ -367,6 +375,9 @@ export class GraphIndex {
 
   /** Persist only if there is something to persist. */
   async flush(graphIndexFile: string): Promise<boolean> {
+    // Let a background save land first: it may cover everything, and returning
+    // before it does would let a shutdown exit with the index half-written.
+    while (this.savesInFlight > 0) await this.saveTail;
     if (!this.dirty) return false;
     await this.saveToDisk(graphIndexFile);
     return true;
@@ -910,6 +921,17 @@ export class GraphIndex {
    * server follows a migration or a rollback made by another process.
    */
   async saveToDisk(graphIndexFile: string, options: { layout?: PersistedLayout } = {}): Promise<void> {
+    this.savesInFlight++;
+    const run = this.saveTail.then(() => this.saveNow(graphIndexFile, options));
+    this.saveTail = run.catch(() => {});
+    try {
+      await run;
+    } finally {
+      this.savesInFlight--;
+    }
+  }
+
+  private async saveNow(graphIndexFile: string, options: { layout?: PersistedLayout }): Promise<void> {
     const explicit = options.layout ?? (this.layout === "auto" ? undefined : this.layout);
     const layout = explicit ?? (await this.layoutOnDisk(graphIndexFile));
     if (layout === "segmented") {
