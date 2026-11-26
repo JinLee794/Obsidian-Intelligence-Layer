@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in segmented graph index, and `migrate-graph` to move to it.** The
+  single `_oil-graph.json` is rewritten whole on every save. The segmented
+  layout (`.oil-graph/`) keeps a small skeleton plus one file per folder slice,
+  so a save rewrites only the segments that changed. In the benchmark prototype,
+  a one-note edit wrote 0.9 MB instead of 7.4 MB at 1.4k notes and 4.1 MB
+  instead of 39 MB at 7.6k, with identical links, backlinks and top-10 search
+  results (`bench/sharding/REPORT.md`). `search.graph_layout` /
+  `OIL_GRAPH_LAYOUT` selects `auto` (default: keep what the vault has),
+  `single` or `segmented`. `migrate-graph` previews by default; `--apply`
+  migrates, checks parity and undoes on mismatch, keeping
+  `_oil-graph.v2-backup.json`; `--verify` and `--rollback` check and revert.
+
 ## [0.9.5] - 2026-10-29
 
 ### Changed

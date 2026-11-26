@@ -450,6 +450,7 @@ frontmatter_schema:
 # Search and indexing
 search:
   graph_index_file: "_oil-graph.json"         # Persisted link graph
+  graph_layout: auto                          # auto | single | segmented (see "Graph index layout")
   background_index_threshold_ms: 3000         # Background rebuild threshold (ms)
   exclude_folders:                            # Kept out of search results
     - "_agent-log/"
@@ -571,6 +572,51 @@ obsidian-intelligence-layer restore --run=20260510-120000-ab12 --vault=...
 Add `--json` for machine-readable output. From an agent, the `manage_archive`
 tool does the same: `plan`, `apply` and `restore`.
 
+### Graph index layout
+
+By default the graph index is one file, `_oil-graph.json`, and every save
+rewrites all of it: one edited note costs a full serialization of the vault.
+The opt-in **segmented** layout keeps a small skeleton (titles, aliases, tags,
+links, mtimes and a few routing fields) plus one segment file per folder slice
+for the bulky fields. People are split by initial, Meetings and Daily notes by
+year, Customers by hub folder, and other top-level folders stay whole. A save
+rewrites only the segments whose notes changed, then the skeleton. Link
+resolution and backlinks stay vault-wide and exact, and the whole index is
+still loaded at startup.
+
+On synthetic vaults, a one-note edit wrote 0.9 MB instead of 7.4 MB at 1.4k
+notes, and 4.1 MB instead of 39 MB at 7.6k notes. Method and caveats:
+[`bench/sharding/REPORT.md`](bench/sharding/REPORT.md).
+
+`search.graph_layout` (or `OIL_GRAPH_LAYOUT`) chooses the layout: `auto` (the
+default) keeps whatever the vault already has, `single` and `segmented` convert
+on the next save. Existing vaults stay on the single file until you migrate
+them:
+
+```bash
+obsidian-intelligence-layer migrate-graph --vault=/path/to/vault             # preview; writes nothing
+obsidian-intelligence-layer migrate-graph --apply --vault=/path/to/vault     # migrate
+obsidian-intelligence-layer migrate-graph --verify --vault=/path/to/vault    # compare with a fresh build
+obsidian-intelligence-layer migrate-graph --rollback --vault=/path/to/vault  # back to the single file
+```
+
+- `--apply` writes `.oil-graph/` next to `_oil-graph.json`, reloads it and
+  checks every note and link against the source. On a mismatch it undoes the
+  migration. The old file is kept as `_oil-graph.v2-backup.json`;
+  `--keep-legacy` leaves it in place instead, and `--rebuild` re-indexes the
+  notes rather than converting the existing index.
+- `--verify` reports segments that are damaged and notes the index is behind
+  on. A damaged segment is never fatal: its notes are re-read from the vault on
+  the next start.
+- `--rollback` rebuilds `_oil-graph.json` from the segments, else the single
+  file, else the backup, checks it, and removes `.oil-graph/`.
+- The command takes the same lock as OIL's startup indexing, so it cannot
+  interleave with a server that is starting. A server already running under
+  `auto` follows the change on its next save.
+
+Add `--json` for machine-readable output. The command exits non-zero when
+migration or verification fails.
+
 ---
 
 ## Project Structure
@@ -586,6 +632,8 @@ src/
 ├── validation.ts     # Input validation — path safety, GUID format, ISO dates
 ├── vault.ts          # Filesystem read layer — note parsing, frontmatter, sections, wikilinks
 ├── graph.ts          # GraphIndex — bidirectional link graph, tag index, N-hop traversal
+├── graph-segments.ts # Segmented graph persistence — skeleton + segment files, segment policy
+├── graph-migrate.ts  # migrate-graph — preview, apply, verify, rollback between layouts
 ├── cache.ts          # SessionCache — LRU note cache (200 notes, 5min TTL)
 ├── watcher.ts        # VaultWatcher — chokidar file watcher, invalidates caches on change
 ├── gate.ts           # Write execution — appendToSection, executeWrite, audit logging
